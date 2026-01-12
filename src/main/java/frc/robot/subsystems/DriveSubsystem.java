@@ -10,6 +10,10 @@ import edu.wpi.first.hal.FRCNetComm.tResourceType;
 import com.ctre.phoenix6.StatusSignal;
 import com.ctre.phoenix6.configs.Pigeon2Configuration;
 import com.ctre.phoenix6.hardware.Pigeon2;
+import com.pathplanner.lib.auto.AutoBuilder;
+import com.pathplanner.lib.config.PIDConstants;
+import com.pathplanner.lib.config.RobotConfig;
+import com.pathplanner.lib.controllers.PPHolonomicDriveController;
 
 import edu.wpi.first.hal.HAL;
 import edu.wpi.first.math.geometry.Pose2d;
@@ -20,6 +24,7 @@ import edu.wpi.first.math.kinematics.SwerveDriveOdometry;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
 import edu.wpi.first.units.measure.AngularVelocity;
+import edu.wpi.first.wpilibj.DriverStation;
 import frc.robot.Constants.DriveConstants;
 import frc.robot.Constants.GyroConstants;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
@@ -67,6 +72,33 @@ public class DriveSubsystem extends SubsystemBase {
     HAL.report(tResourceType.kResourceType_RobotDrive, tInstances.kRobotDriveSwerve_MaxSwerve);
 
     gyro_config.MountPose.MountPoseYaw = GyroConstants.YAW_OFFSET;
+
+
+    RobotConfig config;
+    try{
+      config = RobotConfig.fromGUISettings();
+
+      AutoBuilder.configure(
+      this::getPose,
+      this::resetOdometry,
+      this::getRobotRelativeSpeeds,
+      (speeds, feedfowards) -> driveRobotRelative(speeds),
+      new PPHolonomicDriveController(
+        new PIDConstants(5.0, 0.0, 0.0),
+        new PIDConstants(5.0, 0.0, 0.0)),
+      config,
+      () -> {
+            var allience = DriverStation.getAlliance();
+            if(allience.isPresent()) {
+              return allience.get() == DriverStation.Alliance.Red;
+            }
+            return false;
+            },
+        this
+      );
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
   }
 
   @Override
@@ -128,21 +160,36 @@ public class DriveSubsystem extends SubsystemBase {
             ? ChassisSpeeds.fromFieldRelativeSpeeds(xSpeedDelivered, ySpeedDelivered, rotDelivered,
                 m_gyro.getRotation2d())
             : new ChassisSpeeds(xSpeedDelivered, ySpeedDelivered, rotDelivered));
-    SwerveDriveKinematics.desaturateWheelSpeeds(
-        swerveModuleStates, DriveConstants.kMaxSpeedMetersPerSecond);
+    SwerveDriveKinematics.desaturateWheelSpeeds(swerveModuleStates, DriveConstants.kMaxSpeedMetersPerSecond);
     m_frontLeft.setDesiredState(swerveModuleStates[0]);
     m_frontRight.setDesiredState(swerveModuleStates[1]);
     m_rearLeft.setDesiredState(swerveModuleStates[2]);
     m_rearRight.setDesiredState(swerveModuleStates[3]);
   }
 
+  /**
+   * Drive the robot with just a {@code ChassisSpeeds} object.
+   * @param chassisSpeeds
+   */
   public void driveRobotRelative(ChassisSpeeds chassisSpeeds) {
-    var swerveModuleStates = DriveConstants.kDriveKinematics.toSwerveModuleStates(chassisSpeeds);
+    SwerveModuleState[] swerveModuleStates = DriveConstants.kDriveKinematics.toSwerveModuleStates(chassisSpeeds);
     setModuleStates(swerveModuleStates);
   }
 
+  /**
+     * Use for driving with limelight
+     *
+     * @param forward  The desired forward speed, in m/s. Forward is positive.
+     * @param strafe   The desired strafe speed, in m/s. Left is positive.
+     * @param rotation The desired rotation speed, in rad/s. Counter clockwise is
+     *                 positive
+     */
+    public void driveRobotRelative(double forward, double strafe, double rotation) {
+        driveRobotRelative(new ChassisSpeeds(forward, strafe, rotation));
+    }
+
   public void stop() {
-    driveRobotRelative(new ChassisSpeeds(0.0, 0.0, 0.0));
+    driveRobotRelative(0.0, 0.0, 0.0);
   }
 
   /**
@@ -199,4 +246,24 @@ public class DriveSubsystem extends SubsystemBase {
   public StatusSignal<AngularVelocity> getTurnRate() {
     return m_gyro.getAngularVelocityZWorld();
   }
+
+  /*
+   * 
+   * Utils
+   * 
+   */
+
+   private ChassisSpeeds getRobotRelativeSpeeds() {
+    return DriveConstants.kDriveKinematics.toChassisSpeeds(getModuleStates());
+  }
+
+  private SwerveModuleState[] getModuleStates() {
+    return new SwerveModuleState[] {
+            m_frontLeft.getState(),
+            m_frontRight.getState(),
+            m_rearLeft.getState(),
+            m_rearRight.getState()
+    };
+  }
+
 }

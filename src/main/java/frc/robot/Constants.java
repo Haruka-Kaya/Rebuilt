@@ -82,6 +82,8 @@ public final class Constants {
     public static final double kDriveDeadband = 0.05;
 
     public static final int kOperatorControllerPort = 1;
+
+    public static final int kMaintenanceControllerPort = 2;
   }
 
   public static final class AutoConstants {
@@ -113,10 +115,10 @@ public final class Constants {
     public static final int INTAKE_BELT_CAN_ID = 12;
 
     // Motor speeds from -1 to +1
-    public static final double INTAKE_ROLLER_IN_SPEED = 1;
-    public static final double INTAKE_BELT_IN_SPEED = 1;
-    public static final double INTAKE_ROLLER_OUT_SPEED = -1;
-    public static final double INTAKE_BELT_OUT_SPEED = -1;
+    public static final double INTAKE_ROLLER_IN_SPEED = 0.25;
+    public static final double INTAKE_BELT_IN_SPEED = 0.25;
+    public static final double INTAKE_ROLLER_OUT_SPEED = -0.25;
+    public static final double INTAKE_BELT_OUT_SPEED = -0.25;
   }
 
   public static final class ManipulatorConstants {
@@ -124,7 +126,25 @@ public final class Constants {
     public static final int FEEDER_TUBE_CAN_ID = 14;
 
     // Motor speeds from -1 to +1
-    public static final double FEEDER_BELT_SPEED = 1;
-    public static final double FEEDER_TUBE_SPEED = 1;
+    public static final double FEEDER_BELT_SPEED = 0.25;
+    public static final double FEEDER_TUBE_SPEED = 0.25;
+  }
+
+  public static final class ClimberConstants {
+    public static final int LEFT_STINGER_CAN_ID = 15;
+    public static final int RIGHT_STINGER_CAN_ID = 16;
+
+    public static final double distanceToFirstRung = 0;
+    public static final double distanceToNextRung = 0;
+  }
+
+  public static final class ShooterConstants {
+    public static final int SHOOTER_CAN_ID = 17;
+
+  }
+
+  public static final class LimelightConstants {
+    public static final double MOUNT_ANGLE_DEG = 0.0;
+    public static final double HEIGHT_METERS = 0.0;
   }
 }

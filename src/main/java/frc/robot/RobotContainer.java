@@ -9,6 +9,7 @@ import edu.wpi.first.wpilibj.PS5Controller;
 import edu.wpi.first.wpilibj.PS5Controller.Button;
 import frc.robot.Constants.OIConstants;
 import frc.robot.commands.AlignmentCommand;
+import frc.robot.commands.IntakeCommand;
 import frc.robot.subsystems.DriveSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
 import edu.wpi.first.wpilibj2.command.Command;
@@ -24,7 +25,7 @@ import edu.wpi.first.wpilibj2.command.button.JoystickButton;
  */
 public class RobotContainer {
   // The driver's controller
-  PS5Controller m_driverController = new PS5Controller(OIConstants.kDriverControllerPort);
+  private final PS5Controller m_driverController = new PS5Controller(OIConstants.kDriverControllerPort);
   PS5Controller m_operatorController = new PS5Controller(OIConstants.kOperatorControllerPort);
 
   // The robot's subsystems
@@ -32,7 +33,9 @@ public class RobotContainer {
   private final IntakeSubsystem m_intake = new IntakeSubsystem();
 
   // The robot's commands
-  private final AlignmentCommand testAlign = new AlignmentCommand(m_robotDrive, m_driverController, 20, 20);
+  private final AlignmentCommand testAlign = new AlignmentCommand(m_robotDrive, 1);
+  private final IntakeCommand slurp = new IntakeCommand(true, m_intake);
+  private final IntakeCommand spit = new IntakeCommand(false, m_intake);
 
   /**
    * The container for the robot. Contains subsystems, OI devices, and commands.
@@ -78,20 +81,10 @@ public class RobotContainer {
         .whileTrue(testAlign);
 
     new JoystickButton(m_operatorController, Button.kL1.value)
-        .whileTrue(new RunCommand(
-            () -> m_intake.runIntake(true),
-            m_intake))
-        .whileFalse(new RunCommand(
-            () -> m_intake.stop(),
-            m_intake));
+        .whileTrue(slurp);
 
     new JoystickButton(m_operatorController, Button.kR1.value)
-        .whileTrue(new RunCommand(
-            () -> m_intake.runIntake(false),
-            m_intake))
-        .whileFalse(new RunCommand(
-            () -> m_intake.stop(),
-            m_intake));
+        .whileTrue(spit);
   }
 
   /**

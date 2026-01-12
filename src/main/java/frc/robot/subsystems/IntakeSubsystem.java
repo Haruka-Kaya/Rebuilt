@@ -13,18 +13,18 @@ public class IntakeSubsystem extends SubsystemBase {
 
     }
 
-    public void slurp() {
+    private void slurp() {
         m_intakeRoller.set(IntakeConstants.INTAKE_ROLLER_IN_SPEED);
         m_intakeBelt.set(IntakeConstants.INTAKE_BELT_IN_SPEED);
     }
 
-    public void spit() {
+    private void spit() {
         m_intakeRoller.set(IntakeConstants.INTAKE_ROLLER_OUT_SPEED);
         m_intakeBelt.set(IntakeConstants.INTAKE_BELT_OUT_SPEED);
     }
 
-    public void runIntake(boolean in) {
-        if(in)
+    public void runIntake(boolean trueForIn) {
+        if(trueForIn)
             slurp();
         else
             spit();
