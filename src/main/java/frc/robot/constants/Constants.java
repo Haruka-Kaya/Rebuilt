@@ -1,0 +1,126 @@
+// Copyright (c) FIRST and other WPILib contributors.
+// Open Source Software; you can modify and/or share it under the terms of
+// the WPILib BSD license file in the root directory of this project.
+
+package frc.robot.constants;
+
+import edu.wpi.first.math.Matrix;
+import edu.wpi.first.math.VecBuilder;
+import edu.wpi.first.math.numbers.N1;
+import edu.wpi.first.math.numbers.N3;
+import edu.wpi.first.math.trajectory.TrapezoidProfile;
+
+/**
+ * The Constants class provides a convenient place for teams to hold robot-wide
+ * numerical or boolean
+ * constants. This class should not be used for any other purpose. All constants
+ * should be declared
+ * globally (i.e. public static). Do not put anything functional in this class.
+ *
+ * <p>
+ * It is advised to statically import this class (or one of its inner classes)
+ * wherever the
+ * constants are needed, to reduce verbosity.
+ */
+public final class Constants {
+  public static final class OIConstants {
+    public static final int kDriverControllerPort = 0;
+    public static final double kDriveDeadband = 0.05;
+
+    public static final int kOperatorControllerPort = 1;
+
+    public static final int kMaintenanceControllerPort = 2;
+  }
+
+  public static final class AutoConstants {
+    public static final double kMaxSpeedMetersPerSecond = 3;
+    public static final double kMaxAccelerationMetersPerSecondSquared = 3;
+    public static final double kMaxAngularSpeedRadiansPerSecond = Math.PI;
+    public static final double kMaxAngularSpeedRadiansPerSecondSquared = Math.PI;
+
+    public static final double kPXController = 1;
+    public static final double kPYController = 1;
+    public static final double kPThetaController = 1;
+
+    // Constraint for the motion profiled robot angle controller
+    public static final TrapezoidProfile.Constraints kThetaControllerConstraints = new TrapezoidProfile.Constraints(
+        kMaxAngularSpeedRadiansPerSecond, kMaxAngularSpeedRadiansPerSecondSquared);
+  }
+
+  public static final class NeoMotorConstants {
+    public static final double kFreeSpeedRpm = 5676;
+  }
+
+  public static final class IntakeConstants {
+    public static final int INTAKE_ACTUATOR_CAN_ID = 30;
+    public static final int INTAKE_ROLLER_CAN_ID = 31;
+
+    public static final double EXTENDED_ANGLE_DEGREES = 75;
+
+    // Motor speeds from -1 to +1
+    public static final double ROLLER_IN_SPEED = 0.75;
+    public static final double ROLLER_OUT_SPEED = -0.75;
+  }
+
+  public static final class ManipulatorConstants {
+    public static final int FEEDER_CAN_ID = 32;
+    public static final int CONVEYOR_CAN_ID = 33;
+
+    // Motor speeds from -1 to +1
+    public static final double CONVEYOR_IN_SPEED = 0.75;
+    public static final double CONVEYOR_OUT_SPEED = -0.75;
+
+    public static final double FEEDER_IN_SPEED = 0.75;
+    public static final double FEEDER_OUT_SPEED = -0.75;
+  }
+
+  public static final class ClimberConstants {
+    public static final int STINGER_CAN_ID = 34;
+
+    
+  }
+
+  public static final class ShooterConstants {
+    public static final int SHOOTER_1_CAN_ID = 35;
+    public static final int SHOOTER_2_CAN_ID = 36;
+    public static final int ACTUATOR_CAN_ID = 37;
+  }
+
+  public static final class LimelightConstants {
+    public static final String TURRET_LIMELIGHT_NAME = "TURRET_EYES";
+    public static final String DRIVE_LIMELIGHT_NAME = "DRIVE_EYES";
+
+    public static final double MOUNT_ANGLE_DEG = 0.0;
+    public static final double MOUNT_HEIGHT_METERS = 0.43;
+
+    public static final int PIPELINE_FUEL = 0;
+    public static final int PIPELINE_APRILTAG = 1;
+
+    public static final Matrix<N3, N1> VISION_STD_DEVS =
+        VecBuilder.fill(
+                0.7,                // x meters
+                0.7,                // y meters
+                Math.toRadians(10)  // theta radians
+        );
+  }
+
+  public static final class AprilTagConstants {
+    public static final int[] VALID_RED_HUB_TAG_IDS = {2, 5, 8, 9, 10, 11};
+    public static final int[] VALID_BLUE_HUB_TAG_IDS = {18, 19, 20, 21, 25, 26};
+  }
+
+  public static final class TurretConstants {
+    public static final int TURRET_CAN_ID = 38;
+
+    // Gear ratio motor : turret
+    public static final double GEAR_RATIO = 36.0;
+    
+    // Auto-aim tuning
+    public static final double AIM_DEADBAND_DEG = 0.5; // don't react to tiny offsets
+    public static final double SAFE_KP = 1.0;          // multiplier for tx -> turret degrees
+
+    // Mechanical limits — set to your real stops
+    public static final double MIN_ANGLE_DEGREES = -180.0;
+    public static final double MAX_ANGLE_DEGREES = 180.0;
+  }
+}

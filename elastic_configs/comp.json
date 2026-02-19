@@ -1,0 +1,176 @@
+{
+  "version": 1.0,
+  "grid_size": 128,
+  "tabs": [
+    {
+      "name": "Red Alliance",
+      "grid_layout": {
+        "layouts": [],
+        "containers": [
+          {
+            "title": "Rotation value",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/DriveState/Pose",
+              "period": 0.06,
+              "data_type": "double",
+              "struct_meta": {
+                "path": [
+                  "rotation",
+                  "value"
+                ],
+                "schema_name": "Pose2d",
+                "type": "double"
+              },
+              "show_submit_button": false
+            }
+          },
+          {
+            "title": "On target",
+            "x": 0.0,
+            "y": 128.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/On target",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
+            "title": "Flywheel reved up",
+            "x": 0.0,
+            "y": 256.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/Flywheel reved up",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
+            "title": "Field",
+            "x": 128.0,
+            "y": 0.0,
+            "width": 256.0,
+            "height": 640.0,
+            "type": "Field",
+            "properties": {
+              "topic": "/SmartDashboard/Field",
+              "period": 0.06,
+              "field_game": "Rebuilt",
+              "robot_width": 0.85,
+              "robot_length": 0.85,
+              "show_other_objects": true,
+              "show_trajectories": true,
+              "field_rotation": 90.0,
+              "robot_color": 4294198070,
+              "trajectory_color": 4294967295,
+              "show_robot_outside_widget": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Blue Alliance",
+      "grid_layout": {
+        "layouts": [],
+        "containers": [
+          {
+            "title": "Rotation value",
+            "x": 0.0,
+            "y": 0.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Text Display",
+            "properties": {
+              "topic": "/DriveState/Pose",
+              "period": 0.06,
+              "data_type": "double",
+              "struct_meta": {
+                "path": [
+                  "rotation",
+                  "value"
+                ],
+                "schema_name": "Pose2d",
+                "type": "double"
+              },
+              "show_submit_button": false
+            }
+          },
+          {
+            "title": "On target",
+            "x": 0.0,
+            "y": 128.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/On target",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
+            "title": "Flywheel reved up",
+            "x": 0.0,
+            "y": 256.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/Flywheel reved up",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
+            "title": "Field",
+            "x": 128.0,
+            "y": 0.0,
+            "width": 256.0,
+            "height": 640.0,
+            "type": "Field",
+            "properties": {
+              "topic": "/SmartDashboard/Field",
+              "period": 0.06,
+              "field_game": "Rebuilt",
+              "robot_width": 0.85,
+              "robot_length": 0.85,
+              "show_other_objects": true,
+              "show_trajectories": true,
+              "field_rotation": -90.0,
+              "robot_color": 4294198070,
+              "trajectory_color": 4294967295,
+              "show_robot_outside_widget": true
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

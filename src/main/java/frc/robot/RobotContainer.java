@@ -4,17 +4,27 @@
 
 package frc.robot;
 
-import edu.wpi.first.math.MathUtil;
+
 import edu.wpi.first.wpilibj.PS5Controller;
-import edu.wpi.first.wpilibj.PS5Controller.Button;
-import frc.robot.Constants.OIConstants;
-import frc.robot.commands.AlignmentCommand;
+import frc.robot.commands.FireCommand;
 import frc.robot.commands.IntakeCommand;
-import frc.robot.subsystems.DriveSubsystem;
+import frc.robot.commands.JumpBumpCommand;
+import frc.robot.commands.RevUpCommand;
+import frc.robot.commands.OutputCommand;
+import frc.robot.commands.RetractIntakeCommand;
+import frc.robot.constants.Constants.LimelightConstants;
+import frc.robot.constants.Constants.OIConstants;
+import frc.robot.containers.DriveBaseContainer;
+import frc.robot.subsystems.CommandSwerveDrivetrain;
+import frc.robot.subsystems.ConveyorSubsystem;
+import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
+import frc.robot.subsystems.ShooterSubsystem;
+import frc.robot.subsystems.TurretSubsystem;
+import frc.robot.subsystems.VisionSubsystem;
 import edu.wpi.first.wpilibj2.command.Command;
-import edu.wpi.first.wpilibj2.command.InstantCommand;
 import edu.wpi.first.wpilibj2.command.RunCommand;
+import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
 import edu.wpi.first.wpilibj2.command.button.JoystickButton;
 
 /*
@@ -25,36 +35,47 @@ import edu.wpi.first.wpilibj2.command.button.JoystickButton;
  */
 public class RobotContainer {
   // The driver's controller
-  private final PS5Controller m_driverController = new PS5Controller(OIConstants.kDriverControllerPort);
-  PS5Controller m_operatorController = new PS5Controller(OIConstants.kOperatorControllerPort);
+  private final CommandPS5Controller m_driverController = new CommandPS5Controller(OIConstants.kDriverControllerPort);
+  private final CommandPS5Controller m_operatorController = new CommandPS5Controller(OIConstants.kOperatorControllerPort);
+  private final CommandPS5Controller m_maintenanceController = new CommandPS5Controller(OIConstants.kMaintenanceControllerPort);
 
   // The robot's subsystems
-  private final DriveSubsystem m_robotDrive = new DriveSubsystem();
+  private final VisionSubsystem m_driveVision = new VisionSubsystem(LimelightConstants.DRIVE_LIMELIGHT_NAME);
+
+  private final CommandSwerveDrivetrain drivetrain;
+
   private final IntakeSubsystem m_intake = new IntakeSubsystem();
+  private final ShooterSubsystem m_shooter = new ShooterSubsystem();
+  private final TurretSubsystem m_turret = new TurretSubsystem(m_driveVision);
+  private final ConveyorSubsystem m_conveyor = new ConveyorSubsystem();
+  private final FeederSubsystem m_feeder = new FeederSubsystem();
 
   // The robot's commands
-  private final AlignmentCommand testAlign = new AlignmentCommand(m_robotDrive, 1);
-  private final IntakeCommand slurp = new IntakeCommand(true, m_intake);
-  private final IntakeCommand spit = new IntakeCommand(false, m_intake);
+  private final JumpBumpCommand jumpBump;
+
+  private final IntakeCommand slurp = new IntakeCommand(m_intake, m_conveyor);
+  private final OutputCommand spit = new OutputCommand(m_intake, m_conveyor);
+
+  private final RetractIntakeCommand back_in_shell = new RetractIntakeCommand(m_intake);
+
+  private final FireCommand fire = new FireCommand(m_feeder, m_conveyor);
+  private final RevUpCommand revWheel = new RevUpCommand(m_shooter);
+
+
+  // Something?
+  private final DriveBaseContainer m_DriveBaseContainer; 
 
   /**
    * The container for the robot. Contains subsystems, OI devices, and commands.
    */
   public RobotContainer() {
-    // Configure the button bindings
-    configureButtonBindings();
+    m_DriveBaseContainer = new DriveBaseContainer(m_driverController, m_turret, m_shooter, m_feeder, m_conveyor, m_intake);
+    drivetrain = m_DriveBaseContainer.drivetrain;
 
-    // Configure default commands
-    m_robotDrive.setDefaultCommand(
-        // The left stick controls translation of the robot.
-        // Turning is controlled by the X axis of the right stick.
-        new RunCommand(
-            () -> m_robotDrive.drive(
-                -MathUtil.applyDeadband(m_driverController.getLeftY(), OIConstants.kDriveDeadband),
-                -MathUtil.applyDeadband(m_driverController.getLeftX(), OIConstants.kDriveDeadband),
-                -MathUtil.applyDeadband(m_driverController.getRightX(), OIConstants.kDriveDeadband),
-                true),
-            m_robotDrive));
+    jumpBump = new JumpBumpCommand(drivetrain, m_driverController);
+
+    // Configure the button bindings (put this last)
+    configureButtonBindings();
   }
 
   /**
@@ -67,24 +88,25 @@ public class RobotContainer {
    * {@link JoystickButton}.
    */
   private void configureButtonBindings() {
-    new JoystickButton(m_driverController, Button.kL1.value)
-        .whileTrue(new RunCommand(
-            () -> m_robotDrive.setX(),
-            m_robotDrive));
+    // Probably change (all of) this
 
-    new JoystickButton(m_driverController, Button.kCross.value)
-        .onTrue(new InstantCommand(
-            () -> m_robotDrive.zeroHeading(),
-            m_robotDrive));
+    // Note;
+    /*
+     * Driver controls driving, intake, aiming, reving, and shooting
+     * 
+     */
 
-    new JoystickButton(m_driverController, Button.kR1.value)
-        .whileTrue(testAlign);
+    m_driverController.L1().whileTrue(slurp);
+    m_driverController.R1().whileTrue(spit);
 
-    new JoystickButton(m_operatorController, Button.kL1.value)
-        .whileTrue(slurp);
+    m_driverController.R3().whileTrue(jumpBump);
 
-    new JoystickButton(m_operatorController, Button.kR1.value)
-        .whileTrue(spit);
+    m_driverController.L2().whileTrue(revWheel);
+    m_driverController.R2().whileTrue(fire);
+
+    m_operatorController.L1().whileTrue(back_in_shell);
+
+    m_maintenanceController.L1().whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret));
   }
 
   /**
@@ -93,6 +115,13 @@ public class RobotContainer {
    * @return the command to run in autonomous
    */
   public Command getAutonomousCommand() {
-    return null;
+    return this.m_DriveBaseContainer.GetAutonCommand();
+  }
+
+  public void stopAll() {
+    m_intake.stop();
+    m_conveyor.stop();
+    m_feeder.stop();
+    m_shooter.stop();
   }
 }
