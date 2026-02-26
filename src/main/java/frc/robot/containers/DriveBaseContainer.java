@@ -45,11 +45,11 @@ public class DriveBaseContainer {
     CommandPS5Controller joystick;
     public final CommandSwerveDrivetrain drivetrain = TunerConstants.createDrivetrain();
 
-    private final TurretSubsystem m_turret;
-    private final ShooterSubsystem m_shooter;
-    private final FeederSubsystem m_feeder;
-    private final ConveyorSubsystem m_conveyor;
-    private final IntakeSubsystem m_intake;
+    // private final TurretSubsystem m_turret;
+    // private final ShooterSubsystem m_shooter;
+    // private final FeederSubsystem m_feeder;
+    // private final ConveyorSubsystem m_conveyor;
+    // private final IntakeSubsystem m_intake;
 
     public DriveBaseContainer(CommandPS5Controller driverController, TurretSubsystem turret, 
                             ShooterSubsystem shooter, FeederSubsystem feeder, 
@@ -60,11 +60,11 @@ public class DriveBaseContainer {
 
         SmartDashboard.putString("MESSAGE", "we are at autoSetup");
 
-        this.m_turret = turret;
-        this.m_shooter = shooter;
-        this.m_feeder = feeder;
-        this.m_conveyor = conveyor;
-        this.m_intake = intake;
+        // this.m_turret = turret;
+        // this.m_shooter = shooter;
+        // this.m_feeder = feeder;
+        // this.m_conveyor = conveyor;
+        // this.m_intake = intake;
 
         autoContainer = new AutoContainer(drivetrain, turret, shooter, feeder, conveyor, intake);
     }

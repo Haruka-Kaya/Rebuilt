@@ -17,18 +17,18 @@ import frc.robot.subsystems.TurretSubsystem;
 
 public class AutoContainer {
     private SendableChooser<Command> autoChooser;
-    private final CommandSwerveDrivetrain drivetrain;
+    // private final CommandSwerveDrivetrain drivetrain;
 
     private final TurretSubsystem m_turret;
     private final ShooterSubsystem m_shooter;
     private final FeederSubsystem m_feeder;
     private final ConveyorSubsystem m_conveyor;
     private final IntakeSubsystem m_intake;
-        
-    public AutoContainer(CommandSwerveDrivetrain drivetrain, TurretSubsystem turret, 
-                            ShooterSubsystem shooter, FeederSubsystem feeder, 
+
+    public AutoContainer(CommandSwerveDrivetrain drivetrain, TurretSubsystem turret,
+                            ShooterSubsystem shooter, FeederSubsystem feeder,
                             ConveyorSubsystem conveyor, IntakeSubsystem intake) {
-        this.drivetrain = drivetrain;
+        // this.drivetrain = drivetrain;
         // this.drivetrain.configureAutoBuilder();
 
         this.m_turret = turret;

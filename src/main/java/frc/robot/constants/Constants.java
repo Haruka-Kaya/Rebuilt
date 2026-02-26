@@ -75,15 +75,14 @@ public final class Constants {
   }
 
   public static final class ClimberConstants {
-    public static final int STINGER_CAN_ID = 34;
-
-    
+    public static final int LEFT_MOTOR_CAN_ID = 34;
+    public static final int RIGHT_MOTOR_CAN_ID = 35;
   }
 
   public static final class ShooterConstants {
-    public static final int SHOOTER_1_CAN_ID = 35;
-    public static final int SHOOTER_2_CAN_ID = 36;
-    public static final int ACTUATOR_CAN_ID = 37;
+    public static final int SHOOTER_1_CAN_ID = 36;
+    public static final int SHOOTER_2_CAN_ID = 37;
+    public static final int ACTUATOR_CAN_ID = 38;
   }
 
   public static final class LimelightConstants {
@@ -110,7 +109,7 @@ public final class Constants {
   }
 
   public static final class TurretConstants {
-    public static final int TURRET_CAN_ID = 38;
+    public static final int TURRET_CAN_ID = 39;
 
     // Gear ratio motor : turret
     public static final double GEAR_RATIO = 36.0;

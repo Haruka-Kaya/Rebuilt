@@ -3,6 +3,7 @@ package frc.robot;
 
 import java.util.Optional;
 
+
 import com.ctre.phoenix6.SignalLogger;
 import com.ctre.phoenix6.swerve.SwerveDrivetrain.SwerveDriveState;
 
@@ -126,6 +127,11 @@ public class Telemetry {
     }
 
     public static boolean isHubActive() {
+        if(!DriverStation.isFMSAttached()) {
+            // If we're not on the field, we have no way of knowing, assume hub is active for testing.
+            return true;
+        }
+
         Optional<Alliance> alliance = DriverStation.getAlliance();
         // If we have no alliance, we cannot be enabled, therefore no hub.
         if (alliance.isEmpty()) {
