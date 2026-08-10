@@ -45,8 +45,8 @@ public class JumpBumpCommand extends Command {
         );
 
         m_drivetrain.drive(
+            -MathUtil.applyDeadband(m_controller.getLeftY(), OIConstants.kDriveDeadband),
             -MathUtil.applyDeadband(m_controller.getLeftX(), OIConstants.kDriveDeadband),
-            -MathUtil.applyDeadband(m_controller.getLeftY(), OIConstants.kDriveDeadband), 
             rotationSpeed,
             true
         );
@@ -54,11 +54,11 @@ public class JumpBumpCommand extends Command {
 
     @Override
     public void end(boolean interrupted) {
-        
+        m_drivetrain.drive(0, 0, 0, true);
     }
 
     @Override
     public boolean isFinished() {
-        return true;
+        return false;
     }
 }

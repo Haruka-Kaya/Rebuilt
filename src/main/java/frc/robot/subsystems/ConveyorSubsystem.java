@@ -1,6 +1,7 @@
 package frc.robot.subsystems;
 
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.utils.SparkMAXContainer;
@@ -11,14 +12,15 @@ import frc.robot.utils.SparkMAXContainer;
 public class ConveyorSubsystem extends SubsystemBase {
     private final SparkMAXContainer m_feederBelt = new SparkMAXContainer(ManipulatorConstants.CONVEYOR_CAN_ID);
 
-    private double inPercent;
-    private double outPercent;
+    private double inPercent = 0.15;
+    private double outPercent = -0.15;
 
     public ConveyorSubsystem() {
         m_feederBelt.setBreakMode(false);
+        m_feederBelt.setCurrentLimit(15);
 
-        SmartDashboard.putNumber("Set conveyer in percent", 0);
-        SmartDashboard.putNumber("Set conveyer out percent", 0);
+        SmartDashboard.putNumber("Set conveyer in percent", 0.15);
+        SmartDashboard.putNumber("Set conveyer out percent", -0.15);
     }
 
     public void runConveyor() {
@@ -37,7 +39,9 @@ public class ConveyorSubsystem extends SubsystemBase {
 
     @Override
     public void periodic() {
-        inPercent = SmartDashboard.getNumber("Set conveyer in percent", 0);
-        outPercent = SmartDashboard.getNumber("Set conveyer out percent", 0);
+        inPercent = MathUtil.clamp(
+            SmartDashboard.getNumber("Set conveyer in percent", 0.15), -0.20, 0.20);
+        outPercent = MathUtil.clamp(
+            SmartDashboard.getNumber("Set conveyer out percent", -0.15), -0.20, 0.20);
     }
 }

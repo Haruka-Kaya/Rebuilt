@@ -5,6 +5,10 @@
 package frc.robot;
 
 import edu.wpi.first.wpilibj.TimedRobot;
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.RobotController;
+import edu.wpi.first.wpilibj.Timer;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 
@@ -16,8 +20,10 @@ import edu.wpi.first.wpilibj2.command.CommandScheduler;
  */
 public class Robot extends TimedRobot {
   private Command m_autonomousCommand;
+  private Command m_hardwareSelfTest;
 
   private RobotContainer m_robotContainer;
+  private double m_nextDiagnosticTimestamp;
 
   /**
    * This function is run when the robot is first started up and should be used for any
@@ -28,6 +34,7 @@ public class Robot extends TimedRobot {
     // Instantiate our RobotContainer.  This will perform all our button bindings, and put our
     // autonomous chooser on the dashboard.
     m_robotContainer = new RobotContainer();
+    SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
   }
 
   /**
@@ -44,11 +51,35 @@ public class Robot extends TimedRobot {
     // and running subsystem periodic() methods.  This must be called from the robot's periodic
     // block in order for anything in the Command-based framework to work.
     CommandScheduler.getInstance().run();
+
+    if (!DriverStation.isFMSAttached() && Timer.getFPGATimestamp() >= m_nextDiagnosticTimestamp) {
+      var canStatus = RobotController.getCANStatus();
+      System.out.printf(
+          "DIAGNOSTICS ds=%s enabled=%s voltage=%.2fV canUtil=%.1f%% busOff=%d txFull=%d rxErr=%d txErr=%d "
+              + "sticks=[0:'%s' a%d b%d; 1:'%s' a%d b%d; 2:'%s' a%d b%d] "
+              + "spark=%s ctre=[%s]%n",
+          DriverStation.isDSAttached(), DriverStation.isEnabled(), RobotController.getBatteryVoltage(),
+          canStatus.percentBusUtilization * 100.0, canStatus.busOffCount, canStatus.txFullCount,
+          canStatus.receiveErrorCount, canStatus.transmitErrorCount,
+          DriverStation.getJoystickName(0), DriverStation.getStickAxisCount(0),
+          DriverStation.getStickButtonCount(0),
+          DriverStation.getJoystickName(1), DriverStation.getStickAxisCount(1),
+          DriverStation.getStickButtonCount(1),
+          DriverStation.getJoystickName(2), DriverStation.getStickAxisCount(2),
+          DriverStation.getStickButtonCount(2),
+          m_robotContainer.getSparkDeviceHealthSummary(),
+          m_robotContainer.getSwerveDeviceHealthSummary());
+      m_nextDiagnosticTimestamp = Timer.getFPGATimestamp() + 5.0;
+    }
   }
 
   /** This function is called once each time the robot enters Disabled mode. */
   @Override
   public void disabledInit() {
+    if (m_hardwareSelfTest != null) {
+      m_hardwareSelfTest.cancel();
+      m_hardwareSelfTest = null;
+    }
     m_robotContainer.stopAll();
   }
 
@@ -96,9 +127,24 @@ public class Robot extends TimedRobot {
   public void testInit() {
     // Cancels all running commands at the start of test mode.
     CommandScheduler.getInstance().cancelAll();
+    if (!DriverStation.isFMSAttached()
+        && SmartDashboard.getBoolean("Hardware Self-Test/Armed", false)) {
+      SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
+      m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand();
+      CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
+    }
   }
 
   /** This function is called periodically during test mode. */
   @Override
   public void testPeriodic() {}
+
+  @Override
+  public void testExit() {
+    if (m_hardwareSelfTest != null) {
+      m_hardwareSelfTest.cancel();
+      m_hardwareSelfTest = null;
+    }
+    m_robotContainer.stopAll();
+  }
 }

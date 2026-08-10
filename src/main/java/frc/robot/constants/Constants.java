@@ -23,6 +23,18 @@ import edu.wpi.first.math.trajectory.TrapezoidProfile;
  * constants are needed, to reduce verbosity.
  */
 public final class Constants {
+  /** Temporary safety switches used while diagnosing the robot on the bench. */
+  public static final class DebugConstants {
+    /** Enable drivetrain output for the current full-system test. */
+    public static final boolean ALLOW_SWERVE_OUTPUT = true;
+
+    /** Maximum commanded translation while the robot is being diagnosed. */
+    public static final double MAX_SWERVE_TRANSLATION_FRACTION = 0.05;
+
+    /** Maximum commanded rotation while the robot is being diagnosed. */
+    public static final double MAX_SWERVE_ROTATION_RADIANS_PER_SECOND = Math.PI * 0.10;
+  }
+
   public static final class OIConstants {
     public static final int kDriverControllerPort = 0;
     public static final double kDriveDeadband = 0.05;

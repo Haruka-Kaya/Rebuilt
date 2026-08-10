@@ -7,34 +7,39 @@ import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Telemetry;
 import frc.robot.constants.Constants.TurretConstants;
 import frc.robot.constants.Constants.AprilTagConstants;
-import frc.robot.utils.TalonFxContainer;
+import frc.robot.utils.SparkMAXContainer;
 
 public class TurretSubsystem extends SubsystemBase {
-    private final TalonFxContainer m_motor = new TalonFxContainer(TurretConstants.TURRET_CAN_ID);
+    private final SparkMAXContainer m_motor = new SparkMAXContainer(TurretConstants.TURRET_CAN_ID);
 
     private final VisionSubsystem m_vision;
 
-    private double turret_kP;
-    private double turret_kI;
-    private double turret_kD;
+    private double turret_kP = 2.4;
+    private double turret_kI = 0.0;
+    private double turret_kD = 0.1;
+    private boolean motorConfigured = false;
 
     public boolean onTarget = false;
 
     public TurretSubsystem(VisionSubsystem vision) {
         this.m_vision = vision;
         
-        m_motor.setBreakMode(true);
-
-        m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
-
         SmartDashboard.putNumber("Set turret_kP", 2.4);
         SmartDashboard.putNumber("Set turret_kI", 0);
         SmartDashboard.putNumber("Set turret_kD", 0.1);
     }
 
     public void setTurretAngle(double angleDegrees) {
+        if (!m_motor.isAvailable()) return;
         // convert turret degrees -> motor rotations before commanding
         m_motor.goToPostion(degreesToMotorRotations(angleDegrees));
+    }
+
+    public void stop() {
+        if (m_motor.isAvailable()) {
+            m_motor.motor.stopMotor();
+        }
+        onTarget = false;
     }
 
     private double degreesToMotorRotations(double degrees) {
@@ -45,8 +50,9 @@ public class TurretSubsystem extends SubsystemBase {
     }
 
     public double getTurretAngle() {
+        if (!m_motor.isAvailable()) return 0;
         // motor rotations -> turret degrees
-        double motorRotations = m_motor.motor.getPosition().getValueAsDouble();
+        double motorRotations = m_motor.getPosition();
         return motorRotationsToTurretDegrees(motorRotations);
     }
 
@@ -57,6 +63,10 @@ public class TurretSubsystem extends SubsystemBase {
     }
     
     public void autoAimWithLimelight() {
+        if (!m_motor.isAvailable()) {
+            onTarget = false;
+            return;
+        }
         // only act if target valid
         if (!m_vision.hasTarget()) {
             onTarget = false;
@@ -109,17 +119,36 @@ public class TurretSubsystem extends SubsystemBase {
 
     @Override
     public void periodic() {
-        turret_kP = SmartDashboard.getNumber("Set turret_kP", 2.4);
-        turret_kI = SmartDashboard.getNumber("Set turret_kI", 0);
-        turret_kP = SmartDashboard.getNumber("Set turret_kD", 0.1);
+        boolean motorConnected = m_motor.isAvailable();
+        SmartDashboard.putBoolean("Turret motor connected", motorConnected);
+        if (!motorConnected) {
+            motorConfigured = false;
+            onTarget = false;
+            SmartDashboard.putBoolean("On target", false);
+            return;
+        }
 
-        m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD); // remove in prod
+        if (!motorConfigured) {
+            m_motor.setBreakMode(true);
+            m_motor.setCurrentLimit(15);
+            m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
+            motorConfigured = true;
+        }
+
+        double requestedTurretKp = SmartDashboard.getNumber("Set turret_kP", 2.4);
+        double requestedTurretKi = SmartDashboard.getNumber("Set turret_kI", 0);
+        double requestedTurretKd = SmartDashboard.getNumber("Set turret_kD", 0.1);
+
+        if (Double.compare(turret_kP, requestedTurretKp) != 0
+                || Double.compare(turret_kI, requestedTurretKi) != 0
+                || Double.compare(turret_kD, requestedTurretKd) != 0) {
+            turret_kP = requestedTurretKp;
+            turret_kI = requestedTurretKi;
+            turret_kD = requestedTurretKd;
+            m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
+        }
 
         SmartDashboard.putNumber("Real turret angle", getTurretAngle());
-
-        if(Telemetry.isHubActive()) {
-            autoAimWithLimelight();
-        }
 
         SmartDashboard.putBoolean("On target", onTarget);
     }

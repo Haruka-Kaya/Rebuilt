@@ -19,6 +19,7 @@ public class AdvancedFireCommand extends Command {
         this.m_shooter = shooter;
         this.m_feeder = feedeer;
         this.m_conveyer = conveyor;
+        addRequirements(turret, shooter, feedeer, conveyor);
     }
 
     @Override
@@ -50,6 +51,6 @@ public class AdvancedFireCommand extends Command {
 
     @Override
     public boolean isFinished() {
-        return true;
+        return false;
     }
 }

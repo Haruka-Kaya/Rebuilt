@@ -6,8 +6,10 @@ package frc.robot;
 
 
 import edu.wpi.first.wpilibj.PS5Controller;
+import edu.wpi.first.wpilibj.DriverStation;
 import frc.robot.commands.FireCommand;
 import frc.robot.commands.IntakeCommand;
+import frc.robot.commands.HardwareSelfTestCommand;
 import frc.robot.commands.JumpBumpCommand;
 import frc.robot.commands.RevUpCommand;
 import frc.robot.commands.OutputCommand;
@@ -22,10 +24,12 @@ import frc.robot.subsystems.IntakeSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.subsystems.VisionSubsystem;
+import frc.robot.utils.SparkMAXContainer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.RunCommand;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
 import edu.wpi.first.wpilibj2.command.button.JoystickButton;
+import edu.wpi.first.wpilibj2.command.button.Trigger;
 
 /*
  * This class is where the bulk of the robot should be declared.  Since Command-based is a
@@ -40,13 +44,13 @@ public class RobotContainer {
   private final CommandPS5Controller m_maintenanceController = new CommandPS5Controller(OIConstants.kMaintenanceControllerPort);
 
   // The robot's subsystems
-  private final VisionSubsystem m_driveVision = new VisionSubsystem(LimelightConstants.DRIVE_LIMELIGHT_NAME);
+  private final VisionSubsystem m_turretVision = new VisionSubsystem(LimelightConstants.TURRET_LIMELIGHT_NAME);
 
   private final CommandSwerveDrivetrain drivetrain;
 
   private final IntakeSubsystem m_intake = new IntakeSubsystem();
   private final ShooterSubsystem m_shooter = new ShooterSubsystem();
-  private final TurretSubsystem m_turret = new TurretSubsystem(m_driveVision);
+  private final TurretSubsystem m_turret = new TurretSubsystem(m_turretVision);
   private final ConveyorSubsystem m_conveyor = new ConveyorSubsystem();
   private final FeederSubsystem m_feeder = new FeederSubsystem();
 
@@ -96,17 +100,23 @@ public class RobotContainer {
      * 
      */
 
-    m_driverController.L1().whileTrue(slurp);
-    m_driverController.R1().whileTrue(spit);
+    availableButton(m_driverController, OIConstants.kDriverControllerPort, 5).whileTrue(slurp);
+    availableButton(m_driverController, OIConstants.kDriverControllerPort, 6).whileTrue(spit);
 
-    m_driverController.R3().whileTrue(jumpBump);
+    availableButton(m_driverController, OIConstants.kDriverControllerPort, 12).whileTrue(jumpBump);
 
-    m_driverController.L2().whileTrue(revWheel);
-    m_driverController.R2().whileTrue(fire);
+    availableButton(m_driverController, OIConstants.kDriverControllerPort, 7).whileTrue(revWheel);
+    availableButton(m_driverController, OIConstants.kDriverControllerPort, 8).whileTrue(fire);
 
-    m_operatorController.L1().whileTrue(back_in_shell);
+    availableButton(m_operatorController, OIConstants.kOperatorControllerPort, 5).whileTrue(back_in_shell);
 
-    m_maintenanceController.L1().whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret));
+    availableButton(m_maintenanceController, OIConstants.kMaintenanceControllerPort, 5)
+        .whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret));
+  }
+
+  private static Trigger availableButton(CommandPS5Controller controller, int port, int button) {
+    return new Trigger(() -> DriverStation.getStickButtonCount(port) >= button
+        && controller.getHID().getRawButton(button));
   }
 
   /**
@@ -118,10 +128,23 @@ public class RobotContainer {
     return this.m_DriveBaseContainer.GetAutonCommand();
   }
 
+  public Command getHardwareSelfTestCommand() {
+    return HardwareSelfTestCommand.create(drivetrain, m_feeder, m_shooter);
+  }
+
+  public String getSwerveDeviceHealthSummary() {
+    return drivetrain.getDeviceHealthSummary();
+  }
+
+  public String getSparkDeviceHealthSummary() {
+    return SparkMAXContainer.getDeviceAvailabilitySummary();
+  }
+
   public void stopAll() {
-    m_intake.stop();
+    m_intake.stopAll();
     m_conveyor.stop();
     m_feeder.stop();
     m_shooter.stop();
+    m_turret.stop();
   }
 }
