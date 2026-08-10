@@ -45,6 +45,7 @@ public class DriveBaseContainer {
             .withDeadband(MaxSpeed.getAsDouble() * OIConstants.kDriveDeadband)
             .withRotationalDeadband(MaxAngularRate.getAsDouble() * OIConstants.kDriveDeadband)
             .withDriveRequestType(DriveRequestType.OpenLoopVoltage);
+    private final SwerveRequest.Idle idle = new SwerveRequest.Idle();
     // private final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
     // private final SwerveRequest.PointWheelsAt point = new SwerveRequest.PointWheelsAt();
 
@@ -79,6 +80,9 @@ public class DriveBaseContainer {
 
     public Command driveHider(){
             return drivetrain.applyRequest(() -> {
+                if (!DriverStation.isTeleopEnabled()) {
+                    return idle;
+                }
                 double velocityX = -availableAxis(1) * MaxSpeed.getAsDouble();
                 double velocityY = -availableAxis(0) * MaxSpeed.getAsDouble();
                 double rotation = -availableAxis(2) * MaxAngularRate.getAsDouble();
@@ -109,7 +113,6 @@ public class DriveBaseContainer {
 
         // Idle while the robot is disabled. This ensures the configured
         // neutral mode is applied to the drive motors while disabled.
-        final var idle = new SwerveRequest.Idle();
         RobotModeTriggers.disabled().whileTrue(
             drivetrain.applyRequest(() -> idle).ignoringDisable(true)
         );

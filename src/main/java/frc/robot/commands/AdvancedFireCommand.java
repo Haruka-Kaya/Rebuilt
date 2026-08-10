@@ -44,6 +44,7 @@ public class AdvancedFireCommand extends Command {
 
     @Override
     public void end(boolean interrupted) {
+        m_turret.stop();
         m_shooter.stop();
         m_conveyer.stop();
         m_feeder.stop();
