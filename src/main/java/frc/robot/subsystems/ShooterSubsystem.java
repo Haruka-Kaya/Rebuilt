@@ -255,6 +255,13 @@ public class ShooterSubsystem extends SubsystemBase {
             && MathUtil.isNear(actuatorPos, actuatorDegrees.getAsDouble(), 0.5);
     }
 
+    /** Readiness required before starting an autonomous routine that prepares a shot. */
+    public boolean isOperationalForAutonomousShot() {
+        return actuatorMotor.isReady()
+            && isActuatorReferenced()
+            && flywheelPairReady();
+    }
+
     private boolean flywheelPairReady() {
         return flywheelMotor_1.isReady() && flywheelMotor_2.isReady();
     }

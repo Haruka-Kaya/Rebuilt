@@ -85,7 +85,7 @@ public class DriveBaseContainer {
 
     public Command driveHider(){
             return drivetrain.applyRequest(() -> {
-                if (!driveInputsAllowed()) {
+                if (!driverInputsAllowed()) {
                     return idle;
                 }
                 double axisX = availableAxis(1);
@@ -157,12 +157,13 @@ public class DriveBaseContainer {
     }
 
     private Trigger availableButton(int button) {
-        return new Trigger(() -> driveInputsAllowed()
+        return new Trigger(() -> driverInputsAllowed()
             && DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort) >= button
             && joystick.getHID().getRawButton(button));
     }
 
-    private boolean driveInputsAllowed() {
+    /** Shared neutral-after-enable gate for default and assisted driving commands. */
+    public boolean driverInputsAllowed() {
         double axis0 = availableAxis(0);
         double axis1 = availableAxis(1);
         double axis2 = availableAxis(2);
@@ -198,5 +199,9 @@ public class DriveBaseContainer {
 
     public boolean shouldAbortActiveAutonomous() {
         return autoContainer.shouldAbortActiveAutonomous();
+    }
+
+    public void refreshAutonomousStatus() {
+        autoContainer.refreshReadinessStatus();
     }
 }

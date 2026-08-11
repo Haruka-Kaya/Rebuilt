@@ -170,6 +170,14 @@ public class TurretSubsystem extends SubsystemBase {
         return onTarget && m_motor.isPositionReferenceValid(positionReference);
     }
 
+    public boolean isPositionControlReadyForAutonomousAim() {
+        return m_motor.isReady() && m_motor.isPositionReferenceValid(positionReference);
+    }
+
+    public boolean isVisionReadyForAutonomousAim() {
+        return m_vision.isTargetingPipelineReady();
+    }
+
     @Override
     public void periodic() {
         boolean motorConnected = m_motor.isAvailable();

@@ -13,7 +13,9 @@ import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.commands.HardwareSelfTestCommand;
 import frc.robot.utils.AsyncDiagnosticSink;
+import frc.robot.utils.OneShotTimedArmGate;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.constants.Constants.HardwareTestConstants;
 
 /**
  * The VM is configured to automatically run this class, and to call the functions corresponding to
@@ -27,6 +29,8 @@ public class Robot extends TimedRobot {
 
   private RobotContainer m_robotContainer;
   private double m_nextDiagnosticTimestamp;
+  private final OneShotTimedArmGate m_selfTestArmGate = new OneShotTimedArmGate(
+      HardwareTestConstants.ARM_LIFETIME_SECONDS);
 
   /**
    * This function is run when the robot is first started up and should be used for any
@@ -58,6 +62,16 @@ public class Robot extends TimedRobot {
     // and running subsystem periodic() methods.  This must be called from the robot's periodic
     // block in order for anything in the Command-based framework to work.
     CommandScheduler.getInstance().run();
+    m_robotContainer.refreshAutonomousStatus();
+
+    boolean armRequested = SmartDashboard.getBoolean("Hardware Self-Test/Armed", false);
+    boolean armValid = m_selfTestArmGate.observe(
+        armRequested,
+        DriverStation.isDisabled()
+            && DriverStation.isTest()
+            && !DriverStation.isFMSAttached(),
+        Timer.getFPGATimestamp());
+    SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", armValid);
 
     if (!DriverStation.isFMSAttached() && Timer.getFPGATimestamp() >= m_nextDiagnosticTimestamp) {
       var canStatus = RobotController.getCANStatus();
@@ -87,6 +101,7 @@ public class Robot extends TimedRobot {
       m_hardwareSelfTest.cancel();
       m_hardwareSelfTest = null;
     }
+    clearSelfTestArm();
     m_robotContainer.stopAll();
   }
 
@@ -96,6 +111,7 @@ public class Robot extends TimedRobot {
   /** This autonomous runs the autonomous command selected by your {@link RobotContainer} class. */
   @Override
   public void autonomousInit() {
+    clearSelfTestArm();
     m_robotContainer.stopAll();
     m_autonomousCommand = m_robotContainer.getAutonomousCommand();
 
@@ -143,6 +159,7 @@ public class Robot extends TimedRobot {
       m_autonomousCommand.cancel();
       m_autonomousCommand = null;
     }
+    clearSelfTestArm();
     m_robotContainer.stopAll();
   }
 
@@ -155,9 +172,11 @@ public class Robot extends TimedRobot {
     // Cancels all running commands at the start of test mode.
     CommandScheduler.getInstance().cancelAll();
     m_robotContainer.stopAll();
-    if (!DriverStation.isFMSAttached()
-        && SmartDashboard.getBoolean("Hardware Self-Test/Armed", false)) {
-      SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
+    boolean armAccepted = !DriverStation.isFMSAttached()
+        && SmartDashboard.getBoolean("Hardware Self-Test/Armed", false)
+        && m_selfTestArmGate.consume(Timer.getFPGATimestamp());
+    clearSelfTestArm();
+    if (armAccepted) {
       m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand();
       CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
     }
@@ -173,6 +192,13 @@ public class Robot extends TimedRobot {
       m_hardwareSelfTest.cancel();
       m_hardwareSelfTest = null;
     }
+    clearSelfTestArm();
     m_robotContainer.stopAll();
+  }
+
+  private void clearSelfTestArm() {
+    SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
+    SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", false);
+    m_selfTestArmGate.requireRelease();
   }
 }

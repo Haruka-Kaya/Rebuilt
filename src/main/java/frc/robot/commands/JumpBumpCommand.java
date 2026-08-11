@@ -5,33 +5,43 @@ import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
+import java.util.function.BooleanSupplier;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
 
 public class JumpBumpCommand extends Command {
     private final CommandSwerveDrivetrain m_drivetrain;
     private final CommandPS5Controller m_controller; // may be used
+    private final BooleanSupplier m_driverInputsAllowed;
     private boolean moduleFaulted;
 
     private final HeadingSnapController m_rotationController = new HeadingSnapController();
 
 
-    public JumpBumpCommand(CommandSwerveDrivetrain m_drive, CommandPS5Controller m_controller){
+    public JumpBumpCommand(
+            CommandSwerveDrivetrain m_drive,
+            CommandPS5Controller m_controller,
+            BooleanSupplier driverInputsAllowed) {
         this.m_drivetrain = m_drive;
         this.m_controller = m_controller;
+        this.m_driverInputsAllowed = driverInputsAllowed;
 
         addRequirements(m_drivetrain);
     }
 
     @Override
     public void initialize() {
-        moduleFaulted = !m_drivetrain.areAllDevicesConnected();
+        // Always poll the shared gate so a device fault also forces a new neutral sample.
+        boolean inputsAllowed = m_driverInputsAllowed.getAsBoolean();
+        moduleFaulted = !inputsAllowed || !m_drivetrain.areAllDevicesConnected();
         if (moduleFaulted) {
             m_drivetrain.requestIdle();
             return;
         }
+        double currentHeading = m_drivetrain.getState().Pose.getRotation().getRadians();
         if (!m_rotationController.reset(
-                m_drivetrain.getState().Pose.getRotation().getRadians())) {
+                currentHeading,
+                HeadingSnapController.closestBumpHeading(currentHeading))) {
             moduleFaulted = true;
             m_drivetrain.requestIdle();
         }
@@ -39,7 +49,11 @@ public class JumpBumpCommand extends Command {
 
     @Override
     public void execute() {
-        if (moduleFaulted || !m_drivetrain.areAllDevicesConnected()) {
+        // Do not short-circuit this poll; it records fault/enable transitions in the shared gate.
+        boolean inputsAllowed = m_driverInputsAllowed.getAsBoolean();
+        if (moduleFaulted
+                || !inputsAllowed
+                || !m_drivetrain.areAllDevicesConnected()) {
             moduleFaulted = true;
             m_drivetrain.requestIdle();
             return;

@@ -296,12 +296,6 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         super.resetPose(pose);
     }
 
-    public double closestBumpAngle() {
-        double shiftedAngle = this.getState().Pose.getRotation().getRadians() - Math.PI / 4;
-        double snappedShifted = Math.round(shiftedAngle / (Math.PI / 2.0)) * (Math.PI / 2.0);
-        return snappedShifted + Math.PI / 4;
-    }
-
     private final SwerveRequest.FieldCentric m_fieldCentricDriveRequest = new SwerveRequest.FieldCentric();
     private final SwerveRequest.RobotCentric m_robotCentricDriveRequest = new SwerveRequest.RobotCentric();
 

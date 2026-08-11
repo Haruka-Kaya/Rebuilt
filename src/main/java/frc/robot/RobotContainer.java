@@ -96,7 +96,10 @@ public class RobotContainer {
         m_driverController, m_turret, m_shooter, m_feeder, m_conveyor, m_intake, m_climber);
     drivetrain = m_DriveBaseContainer.drivetrain;
 
-    jumpBump = new JumpBumpCommand(drivetrain, m_driverController);
+    jumpBump = new JumpBumpCommand(
+        drivetrain,
+        m_driverController,
+        m_DriveBaseContainer::driverInputsAllowed);
 
     // Configure the button bindings (put this last)
     configureButtonBindings();
@@ -302,6 +305,10 @@ public class RobotContainer {
 
   public boolean shouldAbortActiveAutonomous() {
     return m_DriveBaseContainer.shouldAbortActiveAutonomous();
+  }
+
+  public void refreshAutonomousStatus() {
+    m_DriveBaseContainer.refreshAutonomousStatus();
   }
 
   public Command getHardwareSelfTestCommand() {
