@@ -21,7 +21,6 @@ public class TurretSubsystem extends SubsystemBase {
     private double turret_kP = 2.4;
     private double turret_kI = 0.0;
     private double turret_kD = 0.1;
-    private boolean motorConfigured = false;
     private double lastAimFrameTimestamp = -1.0;
     private int alignedFrameCount = 0;
 
@@ -29,6 +28,11 @@ public class TurretSubsystem extends SubsystemBase {
 
     public TurretSubsystem(VisionSubsystem vision) {
         this.m_vision = vision;
+
+        m_motor.setBreakMode(true);
+        m_motor.setCurrentLimit(15);
+        m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
+        m_motor.setMaxSpeed(TurretConstants.MAX_CLOSED_LOOP_OUTPUT);
         
         SmartDashboard.putNumber("Set turret_kP", 2.4);
         SmartDashboard.putNumber("Set turret_kI", 0);
@@ -48,9 +52,7 @@ public class TurretSubsystem extends SubsystemBase {
     }
 
     private void stopMotorOutput() {
-        if (m_motor.isAvailable()) {
-            m_motor.motor.stopMotor();
-        }
+        m_motor.stop();
     }
 
     private double degreesToMotorRotations(double degrees) {
@@ -131,18 +133,9 @@ public class TurretSubsystem extends SubsystemBase {
         boolean motorConnected = m_motor.isAvailable();
         SmartDashboard.putBoolean("Turret motor connected", motorConnected);
         if (!motorConnected) {
-            motorConfigured = false;
             onTarget = false;
             SmartDashboard.putBoolean("On target", false);
             return;
-        }
-
-        if (!motorConfigured) {
-            m_motor.setBreakMode(true);
-            m_motor.setCurrentLimit(15);
-            m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
-            m_motor.setMaxSpeed(TurretConstants.MAX_CLOSED_LOOP_OUTPUT);
-            motorConfigured = true;
         }
 
         double requestedTurretKp = SmartDashboard.getNumber("Set turret_kP", 2.4);

@@ -64,7 +64,7 @@ public class RobotContainer {
 
   private final RetractIntakeCommand back_in_shell = new RetractIntakeCommand(m_intake);
 
-  private final FireCommand fire = new FireCommand(m_feeder, m_conveyor);
+  private final FireCommand fire = new FireCommand(m_feeder, m_conveyor, m_shooter);
   private final RevUpCommand revWheel = new RevUpCommand(m_shooter);
 
 

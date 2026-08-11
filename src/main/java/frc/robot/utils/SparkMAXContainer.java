@@ -1,351 +1,1542 @@
 package frc.robot.utils;
 
+import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.OptionalInt;
+import java.util.TreeMap;
+import java.util.ArrayList;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-import com.revrobotics.spark.SparkBase.ControlType;
-
-import com.revrobotics.spark.SparkClosedLoopController;
-import com.revrobotics.spark.SparkLowLevel.MotorType;
-import com.revrobotics.spark.config.SparkMaxConfig;
-import com.revrobotics.spark.config.SparkBaseConfig.IdleMode;
-import com.revrobotics.spark.SparkMax;
 import com.revrobotics.PersistMode;
+import com.revrobotics.REVLibError;
 import com.revrobotics.RelativeEncoder;
 import com.revrobotics.ResetMode;
+import com.revrobotics.jni.REVLibJNI;
+import com.revrobotics.spark.SparkBase.ControlType;
+import com.revrobotics.spark.SparkClosedLoopController;
+import com.revrobotics.spark.SparkLowLevel.MotorType;
+import com.revrobotics.spark.SparkLowLevel.PeriodicStatus0;
+import com.revrobotics.spark.SparkLowLevel.PeriodicStatus1;
+import com.revrobotics.spark.SparkLowLevel.PeriodicStatus2;
+import com.revrobotics.spark.SparkMax;
+import com.revrobotics.spark.config.SparkBaseConfig.IdleMode;
+import com.revrobotics.spark.config.SparkMaxConfig;
 
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import frc.robot.utils.SparkRecoveryState.ServiceAction;
+import frc.robot.utils.SparkOutputGate.ZeroDecision;
+import frc.robot.utils.SparkResetGuard.Observation;
 
 /**
- * a wrapper for SparkMax motor controllers
+ * Fail-closed SPARK MAX wrapper with asynchronous discovery and configuration recovery.
+ *
+ * <p>All desired configuration is retained while a device is offline. Nonzero output is accepted
+ * only after the latest configuration revision and a fresh atomic status sample are verified.
  */
 public class SparkMAXContainer implements MotorContainer {
+  private static final int CAN_TIMEOUT_MILLISECONDS = 20;
+  private static final double DISABLED_STABLE_SECONDS = 0.25;
+  private static final double STATUS_SAMPLE_PERIOD_SECONDS = 0.10;
+  private static final double STATUS_FRESHNESS_SECONDS = 0.50;
+  private static final double FOLLOWER_TRANSITION_TIMEOUT_SECONDS = 0.50;
+  private static final double FOLLOWER_DIAGNOSTIC_STOPPED_RPM = 50.0;
+  private static final double MAX_DIAGNOSTIC_DUTY_CYCLE = 0.10;
 
-  // these are public so any additional changes (current limits for example) can
-  // be done in real time if needed
-  public SparkMax motor;
-  public RelativeEncoder encoder;
-  private SparkMaxConfig config;
-  public int port;
-  private final boolean available;
-  private static final Map<Integer, Boolean> DEVICE_AVAILABILITY = new ConcurrentSkipListMap<>();
+  private static final List<SparkMAXContainer> DEVICES = new CopyOnWriteArrayList<>();
+  private static final Object OUTPUT_ORDER_LOCK = new Object();
+  private static final SparkRecoveryCoordinator RECOVERY_COORDINATOR =
+      new SparkRecoveryCoordinator();
+  private static final java.util.concurrent.atomic.AtomicBoolean PROCESS_DEFAULTS_CONFIGURED =
+      new java.util.concurrent.atomic.AtomicBoolean();
+  private static final java.util.concurrent.atomic.AtomicBoolean FOLLOWER_TOPOLOGY_FROZEN =
+      new java.util.concurrent.atomic.AtomicBoolean();
+  private static final SparkAsyncWorker IO_WORKER =
+      SparkAsyncWorker.createDaemon("spark-recovery-worker");
 
-  /**
-   * Creates a new SparkMAXContainer with the given id ASSUMES THE MOTOR IS
-   * BRUSHLESS
-   * 
-   * @param id the CAN ID of the motor
-   */
+  private static int sampleCursor;
+  private static int zeroCursor;
+  private static double disabledSince = Double.NaN;
+
+  private enum FollowerDiagnosticMode {
+    NONE,
+    LEADER_ZERO_PENDING,
+    PAUSE_PENDING,
+    ACTIVE,
+    RESUME_ZERO_PENDING,
+    RESUME_PENDING
+  }
+
+  private final Object stateLock = new Object();
+  private final SparkMax motor;
+  private final RelativeEncoder encoder;
+  private final SparkClosedLoopController closedLoopController;
+  private final SparkMaxConfig desiredConfig = new SparkMaxConfig();
+  private final SparkRecoveryState recoveryState;
+  private final SparkResetGuard resetGuard = new SparkResetGuard();
+  private final SparkOutputGate outputGate = new SparkOutputGate();
+  private final List<SparkMAXContainer> requiredFollowers = new ArrayList<>();
+  private final int port;
+
+  private long desiredRevision;
+  private boolean desiredFollower;
+  private boolean sampleInFlight;
+  private boolean zeroInFlight;
+  private int consecutiveSampleFailures;
+  private double nextSampleAt;
+  private double lastSampleAt = Double.NEGATIVE_INFINITY;
+  private double lastZeroConfirmedAt = Double.NEGATIVE_INFINITY;
+  private volatile int firmwareVersion;
+
+  private double cachedAppliedOutput;
+  private double cachedBusVoltage;
+  private double cachedCurrent;
+  private double cachedTemperatureCelsius;
+  private double cachedPosition;
+  private double cachedVelocity;
+  private boolean cachedFollower;
+
+  private double desiredP;
+  private double desiredI;
+  private double desiredD;
+  private double desiredSmartCurrentLimit;
+  private double desiredSecondaryCurrentLimit;
+  private SparkMAXContainer followerLeader;
+  private FollowerDiagnosticMode followerDiagnosticMode = FollowerDiagnosticMode.NONE;
+  private double followerTransitionDeadline;
+
+  /** Configures REV's process-wide defaults before any {@link SparkMax} is constructed. */
+  public static void configureProcessDefaults() {
+    if (PROCESS_DEFAULTS_CONFIGURED.compareAndSet(false, true)) {
+      REVLibJNI.c_REVLib_SetBaseDefaultCanTimeoutMs(CAN_TIMEOUT_MILLISECONDS);
+      REVLibJNI.c_REVLib_SetBaseDefaultCanRetries(0);
+    }
+  }
+
+  /** Creates a brushless SPARK MAX container. */
   public SparkMAXContainer(int id) {
     this(id, true);
   }
 
-  /**
-   * Creates a new SparkMAXContainer with the given id and brushless ness
-   * 
-   * @param id          CAN ID of the motor
-   * @param isBrushless is the motor brushless
-   */
+  /** Creates a SPARK MAX container with the requested motor interface. */
   public SparkMAXContainer(int id, boolean isBrushless) {
     port = id;
-    motor = new SparkMax(
-        id,
-        isBrushless ? MotorType.kBrushless : MotorType.kBrushed);
-    config = new SparkMaxConfig();
-    motor.setCANTimeout(20);
-    available = motor.getFirmwareVersion() != 0;
-    DEVICE_AVAILABILITY.put(id, available);
-    System.out.printf(
-        "SPARK_HEALTH id=%d available=%s firmware=%s%n",
-        id, available, available ? motor.getFirmwareString() : "unavailable");
-    if (isBrushless) {
-      encoder = motor.getEncoder();
-    } else {
-      encoder = null;
-    }
-    // we do this here becuase its like instant and we can overide all of them below
-    // if needed
+    motor = new SparkMax(id, isBrushless ? MotorType.kBrushless : MotorType.kBrushed);
+    motor.setCANTimeout(CAN_TIMEOUT_MILLISECONDS);
+    motor.setCANMaxRetries(0);
+    motor.setPeriodicFrameTimeout(0);
+    encoder = isBrushless ? motor.getEncoder() : null;
+    closedLoopController = motor.getClosedLoopController();
 
+    desiredConfig.disableFollowerMode().idleMode(IdleMode.kCoast).inverted(false);
+    desiredConfig.signals
+        .faultsPeriodMs(20)
+        .warningsPeriodMs(20)
+        .faultsAlwaysOn(true)
+        .warningsAlwaysOn(true);
+    recoveryState = new SparkRecoveryState(Timer.getFPGATimestamp(), desiredRevision);
+    DEVICES.add(this);
+    logState("registered");
   }
-  
+
   /**
-   * Exposes the closed loop controller of the motor
-   * you probably don't need this and if you are calling it I hope phil is sitting next to you with the docs open
-   * Godspeed brave soul
-   * @return the closed loop controller of the motor
+   * Enqueues at most one asynchronous SPARK operation. This method never performs blocking CAN
+   * reads or configuration on the robot main thread.
    */
-  public SparkClosedLoopController exposeReference(){
-    return this.motor.getClosedLoopController();
+  public static void serviceAll() {
+    double now = Timer.getFPGATimestamp();
+    boolean disabled = DriverStation.isDisabled();
+    if (disabled) {
+      if (!Double.isFinite(disabledSince)) {
+        disabledSince = now;
+      }
+    } else {
+      disabledSince = Double.NaN;
+    }
+
+    if (!IO_WORKER.isIdle() || DEVICES.isEmpty()) {
+      return;
+    }
+
+    ZeroWork zeroWork = selectZeroWork(now);
+    if (zeroWork != null) {
+      if (!IO_WORKER.submit(() -> runZeroWork(zeroWork))) {
+        zeroWork.device().zeroCancelled();
+      }
+      return;
+    }
+
+    boolean configurationAllowed = disabled
+        && Double.isFinite(disabledSince)
+        && now - disabledSince >= DISABLED_STABLE_SECONDS;
+    OptionalInt selected = RECOVERY_COORDINATOR.selectConfiguration(
+        now,
+        DEVICES.size(),
+        IO_WORKER.isIdle(),
+        configurationAllowed,
+        index -> DEVICES.get(index).hasConfigurationWork(now));
+
+    if (selected.isPresent()) {
+      ConfigurationWork work = DEVICES.get(selected.getAsInt()).beginConfigurationWork(now);
+      if (work != null) {
+        if (!IO_WORKER.submit(() -> runConfigurationWork(work))) {
+          work.device().configurationCancelled();
+        }
+        return;
+      }
+    }
+
+    SampleWork sample = selectSampleWork(now);
+    if (sample != null) {
+      if (!IO_WORKER.submit(() -> runSampleWork(sample))) {
+        sample.device().sampleCancelled();
+      }
+    }
   }
 
+  private static SampleWork selectSampleWork(double now) {
+    int count = DEVICES.size();
+    for (int offset = 0; offset < count; offset++) {
+      int index = (sampleCursor + offset) % count;
+      SampleWork work = DEVICES.get(index).beginSampleWork(now);
+      if (work != null) {
+        sampleCursor = (index + 1) % count;
+        return work;
+      }
+    }
+    return null;
+  }
+
+  private static ZeroWork selectZeroWork(double now) {
+    int count = DEVICES.size();
+    for (int offset = 0; offset < count; offset++) {
+      int index = (zeroCursor + offset) % count;
+      ZeroWork work = DEVICES.get(index).beginZeroWork(now);
+      if (work != null) {
+        zeroCursor = (index + 1) % count;
+        return work;
+      }
+    }
+    return null;
+  }
+
+  private ZeroWork beginZeroWork(double now) {
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        return reserveZeroWorkLocked(now);
+      }
+    }
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK and this device's stateLock are held. */
+  private ZeroWork reserveZeroWorkLocked(double now) {
+    if (zeroInFlight || outputGate.decideZero(now) != ZeroDecision.ATTEMPT) {
+      return null;
+    }
+    zeroInFlight = true;
+    return new ZeroWork(this, outputGate.generation());
+  }
+
+  private static void runZeroWork(ZeroWork work) {
+    SparkMAXContainer device = work.device();
+    boolean execute;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (device.stateLock) {
+        execute = device.zeroInFlight
+            && device.outputGate.isZeroRequired()
+            && device.outputGate.generation() == work.generation();
+        if (!execute) {
+          device.zeroInFlight = false;
+        }
+      }
+    }
+    if (!execute) {
+      return;
+    }
+
+    // Vendor calls run with no application lock held. zeroInFlight blocks all nonzero commands.
+    REVLibError result = device.closedLoopController.setSetpoint(0.0, ControlType.kDutyCycle);
+    REVLibError resumeResult = null;
+    if (result == REVLibError.kOk) {
+      boolean resumeAfterZero;
+      synchronized (OUTPUT_ORDER_LOCK) {
+        synchronized (device.stateLock) {
+          resumeAfterZero = device.followerDiagnosticMode
+              == FollowerDiagnosticMode.RESUME_ZERO_PENDING;
+        }
+      }
+      if (resumeAfterZero) {
+        resumeResult = device.motor.resumeFollowerMode();
+      }
+    }
+
+    SparkMAXContainer leaderToRevoke = null;
+    String dependentFailure = null;
+    ZeroWork leaderZeroWork;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (device.stateLock) {
+        if (!device.zeroInFlight) {
+          return;
+        }
+        double now = Timer.getFPGATimestamp();
+        if (device.outputGate.generation() != work.generation()) {
+          // A newer stop/config transition superseded this reservation. Keep the gate closed and
+          // retry so an old completion can never certify a newer output epoch.
+          device.zeroInFlight = false;
+          device.outputGate.requireZero(now, true);
+          if (result != REVLibError.kOk) {
+            device.recordFailureLocked(now, "zero " + result, false);
+          } else if (resumeResult != null && resumeResult != REVLibError.kOk) {
+            device.recordFailureLocked(now, "follower resume " + resumeResult, false);
+          }
+        } else {
+          device.completeZeroLocked(result, resumeResult, now);
+        }
+        if (result != REVLibError.kOk) {
+          leaderToRevoke = device.desiredFollower ? device.followerLeader : null;
+          dependentFailure = "zero " + result;
+        } else if (resumeResult != null && resumeResult != REVLibError.kOk) {
+          leaderToRevoke = device.desiredFollower ? device.followerLeader : null;
+          dependentFailure = "follower resume " + resumeResult;
+        }
+      }
+      leaderZeroWork = revokeLeaderForDependentLocked(
+          leaderToRevoke,
+          device.port,
+          dependentFailure,
+          Timer.getFPGATimestamp(),
+          true);
+    }
+    if (leaderZeroWork != null) {
+      runZeroWork(leaderZeroWork);
+    }
+    if (result != REVLibError.kOk) {
+      device.logState("zero " + result);
+    } else if (resumeResult != null && resumeResult != REVLibError.kOk) {
+      device.logState("follower resume " + resumeResult);
+    }
+  }
+
+  private void completeZeroLocked(
+      REVLibError zeroResult, REVLibError resumeResult, double now) {
+    zeroInFlight = false;
+    if (zeroResult != REVLibError.kOk) {
+      outputGate.zeroFailed(now);
+      if (recoveryState.isConfigurationReady()) {
+        recordFailureLocked(now, "zero " + zeroResult, false);
+      }
+      return;
+    }
+
+    outputGate.zeroSucceeded();
+    lastZeroConfirmedAt = now;
+    if (followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING) {
+      if (resumeResult == REVLibError.kOk) {
+        followerDiagnosticMode = FollowerDiagnosticMode.RESUME_PENDING;
+        followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
+        nextSampleAt = now;
+      } else if (resumeResult == null) {
+        // The resume request arrived after this zero began; run a new ordered zero+resume item.
+        outputGate.requireZero(now, true);
+      } else {
+        recordFailureLocked(now, "follower resume " + resumeResult, false);
+      }
+    }
+  }
+
+  private void zeroCancelled() {
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        zeroInFlight = false;
+      }
+    }
+  }
+
+  private boolean hasConfigurationWork(double now) {
+    synchronized (stateLock) {
+      return recoveryState.peekServiceAction(now) != ServiceAction.NONE;
+    }
+  }
+
+  private ConfigurationWork beginConfigurationWork(double now) {
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        ServiceAction action = recoveryState.beginService(now);
+        if (action == ServiceAction.NONE) {
+          return null;
+        }
+        FOLLOWER_TOPOLOGY_FROZEN.set(true);
+        SparkMaxConfig snapshot = new SparkMaxConfig().apply(desiredConfig);
+        return new ConfigurationWork(
+            this,
+            action,
+            snapshot,
+            desiredRevision,
+            desiredFollower,
+            recoveryState.shouldPersist(action));
+      }
+    }
+  }
+
+  private SampleWork beginSampleWork(double now) {
+    synchronized (stateLock) {
+      if (!recoveryState.isConfigurationReady()
+          || sampleInFlight
+          || now < nextSampleAt) {
+        return null;
+      }
+      sampleInFlight = true;
+      return new SampleWork(this);
+    }
+  }
+
+  private static void runConfigurationWork(ConfigurationWork work) {
+    SparkMAXContainer device = work.device();
+    if (!DriverStation.isDisabled()) {
+      device.configurationCancelled();
+      return;
+    }
+
+    try {
+      PeriodicStatus1 preConfigurationStatus = null;
+      if (work.action() == ServiceAction.PROBE_AND_APPLY_RESET) {
+        if (device.motor.getPeriodicStatus0() == null) {
+          device.configurationFailed("status0 timeout");
+          return;
+        }
+        preConfigurationStatus = device.motor.getPeriodicStatus1();
+        if (preConfigurationStatus == null) {
+          device.configurationFailed("status1 timeout");
+          return;
+        }
+
+        int version = device.motor.getFirmwareVersion();
+        REVLibError firmwareError = device.motor.getLastError();
+        if (version == 0 || firmwareError != REVLibError.kOk) {
+          device.configurationFailed("firmware " + firmwareError);
+          return;
+        }
+        device.firmwareVersion = version;
+        device.logState("pre-config " + statusEvidenceSummary(preConfigurationStatus));
+
+        if (preConfigurationStatus.hasResetStickyWarning) {
+          if (!DriverStation.isDisabled()
+              || !device.isConfigurationWorkCurrent(work.revision())) {
+            device.configurationCancelled();
+            return;
+          }
+          REVLibError clearError = device.motor.clearFaults();
+          if (clearError != REVLibError.kOk) {
+            device.configurationFailed("clear faults " + clearError);
+            return;
+          }
+        }
+      }
+
+      if (!DriverStation.isDisabled() || !device.isConfigurationWorkCurrent(work.revision())) {
+        device.configurationCancelled();
+        return;
+      }
+
+      ResetMode resetMode = work.action() == ServiceAction.PROBE_AND_APPLY_RESET
+          ? ResetMode.kResetSafeParameters
+          : ResetMode.kNoResetSafeParameters;
+      PersistMode persistMode = work.persist()
+          ? PersistMode.kPersistParameters
+          : PersistMode.kNoPersistParameters;
+      if (work.persist()) {
+        device.persistenceAttempted();
+      }
+      REVLibError configureError = device.motor.configure(work.config(), resetMode, persistMode);
+      if (configureError != REVLibError.kOk) {
+        device.configurationFailed("configure " + configureError);
+        return;
+      }
+      if (work.persist()) {
+        device.persistenceSucceeded(work.revision());
+      }
+
+      REVLibError zeroError = device.sendPostConfigurationZero();
+      if (zeroError != REVLibError.kOk) {
+        device.configurationFailed("post-config zero " + zeroError);
+        return;
+      }
+
+      boolean actualFollower = device.motor.isFollower();
+      REVLibError followerError = device.motor.getLastError();
+      if (followerError != REVLibError.kOk || actualFollower != work.expectedFollower()) {
+        device.configurationFailed(
+            "follower verify " + followerError + " actual=" + actualFollower);
+        return;
+      }
+
+      device.configurationSucceeded(work.revision(), work.action());
+    } catch (Exception exception) {
+      device.configurationFailed(
+          exception.getClass().getSimpleName() + ": " + exception.getMessage());
+    }
+  }
+
+  private boolean isConfigurationWorkCurrent(long revision) {
+    synchronized (stateLock) {
+      return recoveryState.isOperationInFlight()
+          && recoveryState.getDesiredRevision() == revision;
+    }
+  }
+
+  private void persistenceAttempted() {
+    synchronized (stateLock) {
+      recoveryState.persistenceAttempted();
+    }
+  }
+
+  private void persistenceSucceeded(long revision) {
+    synchronized (stateLock) {
+      recoveryState.persistenceSucceeded(revision);
+    }
+  }
+
+  private REVLibError sendPostConfigurationZero() {
+    // Configuration is still marked in flight, so nonzero commands remain rejected while this
+    // blocking vendor call runs. Do not hold application locks across REV JNI.
+    REVLibError result = closedLoopController.setSetpoint(0.0, ControlType.kDutyCycle);
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (result == REVLibError.kOk) {
+          outputGate.zeroSucceeded();
+          lastZeroConfirmedAt = now;
+        } else {
+          outputGate.zeroFailed(now);
+        }
+        return result;
+      }
+    }
+  }
+
+  private static void runSampleWork(SampleWork work) {
+    SparkMAXContainer device = work.device();
+    try {
+      PeriodicStatus0 status0 = device.motor.getPeriodicStatus0();
+      if (status0 == null) {
+        device.sampleFailed("periodic status 0 timeout");
+        return;
+      }
+      PeriodicStatus1 status1 = device.motor.getPeriodicStatus1();
+      if (status1 == null) {
+        device.sampleFailed("periodic status 1 timeout");
+        return;
+      }
+      PeriodicStatus2 status2 = device.encoder == null
+          ? null
+          : device.motor.getPeriodicStatus2();
+      if (device.encoder != null && status2 == null) {
+        device.sampleFailed("periodic status 2 timeout");
+        return;
+      }
+      device.sampleSucceeded(status0, status1, status2);
+    } catch (Exception exception) {
+      device.sampleFailed(exception.getClass().getSimpleName() + ": " + exception.getMessage());
+    }
+  }
+
+  private void configurationSucceeded(long revision, ServiceAction action) {
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        recoveryState.operationSucceeded(revision, now);
+        if (action == ServiceAction.PROBE_AND_APPLY_RESET) {
+          resetGuard.fullConfigurationCompleted(now);
+        }
+        followerDiagnosticMode = FollowerDiagnosticMode.NONE;
+        outputGate.zeroSucceeded();
+        lastZeroConfirmedAt = now;
+        invalidateSampleLocked(now);
+      }
+    }
+    logState("configured revision=" + revision);
+  }
+
+  private void configurationCancelled() {
+    synchronized (stateLock) {
+      recoveryState.operationCancelled(Timer.getFPGATimestamp());
+    }
+  }
+
+  private void configurationFailed(String error) {
+    double now = Timer.getFPGATimestamp();
+    ZeroWork zeroWork;
+    ZeroWork leaderZeroWork;
+    SparkMAXContainer leader;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        recordFailureLocked(now, error, false);
+        zeroWork = reserveZeroWorkLocked(now);
+        leader = desiredFollower ? followerLeader : null;
+      }
+      leaderZeroWork = revokeLeaderForDependentLocked(leader, port, error, now, true);
+    }
+    if (zeroWork != null) {
+      runZeroWork(zeroWork);
+    }
+    if (leaderZeroWork != null) {
+      runZeroWork(leaderZeroWork);
+    }
+    logState(error + " zero=worker");
+  }
+
+  private void sampleSucceeded(
+      PeriodicStatus0 status0,
+      PeriodicStatus1 status1,
+      PeriodicStatus2 status2) {
+    double now = Timer.getFPGATimestamp();
+    String failure = null;
+    boolean reset = false;
+    boolean waitingForBaseline = false;
+    ZeroWork zeroWork = null;
+    ZeroWork leaderZeroWork;
+    SparkMAXContainer leader = null;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        sampleInFlight = false;
+        nextSampleAt = now + STATUS_SAMPLE_PERIOD_SECONDS;
+
+        Observation resetObservation = resetGuard.observe(
+            now, status1.hasResetWarning, status1.hasResetStickyWarning);
+        if (resetObservation == Observation.WAITING_FOR_BASELINE) {
+          waitingForBaseline = true;
+        } else if (resetObservation == Observation.BASELINE_TIMEOUT) {
+          failure = "reset baseline did not clear";
+        } else if (resetObservation == Observation.RESET_DETECTED) {
+          reset = true;
+        } else {
+          failure = fatalFaultSummary(status1);
+          if (failure == null) {
+            failure = validateFollowerStatusLocked(status1.isFollower, now);
+          }
+        }
+
+        if (reset) {
+          recordFailureLocked(now, "controller reset", true);
+          zeroWork = reserveZeroWorkLocked(now);
+          leader = desiredFollower ? followerLeader : null;
+        } else if (failure != null) {
+          recordFailureLocked(now, failure, false);
+          zeroWork = reserveZeroWorkLocked(now);
+          leader = desiredFollower ? followerLeader : null;
+        } else if (!waitingForBaseline) {
+          consecutiveSampleFailures = 0;
+          cachedAppliedOutput = status0.appliedOutput;
+          cachedBusVoltage = status0.voltage;
+          cachedCurrent = status0.current;
+          cachedTemperatureCelsius = status0.motorTemperature;
+          cachedFollower = status1.isFollower;
+          if (status2 != null) {
+            cachedPosition = status2.primaryEncoderPosition;
+            cachedVelocity = status2.primaryEncoderVelocity;
+          }
+          if (Math.abs(status0.appliedOutput) > 1e-9) {
+            outputGate.observeNonzero();
+          }
+          lastSampleAt = now;
+        }
+      }
+      leaderZeroWork = revokeLeaderForDependentLocked(
+          leader, port, reset ? "controller reset" : failure, now, true);
+    }
+    if (zeroWork != null) {
+      runZeroWork(zeroWork);
+    }
+    if (leaderZeroWork != null) {
+      runZeroWork(leaderZeroWork);
+    }
+
+    if (reset) {
+      logState("controller reset detected " + statusEvidenceSummary(status1)
+          + " zero=worker");
+    } else if (failure != null) {
+      logState(failure + " " + statusEvidenceSummary(status1) + " zero=worker");
+    }
+  }
+
+  private String validateFollowerStatusLocked(boolean actualFollower, double now) {
+    if (!desiredFollower) {
+      return actualFollower ? "unexpected follower mode" : null;
+    }
+
+    if (followerDiagnosticMode == FollowerDiagnosticMode.LEADER_ZERO_PENDING) {
+      return actualFollower ? null : "follower mode lost while waiting for leader stop";
+    }
+    if (followerDiagnosticMode == FollowerDiagnosticMode.PAUSE_PENDING) {
+      if (!actualFollower) {
+        followerDiagnosticMode = FollowerDiagnosticMode.ACTIVE;
+        return null;
+      }
+      return now > followerTransitionDeadline ? "follower pause timeout" : null;
+    }
+    if (followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE) {
+      return actualFollower ? "follower restarted during diagnostic" : null;
+    }
+    if (followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING) {
+      return null;
+    }
+    if (followerDiagnosticMode == FollowerDiagnosticMode.RESUME_PENDING) {
+      if (actualFollower) {
+        followerDiagnosticMode = FollowerDiagnosticMode.NONE;
+        return null;
+      }
+      return now > followerTransitionDeadline ? "follower resume timeout" : null;
+    }
+    return actualFollower ? null : "follower mode lost";
+  }
+
+  private static String fatalFaultSummary(PeriodicStatus1 status) {
+    if (status.otherFault
+        || status.motorTypeFault
+        || status.sensorFault
+        || status.canFault
+        || status.temperatureFault
+        || status.drvFault
+        || status.escEepromFault
+        || status.firmwareFault) {
+      return String.format(
+          "fault other=%s motor=%s sensor=%s can=%s temp=%s driver=%s eeprom=%s firmware=%s",
+          status.otherFault,
+          status.motorTypeFault,
+          status.sensorFault,
+          status.canFault,
+          status.temperatureFault,
+          status.drvFault,
+          status.escEepromFault,
+          status.firmwareFault);
+    }
+    return null;
+  }
+
+  private void sampleFailed(String error) {
+    boolean revoked = false;
+    double now = Timer.getFPGATimestamp();
+    ZeroWork zeroWork = null;
+    ZeroWork leaderZeroWork;
+    SparkMAXContainer leader = null;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        sampleInFlight = false;
+        nextSampleAt = now + 0.05;
+        consecutiveSampleFailures++;
+        if (consecutiveSampleFailures >= 3
+            || (Double.isFinite(lastSampleAt)
+                && now - lastSampleAt > STATUS_FRESHNESS_SECONDS)) {
+          recordFailureLocked(now, error, false);
+          zeroWork = reserveZeroWorkLocked(now);
+          leader = desiredFollower ? followerLeader : null;
+          revoked = true;
+        }
+      }
+      leaderZeroWork = revokeLeaderForDependentLocked(leader, port, error, now, true);
+    }
+    if (zeroWork != null) {
+      runZeroWork(zeroWork);
+    }
+    if (leaderZeroWork != null) {
+      runZeroWork(leaderZeroWork);
+    }
+    if (revoked) {
+      logState(error + " zero=worker");
+    }
+  }
+
+  private void sampleCancelled() {
+    synchronized (stateLock) {
+      sampleInFlight = false;
+      nextSampleAt = Timer.getFPGATimestamp();
+    }
+  }
+
+  private void invalidateSampleLocked(double now) {
+    lastSampleAt = Double.NEGATIVE_INFINITY;
+    nextSampleAt = now;
+  }
+
+  private void recordFailureLocked(double now, String error, boolean reset) {
+    if (reset) {
+      recoveryState.resetDetected(now);
+    } else {
+      recoveryState.operationFailed(now, error);
+    }
+    followerDiagnosticMode = FollowerDiagnosticMode.NONE;
+    invalidateSampleLocked(now);
+    outputGate.requireZero(now, true);
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK is held and no other device stateLock is held. */
+  private static ZeroWork revokeLeaderForDependentLocked(
+      SparkMAXContainer leader,
+      int followerPort,
+      String reason,
+      double now,
+      boolean attemptZeroNow) {
+    if (leader == null) {
+      return null;
+    }
+    synchronized (leader.stateLock) {
+      if (leader.recoveryState.isConfigurationReady()
+          || leader.outputGate.outputMayBeNonzero()) {
+        leader.recordFailureLocked(
+            now, "dependent follower " + followerPort + " unavailable: " + reason, false);
+      } else {
+        leader.outputGate.requireZero(now, true);
+      }
+      if (attemptZeroNow) {
+        return leader.reserveZeroWorkLocked(now);
+      }
+      return null;
+    }
+  }
+
+  private static String statusEvidenceSummary(PeriodicStatus1 status) {
+    return String.format(
+        "reset(active=%s sticky=%s) follower=%s "
+            + "fault(active=%s/%s/%s/%s/%s/%s/%s/%s "
+            + "sticky=%s/%s/%s/%s/%s/%s/%s/%s) "
+            + "warning(activeBrownout=%s activeOvercurrent=%s activeStall=%s "
+            + "stickyBrownout=%s stickyOvercurrent=%s stickyStall=%s)",
+        status.hasResetWarning,
+        status.hasResetStickyWarning,
+        status.isFollower,
+        status.otherFault,
+        status.motorTypeFault,
+        status.sensorFault,
+        status.canFault,
+        status.temperatureFault,
+        status.drvFault,
+        status.escEepromFault,
+        status.firmwareFault,
+        status.otherStickyFault,
+        status.motorTypeStickyFault,
+        status.sensorStickyFault,
+        status.canStickyFault,
+        status.temperatureStickyFault,
+        status.drvStickyFault,
+        status.escEepromStickyFault,
+        status.firmwareStickyFault,
+        status.brownoutWarning,
+        status.overcurrentWarning,
+        status.stallWarning,
+        status.brownoutStickyWarning,
+        status.overcurrentStickyWarning,
+        status.stallStickyWarning);
+  }
+
+  private void desiredConfigChanged() {
+    double now = Timer.getFPGATimestamp();
+    SparkMAXContainer leader;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        desiredRevision++;
+        recoveryState.desiredRevisionChanged(desiredRevision, now);
+        followerDiagnosticMode = FollowerDiagnosticMode.NONE;
+        lastSampleAt = Double.NEGATIVE_INFINITY;
+        outputGate.requireZero(now, true);
+        leader = desiredFollower ? followerLeader : null;
+      }
+      requestLeaderZeroLocked(leader, now, false);
+    }
+  }
+
+  /** Returns true only when current desired config and a recent status frame are verified. */
   public boolean isAvailable() {
-    return available;
+    return isReady();
+  }
+
+  public boolean isReady() {
+    double now = Timer.getFPGATimestamp();
+    String failure = null;
+    SparkMAXContainer leader = null;
+    boolean hardwareReady;
+    boolean baseReady;
+    boolean dependenciesReady;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (isStatusStaleLocked(now)) {
+          failure = "status stale";
+          recordFailureLocked(now, failure, false);
+          leader = desiredFollower ? followerLeader : null;
+        }
+        hardwareReady = isBaseReadyLocked(now);
+        baseReady = hardwareReady && followerDiagnosticMode == FollowerDiagnosticMode.NONE;
+        if (!hardwareReady && outputGate.needsZeroCommand()) {
+          outputGate.requireZero(now, false);
+        }
+      }
+      revokeLeaderForDependentLocked(leader, port, failure, now, false);
+      dependenciesReady = baseReady && requiredFollowersReadyLocked(now);
+      if (baseReady && !dependenciesReady) {
+        synchronized (stateLock) {
+          if (outputGate.needsZeroCommand()) {
+            outputGate.requireZero(now, false);
+          }
+        }
+      }
+    }
+    if (failure != null) {
+      logState(failure + " zero=queued");
+    }
+    return baseReady && dependenciesReady;
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK is held. */
+  private boolean requiredFollowersReadyLocked(double now) {
+    for (SparkMAXContainer follower : requiredFollowers) {
+      synchronized (follower.stateLock) {
+        if (follower.followerLeader != this
+            || !follower.desiredFollower
+            || follower.followerDiagnosticMode != FollowerDiagnosticMode.NONE
+            || !follower.isBaseReadyLocked(now)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK is held. */
+  private static void requestLeaderZeroLocked(
+      SparkMAXContainer leader, double now, boolean retryImmediately) {
+    if (leader == null) {
+      return;
+    }
+    synchronized (leader.stateLock) {
+      if (retryImmediately || leader.outputGate.needsZeroCommand()) {
+        leader.outputGate.requireZero(now, retryImmediately);
+      }
+    }
   }
 
   public static String getDeviceAvailabilitySummary() {
-    return DEVICE_AVAILABILITY.toString();
+    Map<Integer, String> summary = new TreeMap<>();
+    for (SparkMAXContainer device : DEVICES) {
+      summary.put(device.port, device.getHealthSummary());
+    }
+    return summary.toString();
+  }
+
+  private String getHealthSummary() {
+    double now = Timer.getFPGATimestamp();
+    synchronized (stateLock) {
+      String state = recoveryState.getSummary();
+      if (recoveryState.isConfigurationReady()
+          && Double.isFinite(lastSampleAt)
+          && now - lastSampleAt > STATUS_FRESHNESS_SECONDS) {
+        state += "/STATUS_STALE";
+      }
+      if (recoveryState.isConfigurationReady() && !resetGuard.isArmed()) {
+        state += "/RESET_BASELINE";
+      }
+      if (followerDiagnosticMode != FollowerDiagnosticMode.NONE) {
+        state += "/DIAGNOSTIC_" + followerDiagnosticMode;
+      }
+      return state;
+    }
   }
 
   public String getDiagnosticStatus() {
-    if (!available) {
-      return String.format("id=%d offline", port);
+    synchronized (stateLock) {
+      return String.format(
+          "id=%d state=%s fw=0x%08X follower=%s applied=%.3f current=%.2fA "
+              + "velocity=%.1frpm bus=%.2fV",
+          port,
+          getHealthSummary(),
+          firmwareVersion,
+          cachedFollower,
+          cachedAppliedOutput,
+          cachedCurrent,
+          cachedVelocity,
+          cachedBusVoltage);
     }
-    return String.format(
-        "id=%d applied=%.3f current=%.2fA velocity=%.1frpm bus=%.2fV",
-        port, motor.getAppliedOutput(), motor.getOutputCurrent(), getVelocity(), motor.getBusVoltage());
   }
 
-  /**
-   * Assigns the defualt PID values to the motor assumes P = 0.1, I = 0, D = 0
-   */
+  /** Records PID configuration even while the device is offline. */
   @Override
   public void assignPIDValues() {
-    assignPIDValues(0.1, 0, 0);
-  }
-
-  /**
-   * Assigns the PID values to the motor
-   * 
-   * @param P the P value
-   * @param I the I value
-   * @param D the D value
-   */
-  @Override
-  public void assignPIDValues(double P, double I, double D) {
-    if (!available) return;
-    config.closedLoop.p(P).i(I).d(D);
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
-  }
-
-  /**
-  * @param kS UNITS: Volts
-  * @param kV UNITS:Volts per velocity, DESC: Volts per motor RPM by default
-  * @param kA UNITS:Volts per velocity/s, DESC: Volts per motor RPM/s by default
-  * @param kG UNITS:Volts, DESC Elevator/linear mechanism gravity feedforward
-  * @param kCos UNITS:Volts, DESC Arm/rotary mechanism gravity feedforward. Feedback sensor must be configured to 0 = horizontal
-  * @paramCosRatio UNITS: Ratio, Converts feedback sensor readings to mechanism rotations
-  * @see https://docs.revrobotics.com/revlib/spark/closed-loop/feed-forward-control
-  */ 
-  public void assignFF(double kS, double kV, double kA, double kG, double kCos, double kCosRatio){
-    if (!available) return;
-    config.closedLoop.feedForward.kS(kS).kV(kV).kA(kA).kG(kG).kCos(kCos).kCosRatio(kCosRatio);
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+    assignPIDValues(0.1, 0.0, 0.0);
   }
 
   @Override
-  public void assignFF(double kS, double kV, double kA, double kG){
-    if (!available) return;
-    config.closedLoop.feedForward.kS(kS).kV(kV).kA(kA).kG(kG);
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
-  }
-
-  /**
-   * Assigns this motor to follow another SparkMaxContainer
-   * 
-   * @param leader the spark max this should follow
-   * @param invert weither or not this motor should be inverted from the other
-   *               motor
-   */
-  public void setupAsFollowerMotor(MotorContainer leader, boolean invert) throws IllegalArgumentException {
-    if(leader instanceof SparkMAXContainer) {
-      SparkMAXContainer lead = (SparkMAXContainer) leader;
-      if (!available || !lead.isAvailable()) return;
-      config.follow(lead.port, invert);
-      motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
-    } else {
-      DriverStation.reportError("SparkMAXContainer can only follow other SparkMAXContainers", false);
-      throw new IllegalArgumentException("SparkMAXContainer can only follow other SparkMAXContainers");
+  public void assignPIDValues(double p, double i, double d) {
+    if (!allFinite(p, i, d)) {
+      DriverStation.reportWarning("Rejected non-finite PID for SPARK " + port, false);
+      return;
     }
+    synchronized (stateLock) {
+      desiredP = p;
+      desiredI = i;
+      desiredD = d;
+      desiredConfig.closedLoop.p(p).i(i).d(d);
+    }
+    desiredConfigChanged();
   }
 
-  /**
-   * Sets the gear ratio of the motor for finner postion control
-   * 
-   * @param gearRatio can be represeneted via a fraction
-   */
+  public void assignFF(
+      double kS,
+      double kV,
+      double kA,
+      double kG,
+      double kCos,
+      double kCosRatio) {
+    if (!allFinite(kS, kV, kA, kG, kCos, kCosRatio)) {
+      DriverStation.reportWarning("Rejected non-finite feedforward for SPARK " + port, false);
+      return;
+    }
+    synchronized (stateLock) {
+      desiredConfig.closedLoop.feedForward
+          .kS(kS).kV(kV).kA(kA).kG(kG).kCos(kCos).kCosRatio(kCosRatio);
+    }
+    desiredConfigChanged();
+  }
+
+  @Override
+  public void assignFF(double kS, double kV, double kA, double kG) {
+    if (!allFinite(kS, kV, kA, kG)) {
+      DriverStation.reportWarning("Rejected non-finite feedforward for SPARK " + port, false);
+      return;
+    }
+    synchronized (stateLock) {
+      desiredConfig.closedLoop.feedForward.kS(kS).kV(kV).kA(kA).kG(kG);
+    }
+    desiredConfigChanged();
+  }
+
+  /** Records follower CAN ID regardless of whether either controller is currently online. */
+  @Override
+  public void setupAsFollowerMotor(MotorContainer leader, boolean invert) {
+    if (!(leader instanceof SparkMAXContainer sparkLeader)) {
+      throw new IllegalArgumentException(
+          "SparkMAXContainer can only follow another SparkMAXContainer");
+    }
+    if (sparkLeader == this) {
+      throw new IllegalArgumentException("A SPARK cannot follow itself");
+    }
+    synchronized (OUTPUT_ORDER_LOCK) {
+      if (FOLLOWER_TOPOLOGY_FROZEN.get()) {
+        throw new IllegalStateException("Follower topology is frozen after SPARK service starts");
+      }
+      synchronized (stateLock) {
+        if (!requiredFollowers.isEmpty()) {
+          throw new IllegalArgumentException(
+              "A SPARK leader with followers cannot become follower " + port);
+        }
+      }
+      synchronized (sparkLeader.stateLock) {
+        if (sparkLeader.desiredFollower) {
+          throw new IllegalArgumentException(
+              "Follower chains are not supported for SPARK " + port);
+        }
+      }
+      for (SparkMAXContainer ancestor = sparkLeader;
+          ancestor != null;
+          ancestor = ancestor.followerLeader) {
+        if (ancestor == this) {
+          throw new IllegalArgumentException("Follower cycle involving SPARK " + port);
+        }
+      }
+      SparkMAXContainer oldLeader;
+      synchronized (stateLock) {
+        oldLeader = followerLeader;
+        followerLeader = sparkLeader;
+        desiredFollower = true;
+        desiredConfig.follow(sparkLeader.port, invert);
+      }
+      if (oldLeader != null && oldLeader != sparkLeader) {
+        synchronized (oldLeader.stateLock) {
+          oldLeader.requiredFollowers.remove(this);
+        }
+      }
+      synchronized (sparkLeader.stateLock) {
+        if (!sparkLeader.requiredFollowers.contains(this)) {
+          sparkLeader.requiredFollowers.add(this);
+        }
+      }
+    }
+    desiredConfigChanged();
+  }
+
+  public void disableFollowerMode() {
+    synchronized (OUTPUT_ORDER_LOCK) {
+      if (FOLLOWER_TOPOLOGY_FROZEN.get()) {
+        throw new IllegalStateException("Follower topology is frozen after SPARK service starts");
+      }
+      SparkMAXContainer oldLeader;
+      synchronized (stateLock) {
+        oldLeader = followerLeader;
+        followerLeader = null;
+        desiredFollower = false;
+        desiredConfig.disableFollowerMode();
+      }
+      if (oldLeader != null) {
+        synchronized (oldLeader.stateLock) {
+          oldLeader.requiredFollowers.remove(this);
+        }
+      }
+    }
+    desiredConfigChanged();
+  }
+
+  @Override
   public void setGearRatio(double gearRatio) {
-    if (!available) return;
-    // setPositionConversionFactor
-    config.encoder.positionConversionFactor(gearRatio);
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+    if (!Double.isFinite(gearRatio) || gearRatio == 0.0) {
+      DriverStation.reportWarning("Rejected invalid gear ratio for SPARK " + port, false);
+      return;
+    }
+    synchronized (stateLock) {
+      desiredConfig.encoder.positionConversionFactor(gearRatio);
+    }
+    desiredConfigChanged();
   }
 
-  /**
-   * Sends the motor to a specific position, returns true if it is within the
-   * deadband (0.5 rotations)
-   * 
-   * @param pos desired postion
-   * @return true when within deadband
-   */
-  public boolean goToPostion(double pos) {
-    return this.goToPostion(pos, 0.5);
+  @Override
+  public void setCurrentLimit(double limit) {
+    if (!Double.isFinite(limit)) {
+      DriverStation.reportWarning("Rejected non-finite current limit for SPARK " + port, false);
+      return;
+    }
+    double safeLimit = Math.max(1.0, Math.min(100.0, Math.abs(limit)));
+    synchronized (stateLock) {
+      desiredSmartCurrentLimit = Math.floor(safeLimit);
+      desiredSecondaryCurrentLimit = Math.min(100.0, safeLimit + 5.0);
+      desiredConfig.smartCurrentLimit((int) desiredSmartCurrentLimit);
+      desiredConfig.secondaryCurrentLimit(desiredSecondaryCurrentLimit);
+    }
+    desiredConfigChanged();
   }
 
-  /**
-   * Sends the motor to a specific position, returns true if it is within the
-   * deadband
-   * 
-   * @param pos      desired postion
-   * @param deadband the deadband to be within, deadband should not be 0 but can
-   *                 be as small as 1
-   * @return true when within deadband
-   */
-  public boolean goToPostion(double pos, double deadband) {
-    if (!available) return false;
-    try {
-      var encoderPos = encoder.getPosition();
-      motor.getClosedLoopController().setSetpoint(pos, ControlType.kPosition);
-      return Math.abs(encoderPos - pos) <= Math.abs(deadband);
-    } catch (Exception e) {
-      DriverStation.reportError(e.getMessage(), false);
+  public void setInverted(boolean value) {
+    synchronized (stateLock) {
+      desiredConfig.inverted(value);
+    }
+    desiredConfigChanged();
+  }
+
+  public void setSmartCurrentLimit(int limit) {
+    int safeLimit = (int) Math.max(1L, Math.min(100L, Math.abs((long) limit)));
+    synchronized (stateLock) {
+      desiredSmartCurrentLimit = safeLimit;
+      desiredConfig.smartCurrentLimit(safeLimit);
+    }
+    desiredConfigChanged();
+  }
+
+  public void setSecondaryCurrentLimit(double limit) {
+    if (!Double.isFinite(limit)) {
+      DriverStation.reportWarning("Rejected non-finite current limit for SPARK " + port, false);
+      return;
+    }
+    double safeLimit = Math.max(1.0, Math.min(100.0, Math.abs(limit)));
+    synchronized (stateLock) {
+      desiredSecondaryCurrentLimit = safeLimit;
+      desiredConfig.secondaryCurrentLimit(safeLimit);
+    }
+    desiredConfigChanged();
+  }
+
+  @Override
+  public void setBreakMode(boolean isBrakeMode) {
+    synchronized (stateLock) {
+      desiredConfig.idleMode(isBrakeMode ? IdleMode.kBrake : IdleMode.kCoast);
+    }
+    desiredConfigChanged();
+  }
+
+  public void setMaxSpeed(double speed) {
+    if (!Double.isFinite(speed)) {
+      DriverStation.reportWarning("Rejected non-finite output range for SPARK " + port, false);
+      return;
+    }
+    double safeSpeed = Math.min(1.0, Math.abs(speed));
+    synchronized (stateLock) {
+      desiredConfig.closedLoop.outputRange(-safeSpeed, safeSpeed);
+    }
+    desiredConfigChanged();
+  }
+
+  /** Sends open-loop duty cycle only while the latest config and status are ready. */
+  public boolean setDutyCycle(double output) {
+    return setDutyCycleInternal(output, false);
+  }
+
+  private boolean setDutyCycleInternal(double output, boolean diagnosticFollowerOutput) {
+    if (!Double.isFinite(output)) {
       return false;
     }
+    double clampedOutput = Math.max(-1.0, Math.min(1.0, output));
+    if (Math.abs(clampedOutput) <= 1e-9) {
+      requestZeroOutput();
+      return true;
+    }
+    return trySetpoint(clampedOutput, ControlType.kDutyCycle, diagnosticFollowerOutput);
   }
 
-  /**
-   * Sets the current limit of the motor
-   * primarily uses smart current limit but has the secondary current limit as +5
-   * as a saftey
-   * @param limit
-   */
-  public void setCurrentLimit(double limit) {
-    if (!available) return;
-    double safeLimit = Math.max(1, Math.abs(limit));
-    config.smartCurrentLimit((int) safeLimit);
-    config.secondaryCurrentLimit(Math.min(100, safeLimit + 5));
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+  @Override
+  public boolean goToPostion(double position) {
+    return goToPostion(position, 0.5);
   }
 
-  public void setInverted(boolean value){
-    if (!available) return;
-    this.config.inverted(value);
-    this.motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+  @Override
+  public boolean goToPostion(double position, double deadband) {
+    if (!Double.isFinite(position) || encoder == null) {
+      return false;
+    }
+    if (!trySetpoint(position, ControlType.kPosition, false)) {
+      return false;
+    }
+    return Math.abs(getPosition() - position) <= Math.abs(deadband);
   }
 
-  /**
-   * Sets the smart current limit of the motor
-   * @param limit
-   */
-  public void setSmartCurrentLimit(int limit){
-    if (!available) return;
-    config.smartCurrentLimit(limit);
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+  public double setVelocity(double velocity) {
+    if (!Double.isFinite(velocity)) {
+      return 0.0;
+    }
+    if (!trySetpoint(velocity, ControlType.kVelocity, false)) {
+      return 0.0;
+    }
+    return getVelocity();
   }
 
-  /**
-   * Sets the secondary current limit of the motor
-   * @param limit
-   */
-  public void setSecondaryCurrentLimit(double limit) {
-    if (!available) return;
-    config.secondaryCurrentLimit(limit);
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+  /** Stops output even when the device is not READY; nonzero requests are never queued. */
+  public void stop() {
+    FollowerDiagnosticMode mode;
+    synchronized (stateLock) {
+      mode = followerDiagnosticMode;
+    }
+    if (mode != FollowerDiagnosticMode.NONE) {
+      endFollowerDiagnostic();
+    } else {
+      requestZeroOutput();
+    }
   }
 
-  /**
-   * Sets the break mode of the motor
-   * 
-   * @param isBreakMode true for break mode, false for coast mode
-   */
-  public void setBreakMode(boolean isBreakMode) {
-    if (!available) return;
-    config.idleMode(isBreakMode ? IdleMode.kBrake : IdleMode.kCoast);
-    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+  private void requestZeroOutput() {
+    double now = Timer.getFPGATimestamp();
+    SparkMAXContainer leader;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (outputGate.needsZeroCommand()) {
+          outputGate.requireZero(now, false);
+        }
+        leader = desiredFollower ? followerLeader : null;
+      }
+      requestLeaderZeroLocked(leader, now, false);
+    }
+  }
+
+  private boolean trySetpoint(
+      double value, ControlType controlType, boolean diagnosticFollowerOutput) {
+    double now = Timer.getFPGATimestamp();
+    String failure = null;
+    SparkMAXContainer leader = null;
+    boolean accepted = false;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      boolean dependenciesReady = diagnosticFollowerOutput || requiredFollowersReadyLocked(now);
+      synchronized (stateLock) {
+        if (isStatusStaleLocked(now)) {
+          failure = "status stale";
+          recordFailureLocked(now, failure, false);
+          leader = desiredFollower ? followerLeader : null;
+        }
+
+        boolean followerOutputAllowed = !desiredFollower
+            || (diagnosticFollowerOutput
+                && followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE);
+        if (failure == null
+            && dependenciesReady
+            && isBaseReadyLocked(now)
+            && followerOutputAllowed) {
+          REVLibError result = closedLoopController.setSetpoint(value, controlType);
+          if (result == REVLibError.kOk) {
+            outputGate.nonzeroSucceeded();
+            accepted = true;
+          } else {
+            failure = "setpoint " + result;
+            recordFailureLocked(now, failure, false);
+            leader = desiredFollower ? followerLeader : null;
+          }
+        } else if (!accepted && outputGate.needsZeroCommand()) {
+          outputGate.requireZero(now, false);
+        }
+      }
+      revokeLeaderForDependentLocked(leader, port, failure, now, false);
+    }
+    if (failure != null) {
+      logState(failure + " zero=queued");
+    }
+    return accepted;
+  }
+
+  /** Pauses configured follower mode and applies a diagnostic output capped at 10%. */
+  public boolean beginFollowerDiagnostic(double output) {
+    double safeOutput = Math.max(
+        -MAX_DIAGNOSTIC_DUTY_CYCLE,
+        Math.min(MAX_DIAGNOSTIC_DUTY_CYCLE, output));
+    double now = Timer.getFPGATimestamp();
+    boolean applyOutput = false;
+    boolean accepted = false;
+    String failure = null;
+    SparkMAXContainer leader = null;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (!desiredFollower) {
+          return false;
+        }
+        leader = followerLeader;
+        if (followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE) {
+          applyOutput = true;
+        } else if (followerDiagnosticMode == FollowerDiagnosticMode.PAUSE_PENDING) {
+          accepted = true;
+        } else if (followerDiagnosticMode == FollowerDiagnosticMode.LEADER_ZERO_PENDING) {
+          accepted = true;
+        } else if (followerDiagnosticMode == FollowerDiagnosticMode.NONE
+            && isBaseReadyLocked(now)
+            && !zeroInFlight) {
+          followerDiagnosticMode = FollowerDiagnosticMode.LEADER_ZERO_PENDING;
+          accepted = true;
+        }
+      }
+
+      requestLeaderZeroLocked(leader, now, false);
+      double leaderStoppedAt = getLeaderStoppedAtLocked(leader, now);
+      synchronized (stateLock) {
+        if (applyOutput && !Double.isFinite(leaderStoppedAt)) {
+          applyOutput = false;
+          accepted = true;
+          if (outputGate.needsZeroCommand()) {
+            outputGate.requireZero(now, false);
+          }
+        }
+        if (followerDiagnosticMode == FollowerDiagnosticMode.LEADER_ZERO_PENDING
+            && followerLeader == leader
+            && Double.isFinite(leaderStoppedAt)
+            && isBaseReadyLocked(now)
+            && cachedFollower
+            && lastSampleAt >= leaderStoppedAt
+            && Math.abs(cachedAppliedOutput) <= 0.01
+            && Math.abs(cachedVelocity) <= FOLLOWER_DIAGNOSTIC_STOPPED_RPM) {
+          REVLibError pauseResult = motor.pauseFollowerModeAsync();
+          if (pauseResult == REVLibError.kOk) {
+            followerDiagnosticMode = FollowerDiagnosticMode.PAUSE_PENDING;
+            followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
+            nextSampleAt = now;
+            accepted = true;
+          } else {
+            failure = "follower pause " + pauseResult;
+            recordFailureLocked(now, failure, false);
+          }
+        }
+      }
+      if (failure != null) {
+        revokeLeaderForDependentLocked(leader, port, failure, now, false);
+      }
+    }
+    if (failure != null) {
+      logState(failure + " zero=queued");
+    }
+    return applyOutput ? setDutyCycleInternal(safeOutput, true) : accepted;
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK is held. */
+  private static double getLeaderStoppedAtLocked(SparkMAXContainer leader, double now) {
+    if (leader == null) {
+      return Double.NEGATIVE_INFINITY;
+    }
+    synchronized (leader.stateLock) {
+      boolean stopped = leader.recoveryState.isConfigurationReady()
+          && !leader.zeroInFlight
+          && !leader.outputGate.needsZeroCommand()
+          && Double.isFinite(leader.lastZeroConfirmedAt)
+          && Double.isFinite(leader.lastSampleAt)
+          && leader.lastSampleAt >= leader.lastZeroConfirmedAt
+          && now - leader.lastSampleAt <= STATUS_FRESHNESS_SECONDS
+          && Math.abs(leader.cachedAppliedOutput) <= 0.01
+          && (leader.encoder == null
+              || Math.abs(leader.cachedVelocity) <= FOLLOWER_DIAGNOSTIC_STOPPED_RPM);
+      return stopped ? leader.lastZeroConfirmedAt : Double.NEGATIVE_INFINITY;
+    }
+  }
+
+  /** Queues zero, then restores follower mode on the I/O worker. Idempotent while resuming. */
+  public void endFollowerDiagnostic() {
+    double now = Timer.getFPGATimestamp();
+    SparkMAXContainer leader;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (followerDiagnosticMode == FollowerDiagnosticMode.NONE
+            || followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING
+            || followerDiagnosticMode == FollowerDiagnosticMode.RESUME_PENDING) {
+          return;
+        }
+        if (followerDiagnosticMode == FollowerDiagnosticMode.LEADER_ZERO_PENDING) {
+          followerDiagnosticMode = FollowerDiagnosticMode.NONE;
+          return;
+        }
+        followerDiagnosticMode = FollowerDiagnosticMode.RESUME_ZERO_PENDING;
+        outputGate.requireZero(now, true);
+        nextSampleAt = now;
+        leader = desiredFollower ? followerLeader : null;
+      }
+      requestLeaderZeroLocked(leader, now, false);
+    }
+  }
+
+  public boolean isFollowerDiagnosticActive() {
+    synchronized (stateLock) {
+      return followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE;
+    }
+  }
+
+  /** Explicit one-shot encoder reset. Never queued or replayed after reconnect. */
+  public boolean setEncoderPosition(double position) {
+    if (!Double.isFinite(position) || encoder == null) {
+      return false;
+    }
+    double now = Timer.getFPGATimestamp();
+    String failure = null;
+    SparkMAXContainer leader = null;
+    boolean succeeded = false;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (isBaseReadyLocked(now)
+            && followerDiagnosticMode == FollowerDiagnosticMode.NONE
+            && !zeroInFlight) {
+          REVLibError result = encoder.setPosition(position);
+          if (result == REVLibError.kOk) {
+            succeeded = true;
+          } else {
+            failure = "encoder zero " + result;
+            recordFailureLocked(now, failure, false);
+            leader = desiredFollower ? followerLeader : null;
+          }
+        }
+      }
+      revokeLeaderForDependentLocked(leader, port, failure, now, false);
+    }
+    if (failure != null) {
+      logState(failure + " zero=queued");
+    }
+    return succeeded;
+  }
+
+  public double getPosition() {
+    if (!isReady()) {
+      return 0.0;
+    }
+    synchronized (stateLock) {
+      return cachedPosition;
+    }
+  }
+
+  public double getVelocity() {
+    if (!isReady()) {
+      return 0.0;
+    }
+    synchronized (stateLock) {
+      return cachedVelocity;
+    }
   }
 
   public double getMotorTemperatureInC() {
-    if (!available) return 0;
-    return this.motor.getMotorTemperature();
+    if (!isReady()) {
+      return 0.0;
+    }
+    synchronized (stateLock) {
+      return cachedTemperatureCelsius;
+    }
   }
 
   public double getMotorTemperatureInF() {
-    return (this.getMotorTemperatureInC() * 9 / 5) + 32;
+    return (getMotorTemperatureInC() * 9.0 / 5.0) + 32.0;
   }
 
-  /**
-   * sets the max and min output for the motor by a fraction
-   * @param speed postive number < 1
-   */
-  public void setMaxSpeed(double speed){
-    if (!available) return;
-    speed = Math.abs(speed);
-    this.config.closedLoop.outputRange(-speed, speed);
-    this.motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
+  private boolean isBaseReadyLocked(double now) {
+    return recoveryState.isConfigurationReady()
+        && Double.isFinite(lastSampleAt)
+        && now - lastSampleAt <= STATUS_FRESHNESS_SECONDS
+        && !zeroInFlight
+        && !outputGate.isZeroRequired();
   }
 
-  public double getPosition(){
-    if (!available) return 0;
-    if(encoder == null){
-      DriverStation.reportError("Trying to get position of a brushed motor without an encoder", false);
-      return 0;
-    }
-    return encoder.getPosition();
+  private boolean isStatusStaleLocked(double now) {
+    return recoveryState.isConfigurationReady()
+        && Double.isFinite(lastSampleAt)
+        && now - lastSampleAt > STATUS_FRESHNESS_SECONDS;
   }
 
-  /**
-   * gets the velocity of the motor in RPM
-   * @return velocity in RPM
-   */
-  public double getVelocity(){
-    if (!available) return 0;
-    if(encoder == null){
-      DriverStation.reportError("Trying to get velocity of a brushed motor without an encoder", false);
-      return 0;
-    }
-    return encoder.getVelocity();
-  }
-
-  /**
-   * sets the velocity of the motor in RPM
-   * @param velocity desired velocity in RPM
-   * @return the set velocity
-   */
-  public double setVelocity(double velocity){
-    if (!available) return 0;
-    motor.getClosedLoopController().setSetpoint(velocity, ControlType.kVelocity);
-    return this.getVelocity();
-  }
-  
-  /**
-   * Sends information about the motor to SmartDashboard, these calls should be
-   * contained in an if(!DriverStation.isFMSAttached()) block to avoid flooding
-   * the system in competition
-   * 
-   * @param key the head name of the motor
-   */
-  private boolean canReadTemp = true;
+  @Override
   public void reportMotor(String key) {
-    if (!available) return;
-    SmartDashboard.putNumber(key + "/Encoder Value", encoder.getPosition());
-    SmartDashboard.putNumber(key + "/Velocity", encoder.getVelocity());
-    SmartDashboard.putNumber(key + "/Current", motor.getOutputCurrent());
-    SmartDashboard.putNumber(key + "/Applied Output", motor.getAppliedOutput());
-    SmartDashboard.putNumber(key + "/Voltage", motor.getBusVoltage());
-    SmartDashboard.putNumber(key + "/CurrentLimit/Smart Limit", motor.configAccessor.getSmartCurrentLimit());
-    SmartDashboard.putNumber(key + "/CurrentLimit/Secondary Limit", motor.configAccessor.getSecondaryCurrentLimit()); 
-    try{
-      if (canReadTemp) {
-        SmartDashboard.putNumber(key + "/Motor Temp (F)", this.getMotorTemperatureInF());
-        SmartDashboard.putNumber("Temps(F)/" + key, this.getMotorTemperatureInF());
-        SmartDashboard.putNumber("Temps(C)/" + key, this.getMotorTemperatureInC());
-      }
-    } catch (Exception e){
-      canReadTemp = false;
+    String health = getHealthSummary();
+    double position;
+    double velocity;
+    double current;
+    double appliedOutput;
+    double voltage;
+    double smartLimit;
+    double secondaryLimit;
+    double temperatureF;
+    synchronized (stateLock) {
+      position = cachedPosition;
+      velocity = cachedVelocity;
+      current = cachedCurrent;
+      appliedOutput = cachedAppliedOutput;
+      voltage = cachedBusVoltage;
+      smartLimit = desiredSmartCurrentLimit;
+      secondaryLimit = desiredSecondaryCurrentLimit;
+      temperatureF = (cachedTemperatureCelsius * 9.0 / 5.0) + 32.0;
     }
-    
+    SmartDashboard.putString(key + "/State", health);
+    SmartDashboard.putNumber(key + "/Encoder Value", position);
+    SmartDashboard.putNumber(key + "/Velocity", velocity);
+    SmartDashboard.putNumber(key + "/Current", current);
+    SmartDashboard.putNumber(key + "/Applied Output", appliedOutput);
+    SmartDashboard.putNumber(key + "/Voltage", voltage);
+    SmartDashboard.putNumber(key + "/CurrentLimit/Smart Limit", smartLimit);
+    SmartDashboard.putNumber(key + "/CurrentLimit/Secondary Limit", secondaryLimit);
+    SmartDashboard.putNumber(key + "/Motor Temp (F)", temperatureF);
   }
 
   @Override
   public void getPID(String key) {
-    if (!available) return;
-    // PID
-    SmartDashboard.putNumber(key + "P", motor.configAccessor.closedLoop.getP());
-    SmartDashboard.putNumber(key + "I", motor.configAccessor.closedLoop.getI());
-    SmartDashboard.putNumber(key + "D", motor.configAccessor.closedLoop.getD());
-    // FF
-    SmartDashboard.putNumber(key + "FF/A", motor.configAccessor.closedLoop.feedForward.getkA());
-    SmartDashboard.putNumber(key + "FF/V", motor.configAccessor.closedLoop.feedForward.getkV());
-    SmartDashboard.putNumber(key + "FF/G", motor.configAccessor.closedLoop.feedForward.getkG());
+    synchronized (stateLock) {
+      SmartDashboard.putNumber(key + "P", desiredP);
+      SmartDashboard.putNumber(key + "I", desiredI);
+      SmartDashboard.putNumber(key + "D", desiredD);
+    }
   }
+
+  private void logState(String details) {
+    System.out.printf(
+        "SPARK_HEALTH id=%d state=%s details=[%s]%n",
+        port,
+        getHealthSummary(),
+        details);
+  }
+
+  private static boolean allFinite(double... values) {
+    for (double value : values) {
+      if (!Double.isFinite(value)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private record ConfigurationWork(
+      SparkMAXContainer device,
+      ServiceAction action,
+      SparkMaxConfig config,
+      long revision,
+      boolean expectedFollower,
+      boolean persist) {}
+
+  private record SampleWork(SparkMAXContainer device) {}
+
+  private record ZeroWork(SparkMAXContainer device, long generation) {}
 }
