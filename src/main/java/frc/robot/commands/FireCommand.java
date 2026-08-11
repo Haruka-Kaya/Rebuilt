@@ -44,7 +44,7 @@ public class FireCommand extends Command {
 
     private void feedOnlyWhenShooterIsReady() {
         boolean pathReady = m_feeder.isReady() && m_conveyer.isReady();
-        if (m_shooter.isFlywheelReady() && pathReady) {
+        if (m_shooter.isReadyToFeed() && pathReady) {
             boolean conveyorStarted = m_conveyer.runConveyor();
             boolean feederStarted = conveyorStarted && m_feeder.feed();
             if (conveyorStarted && feederStarted) {

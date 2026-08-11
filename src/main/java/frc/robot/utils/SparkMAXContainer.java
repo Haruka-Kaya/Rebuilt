@@ -2,6 +2,7 @@ package frc.robot.utils;
 
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.TreeMap;
 import java.util.ArrayList;
@@ -68,6 +69,12 @@ public class SparkMAXContainer implements MotorContainer {
     RESUME_PENDING
   }
 
+  public enum PositionCommandStatus {
+    REJECTED,
+    MOVING,
+    AT_TARGET
+  }
+
   private final Object stateLock = new Object();
   private final SparkMax motor;
   private final RelativeEncoder encoder;
@@ -76,6 +83,7 @@ public class SparkMAXContainer implements MotorContainer {
   private final SparkRecoveryState recoveryState;
   private final SparkResetGuard resetGuard = new SparkResetGuard();
   private final SparkOutputGate outputGate = new SparkOutputGate();
+  private final PositionReferenceGuard positionReferenceGuard = new PositionReferenceGuard();
   private final List<SparkMAXContainer> requiredFollowers = new ArrayList<>();
   private final int port;
 
@@ -548,6 +556,7 @@ public class SparkMAXContainer implements MotorContainer {
         recoveryState.operationSucceeded(revision, now);
         if (action == ServiceAction.PROBE_AND_APPLY_RESET) {
           resetGuard.fullConfigurationCompleted(now);
+          positionReferenceGuard.invalidate();
         }
         followerDiagnosticMode = FollowerDiagnosticMode.NONE;
         outputGate.zeroSucceeded();
@@ -760,6 +769,7 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   private void recordFailureLocked(double now, String error, boolean reset) {
+    positionReferenceGuard.invalidate();
     if (reset) {
       recoveryState.resetDetected(now);
     } else {
@@ -835,6 +845,7 @@ public class SparkMAXContainer implements MotorContainer {
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
         desiredRevision++;
+        positionReferenceGuard.invalidate();
         recoveryState.desiredRevisionChanged(desiredRevision, now);
         followerDiagnosticMode = FollowerDiagnosticMode.NONE;
         lastSampleAt = Double.NEGATIVE_INFINITY;
@@ -1174,30 +1185,60 @@ public class SparkMAXContainer implements MotorContainer {
       requestZeroOutput();
       return true;
     }
-    return trySetpoint(clampedOutput, ControlType.kDutyCycle, diagnosticFollowerOutput);
+    return trySetpoint(clampedOutput, ControlType.kDutyCycle, diagnosticFollowerOutput, null);
   }
 
   @Override
+  @Deprecated(forRemoval = false)
   public boolean goToPostion(double position) {
-    return goToPostion(position, 0.5);
+    requestZeroOutput();
+    return false;
   }
 
   @Override
+  @Deprecated(forRemoval = false)
   public boolean goToPostion(double position, double deadband) {
-    if (!Double.isFinite(position) || encoder == null) {
-      return false;
+    requestZeroOutput();
+    return false;
+  }
+
+  /**
+   * Commands a position only while an opaque reference token from this controller is still valid.
+   * The return value means the command was accepted and the cached position is within deadband.
+   */
+  public boolean goToReferencedPosition(
+      double position, double deadband, PositionReferenceGuard.Token reference) {
+    return commandReferencedPosition(position, deadband, reference)
+        == PositionCommandStatus.AT_TARGET;
+  }
+
+  public PositionCommandStatus commandReferencedPosition(
+      double position, double deadband, PositionReferenceGuard.Token reference) {
+    if (!Double.isFinite(position)
+        || !Double.isFinite(deadband)
+        || encoder == null
+        || reference == null) {
+      requestZeroOutput();
+      return PositionCommandStatus.REJECTED;
     }
-    if (!trySetpoint(position, ControlType.kPosition, false)) {
-      return false;
+    if (!trySetpoint(position, ControlType.kPosition, false, reference)) {
+      return PositionCommandStatus.REJECTED;
     }
-    return Math.abs(getPosition() - position) <= Math.abs(deadband);
+    synchronized (stateLock) {
+      if (!positionReferenceGuard.isValid(reference)) {
+        return PositionCommandStatus.REJECTED;
+      }
+      return Math.abs(cachedPosition - position) <= Math.abs(deadband)
+          ? PositionCommandStatus.AT_TARGET
+          : PositionCommandStatus.MOVING;
+    }
   }
 
   public double setVelocity(double velocity) {
     if (!Double.isFinite(velocity)) {
       return 0.0;
     }
-    if (!trySetpoint(velocity, ControlType.kVelocity, false)) {
+    if (!trySetpoint(velocity, ControlType.kVelocity, false, null)) {
       return 0.0;
     }
     return getVelocity();
@@ -1231,7 +1272,10 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   private boolean trySetpoint(
-      double value, ControlType controlType, boolean diagnosticFollowerOutput) {
+      double value,
+      ControlType controlType,
+      boolean diagnosticFollowerOutput,
+      PositionReferenceGuard.Token positionReference) {
     double now = Timer.getFPGATimestamp();
     String failure = null;
     SparkMAXContainer leader = null;
@@ -1248,10 +1292,13 @@ public class SparkMAXContainer implements MotorContainer {
         boolean followerOutputAllowed = !desiredFollower
             || (diagnosticFollowerOutput
                 && followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE);
+        boolean positionReferenceAllowed = controlType != ControlType.kPosition
+            || positionReferenceGuard.isValid(positionReference);
         if (failure == null
             && dependenciesReady
             && isBaseReadyLocked(now)
-            && followerOutputAllowed) {
+            && followerOutputAllowed
+            && positionReferenceAllowed) {
           REVLibError result = closedLoopController.setSetpoint(value, controlType);
           if (result == REVLibError.kOk) {
             outputGate.nonzeroSucceeded();
@@ -1393,36 +1440,63 @@ public class SparkMAXContainer implements MotorContainer {
     }
   }
 
-  /** Explicit one-shot encoder reset. Never queued or replayed after reconnect. */
+  /**
+   * Legacy encoder-zero API is intentionally blocked because it produced no continuity token.
+   * Reference establishment will be added as worker-mediated homing after sensors are specified.
+   */
+  @Deprecated(forRemoval = false)
   public boolean setEncoderPosition(double position) {
-    if (!Double.isFinite(position) || encoder == null) {
-      return false;
-    }
+    requestZeroOutput();
+    return false;
+  }
+
+  public boolean isPositionReferenceValid(PositionReferenceGuard.Token reference) {
     double now = Timer.getFPGATimestamp();
-    String failure = null;
-    SparkMAXContainer leader = null;
-    boolean succeeded = false;
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
-        if (isBaseReadyLocked(now)
-            && followerDiagnosticMode == FollowerDiagnosticMode.NONE
-            && !zeroInFlight) {
-          REVLibError result = encoder.setPosition(position);
-          if (result == REVLibError.kOk) {
-            succeeded = true;
-          } else {
-            failure = "encoder zero " + result;
-            recordFailureLocked(now, failure, false);
-            leader = desiredFollower ? followerLeader : null;
-          }
-        }
+        return positionReferenceGuard.isValid(reference) && isBaseReadyLocked(now);
       }
-      revokeLeaderForDependentLocked(leader, port, failure, now, false);
     }
-    if (failure != null) {
-      logState(failure + " zero=queued");
+  }
+
+  public long getPositionContinuityEpoch() {
+    return positionReferenceGuard.generation();
+  }
+
+  public String getPositionReferenceStatus(PositionReferenceGuard.Token reference) {
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (reference == null) {
+          return "UNREFERENCED";
+        }
+        if (!positionReferenceGuard.isValid(reference)) {
+          return "INVALIDATED";
+        }
+        return isBaseReadyLocked(now) ? "REFERENCED" : "CONTROLLER_NOT_READY";
+      }
     }
-    return succeeded;
+  }
+
+  /** Returns no value instead of conflating unavailable status with a real encoder zero. */
+  public OptionalDouble getPositionIfReady() {
+    if (!isReady()) {
+      return OptionalDouble.empty();
+    }
+    synchronized (stateLock) {
+      return OptionalDouble.of(cachedPosition);
+    }
+  }
+
+  public OptionalDouble getReferencedPosition(PositionReferenceGuard.Token reference) {
+    if (!isPositionReferenceValid(reference)) {
+      return OptionalDouble.empty();
+    }
+    synchronized (stateLock) {
+      return positionReferenceGuard.isValid(reference)
+          ? OptionalDouble.of(cachedPosition)
+          : OptionalDouble.empty();
+    }
   }
 
   public double getPosition() {

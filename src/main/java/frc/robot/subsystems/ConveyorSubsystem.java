@@ -27,8 +27,8 @@ public class ConveyorSubsystem extends SubsystemBase {
         return m_feederBelt.setDutyCycle(inPercent);
     }
 
-    public void backfeedConveyor() {
-        m_feederBelt.setDutyCycle(outPercent);
+    public boolean backfeedConveyor() {
+        return m_feederBelt.setDutyCycle(outPercent);
     }
 
     public void stop() {

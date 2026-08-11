@@ -33,8 +33,8 @@ public class AdvancedFireCommand extends Command {
         m_shooter.setShooterSpeed();    // remove in prod
 
         boolean pathReady = m_feeder.isReady() && m_conveyer.isReady();
-        if(m_shooter.isFlywheelReady()
-                && m_turret.onTarget
+        if(m_shooter.isReadyToFeed()
+                && m_turret.isOnTarget()
                 && Telemetry.isHubActive()
                 && pathReady) {
             boolean conveyorStarted = m_conveyer.runConveyor();

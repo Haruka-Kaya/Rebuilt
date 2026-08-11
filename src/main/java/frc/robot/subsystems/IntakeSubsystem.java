@@ -1,15 +1,21 @@
 package frc.robot.subsystems;
 
+import java.util.OptionalDouble;
 
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.IntakeConstants;
+import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.SparkMAXContainer.PositionCommandStatus;
 
 public class IntakeSubsystem extends SubsystemBase {
     private final SparkMAXContainer m_intakeRoller = new SparkMAXContainer(IntakeConstants.INTAKE_ROLLER_CAN_ID);
     private final SparkMAXContainer m_actuatorMotor = new SparkMAXContainer(IntakeConstants.INTAKE_ACTUATOR_CAN_ID);
+    // Assigned only after future, sensor-validated homing succeeds.
+    private Token actuatorReference;
+    private String lastBlockedActuatorCommand = "startup: homing未実装";
 
     private double actuator_kP = 0.1;
     private double actuator_kI = 0.0;
@@ -39,32 +45,57 @@ public class IntakeSubsystem extends SubsystemBase {
         SmartDashboard.putNumber("Set spit roller percent", -0.15);
     }
 
-    private void slurp() {
-        m_intakeRoller.setDutyCycle(slurpPercent);
-        extendIntake();
+    private boolean slurp() {
+        return m_intakeRoller.setDutyCycle(slurpPercent);
     }
 
-    private void spit() {
-        m_intakeRoller.setDutyCycle(spitPercent);
+    private boolean spit() {
+        return m_intakeRoller.setDutyCycle(spitPercent);
     }
 
-    public void runIntake(boolean trueForIn) {
-        if(trueForIn)
-            slurp();
-        else
-            spit();
+    public boolean runIntake(boolean trueForIn) {
+        return trueForIn ? slurp() : spit();
     }
 
-    public void extendIntake() {
-        // m_actuatorMotor.goToPostion(IntakeConstants.EXTENDED_ANGLE_DEGREES / 360);
-        m_actuatorMotor.goToPostion(actuatorAngle / 360);
+    /** Returns true only when a referenced actuator has reached the requested extension. */
+    public PositionCommandStatus extendIntake() {
+        return commandActuatorDegrees(actuatorAngle, "extend");
     }
 
-    public void retractIntake() {
-        m_actuatorMotor.goToPostion(0);
+    public PositionCommandStatus retractIntake() {
+        return commandActuatorDegrees(0.0, "retract");
+    }
+
+    private PositionCommandStatus commandActuatorDegrees(double degrees, String commandName) {
+        if (!m_actuatorMotor.isPositionReferenceValid(actuatorReference)) {
+            lastBlockedActuatorCommand = commandName + ": UNREFERENCED";
+            m_actuatorMotor.stop();
+            return PositionCommandStatus.REJECTED;
+        }
+        PositionCommandStatus status = m_actuatorMotor.commandReferencedPosition(
+            degrees / 360.0, 0.5 / 360.0, actuatorReference);
+        if (status == PositionCommandStatus.REJECTED) {
+            lastBlockedActuatorCommand = commandName + ": command rejected";
+        }
+        return status;
+    }
+
+    public boolean isActuatorReferenced() {
+        return m_actuatorMotor.isPositionReferenceValid(actuatorReference);
+    }
+
+    private OptionalDouble getReferencedActuatorDegrees() {
+        OptionalDouble rotations = m_actuatorMotor.getReferencedPosition(actuatorReference);
+        return rotations.isPresent()
+            ? OptionalDouble.of(rotations.getAsDouble() * 360.0)
+            : OptionalDouble.empty();
     }
 
     public void stop() {
+        stopAll();
+    }
+
+    public void stopRoller() {
         m_intakeRoller.stop();
     }
 
@@ -74,7 +105,23 @@ public class IntakeSubsystem extends SubsystemBase {
     }
     @Override
     public void periodic() {
-        SmartDashboard.putNumber("Real intake actuator degrees", m_actuatorMotor.getPosition() * 360);
+        if (!isActuatorReferenced()) {
+            m_actuatorMotor.stop();
+        }
+        OptionalDouble positionDegrees = getReferencedActuatorDegrees();
+        OptionalDouble rawRotations = m_actuatorMotor.getPositionIfReady();
+        SmartDashboard.putBoolean("Intake Actuator/Controller Ready", m_actuatorMotor.isReady());
+        SmartDashboard.putString(
+            "Intake Actuator/Reference State",
+            m_actuatorMotor.getPositionReferenceStatus(actuatorReference));
+        SmartDashboard.putNumber(
+            "Intake Actuator/Continuity Epoch", m_actuatorMotor.getPositionContinuityEpoch());
+        SmartDashboard.putBoolean("Intake Actuator/Position Valid", positionDegrees.isPresent());
+        SmartDashboard.putNumber(
+            "Intake Actuator/Raw Encoder Rotations", rawRotations.orElse(Double.NaN));
+        SmartDashboard.putNumber(
+            "Real intake actuator degrees", positionDegrees.orElse(Double.NaN));
+        SmartDashboard.putString("Intake Actuator/Last Blocked Command", lastBlockedActuatorCommand);
 
         double requestedActuatorKp = SmartDashboard.getNumber("Set intake actuator_kP", 0.1);
         double requestedActuatorKi = SmartDashboard.getNumber("Set intake actuator_kI", 0);

@@ -1,16 +1,21 @@
 package frc.robot.subsystems;
 
+import java.util.OptionalDouble;
 
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.ShooterConstants;
+import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
 
 public class ShooterSubsystem extends SubsystemBase {
     private final SparkMAXContainer actuatorMotor = new SparkMAXContainer(ShooterConstants.ACTUATOR_CAN_ID);
     private final SparkMAXContainer flywheelMotor_1 = new SparkMAXContainer(ShooterConstants.SHOOTER_1_CAN_ID);
     private final SparkMAXContainer flywheelMotor_2 = new SparkMAXContainer(ShooterConstants.SHOOTER_2_CAN_ID);
+    // Assigned only after future, sensor-validated homing succeeds.
+    private Token actuatorReference;
+    private String lastBlockedActuatorCommand = "startup: homing未実装";
 
     private int flywheel_tolerance = 50;
 
@@ -72,12 +77,34 @@ public class ShooterSubsystem extends SubsystemBase {
         flywheelMotor_1.setVelocity(flywheelRPM);
     }
 
-    public void setActuatorAngle() {
-        actuatorMotor.goToPostion(actuatorPos / 360);
+    public boolean setActuatorAngle() {
+        return setActuatorAngle(actuatorPos);
     }
 
-    public void setActuatorAngle(double degrees) {
-        actuatorMotor.goToPostion(degrees / 360.0);
+    public boolean setActuatorAngle(double degrees) {
+        double safeDegrees = MathUtil.clamp(degrees, 0.0, 5.0);
+        if (!actuatorMotor.isPositionReferenceValid(actuatorReference)) {
+            lastBlockedActuatorCommand = "set angle: UNREFERENCED";
+            actuatorMotor.stop();
+            return false;
+        }
+        boolean atTarget = actuatorMotor.goToReferencedPosition(
+            safeDegrees / 360.0, 0.5 / 360.0, actuatorReference);
+        if (!atTarget) {
+            lastBlockedActuatorCommand = "set angle: not at target or command rejected";
+        }
+        return atTarget;
+    }
+
+    public boolean isActuatorReferenced() {
+        return actuatorMotor.isPositionReferenceValid(actuatorReference);
+    }
+
+    private OptionalDouble getReferencedActuatorDegrees() {
+        OptionalDouble rotations = actuatorMotor.getReferencedPosition(actuatorReference);
+        return rotations.isPresent()
+            ? OptionalDouble.of(rotations.getAsDouble() * 360.0)
+            : OptionalDouble.empty();
     }
 
     public void stop() {
@@ -90,6 +117,9 @@ public class ShooterSubsystem extends SubsystemBase {
 
     @Override
     public void periodic() {
+        if (!isActuatorReferenced()) {
+            actuatorMotor.stop();
+        }
         double requestedFlywheelkP = SmartDashboard.getNumber("Set flywheel_kP", 0.1);
         double requestedFlywheelkI = SmartDashboard.getNumber("Set flywheel_kI", 0);
         double requestedFlywheelkD = SmartDashboard.getNumber("Set flywheel_kD", 0);
@@ -123,7 +153,22 @@ public class ShooterSubsystem extends SubsystemBase {
         actuatorPos = MathUtil.clamp(
             SmartDashboard.getNumber("Set shooter actuator degrees", 5), 0, 5);
 
-        SmartDashboard.putNumber("Real shooter acutator degrees", actuatorMotor.getPosition() * 360);
+        OptionalDouble actuatorDegrees = getReferencedActuatorDegrees();
+        OptionalDouble rawActuatorRotations = actuatorMotor.getPositionIfReady();
+        SmartDashboard.putBoolean("Shooter Actuator/Controller Ready", actuatorMotor.isReady());
+        SmartDashboard.putString(
+            "Shooter Actuator/Reference State",
+            actuatorMotor.getPositionReferenceStatus(actuatorReference));
+        SmartDashboard.putNumber(
+            "Shooter Actuator/Continuity Epoch", actuatorMotor.getPositionContinuityEpoch());
+        SmartDashboard.putBoolean("Shooter Actuator/Position Valid", actuatorDegrees.isPresent());
+        SmartDashboard.putNumber(
+            "Shooter Actuator/Raw Encoder Rotations",
+            rawActuatorRotations.orElse(Double.NaN));
+        SmartDashboard.putNumber(
+            "Real shooter acutator degrees", actuatorDegrees.orElse(Double.NaN));
+        SmartDashboard.putString(
+            "Shooter Actuator/Last Blocked Command", lastBlockedActuatorCommand);
         SmartDashboard.putNumber("Real flywheelRPM", flywheelMotor_1.getVelocity());
 
         if(flywheelRPM < 3500) {
@@ -142,6 +187,7 @@ public class ShooterSubsystem extends SubsystemBase {
         flywheelIsSet = isFlywheelReady();
 
         SmartDashboard.putBoolean("Flywheel reved up", flywheelIsSet);
+        SmartDashboard.putBoolean("Shooter Ready To Feed", isReadyToFeed());
     }
 
     public void runFollowerDiagnostic() {
@@ -166,6 +212,14 @@ public class ShooterSubsystem extends SubsystemBase {
             && flywheelPairReady()
             && flywheelAtRequestedSpeed(flywheelMotor_1.getVelocity())
             && flywheelAtRequestedSpeed(flywheelMotor_2.getVelocity());
+    }
+
+    /** Feed interlock: an unknown hood/actuator angle must never release a game piece. */
+    public boolean isReadyToFeed() {
+        OptionalDouble actuatorDegrees = getReferencedActuatorDegrees();
+        return isFlywheelReady()
+            && actuatorDegrees.isPresent()
+            && MathUtil.isNear(actuatorPos, actuatorDegrees.getAsDouble(), 0.5);
     }
 
     private boolean flywheelPairReady() {

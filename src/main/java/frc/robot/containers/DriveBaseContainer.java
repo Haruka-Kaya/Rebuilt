@@ -23,6 +23,7 @@ import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
+import frc.robot.utils.NeutralAfterEnableGate;
 
 public class DriveBaseContainer {
     public AutoContainer autoContainer;
@@ -46,6 +47,7 @@ public class DriveBaseContainer {
             .withRotationalDeadband(MaxAngularRate.getAsDouble() * OIConstants.kDriveDeadband)
             .withDriveRequestType(DriveRequestType.OpenLoopVoltage);
     private final SwerveRequest.Idle idle = new SwerveRequest.Idle();
+    private final NeutralAfterEnableGate driveInputGate = new NeutralAfterEnableGate();
     // private final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
     // private final SwerveRequest.PointWheelsAt point = new SwerveRequest.PointWheelsAt();
 
@@ -80,7 +82,7 @@ public class DriveBaseContainer {
 
     public Command driveHider(){
             return drivetrain.applyRequest(() -> {
-                if (!DriverStation.isTeleopEnabled()) {
+                if (!driveInputsAllowed()) {
                     return idle;
                 }
                 double velocityX = -availableAxis(1) * MaxSpeed.getAsDouble();
@@ -120,17 +122,41 @@ public class DriveBaseContainer {
         final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
 
         // Touchpad is reserved for wheel-lock so it does not conflict with R1/intake output.
-        availableButton(14).whileTrue(drivetrain.applyRequest(() -> brake));
+        Trigger brakeButton = availableButton(14);
+        brakeButton.whileTrue(drivetrain.applyRequest(() -> brake));
 
         // Create resets the field-centric heading without colliding with mechanism controls.
-        availableButton(9).onTrue(drivetrain.runOnce(drivetrain::seedFieldCentric));
+        availableButton(9)
+            .and(brakeButton.negate())
+            .and(availableButton(12).negate())
+            .onTrue(drivetrain.runOnce(drivetrain::seedFieldCentric));
 
         drivetrain.registerTelemetry(logger::telemeterize);
     }
 
     private Trigger availableButton(int button) {
-        return new Trigger(() -> DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort) >= button
+        return new Trigger(() -> driveInputsAllowed()
+            && DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort) >= button
             && joystick.getHID().getRawButton(button));
+    }
+
+    private boolean driveInputsAllowed() {
+        boolean anyAxisActive = Math.abs(availableAxis(0)) > OIConstants.kDriveDeadband
+            || Math.abs(availableAxis(1)) > OIConstants.kDriveDeadband
+            || Math.abs(availableAxis(2)) > OIConstants.kDriveDeadband;
+        boolean anyControlButton = rawButtonPressed(9)
+            || rawButtonPressed(12)
+            || rawButtonPressed(14);
+        int sourceSignature = DriverStation.getStickButtonCount(
+            OIConstants.kDriverControllerPort)
+            | (DriverStation.getStickAxisCount(OIConstants.kDriverControllerPort) << 8);
+        return driveInputGate.allow(
+            DriverStation.isTeleopEnabled(), sourceSignature, anyAxisActive || anyControlButton);
+    }
+
+    private boolean rawButtonPressed(int button) {
+        return DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort) >= button
+            && joystick.getHID().getRawButton(button);
     }
 
     public Command GetAutonCommand(){
