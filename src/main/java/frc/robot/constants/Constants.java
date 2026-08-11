@@ -91,6 +91,12 @@ public final class Constants {
     public static final int FEEDER_CURRENT_LIMIT_AMPS = 10;
     public static final int CONVEYOR_CURRENT_LIMIT_AMPS = 15;
 
+    /**
+     * Keep ID 32 motion blocked until the 2026-08-10 44.14 A / approximately 0 rpm
+     * stall is physically cleared and a controlled retest passes.
+     */
+    public static final boolean FEEDER_MOTION_BLOCKED_KNOWN_STALL = true;
+
     // Motor speeds from -1 to +1
     public static final double CONVEYOR_IN_SPEED = 0.75;
     public static final double CONVEYOR_OUT_SPEED = -0.75;

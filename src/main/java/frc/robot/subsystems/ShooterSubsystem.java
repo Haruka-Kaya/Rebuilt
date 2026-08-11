@@ -95,6 +95,12 @@ public class ShooterSubsystem extends SubsystemBase {
         }
     }
 
+    /** Commands both shot mechanisms; the existing feed interlock still requires both at target. */
+    public void prepareToFire() {
+        setActuatorAngle();
+        setShooterSpeed();
+    }
+
     public boolean setActuatorAngle() {
         return setActuatorAngle(actuatorPos);
     }

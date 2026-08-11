@@ -6,7 +6,7 @@ The programmer knows what it is doing at all times. It knows this because it kno
 
 - Intake actuator、Shooter actuator、Turretの位置制御は、limit switchまたはabsolute encoderによるhomingが実装されるまで出力を拒否します。
 - PathPlanner autonomousは、wheel radius・module geometry・gearing・maximum speedをCAD/実測値へ統一するまでsafe-stopだけを返します。
-- Feeder ID 32は過去の実機ログで約44 A・約0 rpmだったため、Hardware Self-Testでは既知faultとしてmotion testを行いません。
+- Feeder ID 32は過去の実機ログで約44 A・約0 rpmだったため、詰まり・機構・電源枝を点検して制御下で再試験するまで、通常のfeed/rejectとHardware Self-Testのmotion testを遮断します。
 
 ## Dashboard tuning
 
