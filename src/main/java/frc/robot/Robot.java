@@ -95,6 +95,7 @@ public class Robot extends TimedRobot {
   /** This autonomous runs the autonomous command selected by your {@link RobotContainer} class. */
   @Override
   public void autonomousInit() {
+    m_robotContainer.stopAll();
     m_autonomousCommand = m_robotContainer.getAutonomousCommand();
 
     /*
@@ -112,7 +113,24 @@ public class Robot extends TimedRobot {
 
   /** This function is called periodically during autonomous. */
   @Override
-  public void autonomousPeriodic() {}
+  public void autonomousPeriodic() {
+    if (m_robotContainer.shouldAbortActiveAutonomous()) {
+      if (m_autonomousCommand != null) {
+        m_autonomousCommand.cancel();
+        m_autonomousCommand = null;
+      }
+      m_robotContainer.stopAll();
+    }
+  }
+
+  @Override
+  public void autonomousExit() {
+    if (m_autonomousCommand != null) {
+      m_autonomousCommand.cancel();
+      m_autonomousCommand = null;
+    }
+    m_robotContainer.stopAll();
+  }
 
   @Override
   public void teleopInit() {
@@ -122,7 +140,9 @@ public class Robot extends TimedRobot {
     // this line or comment it out.
     if (m_autonomousCommand != null) {
       m_autonomousCommand.cancel();
+      m_autonomousCommand = null;
     }
+    m_robotContainer.stopAll();
   }
 
   /** This function is called periodically during operator control. */
@@ -133,6 +153,7 @@ public class Robot extends TimedRobot {
   public void testInit() {
     // Cancels all running commands at the start of test mode.
     CommandScheduler.getInstance().cancelAll();
+    m_robotContainer.stopAll();
     if (!DriverStation.isFMSAttached()
         && SmartDashboard.getBoolean("Hardware Self-Test/Armed", false)) {
       SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);

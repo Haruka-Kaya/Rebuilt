@@ -92,7 +92,8 @@ public class RobotContainer {
    * The container for the robot. Contains subsystems, OI devices, and commands.
    */
   public RobotContainer() {
-    m_DriveBaseContainer = new DriveBaseContainer(m_driverController, m_turret, m_shooter, m_feeder, m_conveyor, m_intake);
+    m_DriveBaseContainer = new DriveBaseContainer(
+        m_driverController, m_turret, m_shooter, m_feeder, m_conveyor, m_intake, m_climber);
     drivetrain = m_DriveBaseContainer.drivetrain;
 
     jumpBump = new JumpBumpCommand(drivetrain, m_driverController);
@@ -295,8 +296,13 @@ public class RobotContainer {
     return this.m_DriveBaseContainer.GetAutonCommand();
   }
 
+  public boolean shouldAbortActiveAutonomous() {
+    return m_DriveBaseContainer.shouldAbortActiveAutonomous();
+  }
+
   public Command getHardwareSelfTestCommand() {
-    return HardwareSelfTestCommand.create(drivetrain, m_feeder, m_shooter, m_climber);
+    return HardwareSelfTestCommand.create(
+        drivetrain, m_intake, m_conveyor, m_feeder, m_shooter, m_turret, m_climber);
   }
 
   public String getSwerveDeviceHealthSummary() {
@@ -308,6 +314,7 @@ public class RobotContainer {
   }
 
   public void stopAll() {
+    drivetrain.requestIdle();
     m_intake.stopAll();
     m_conveyor.stop();
     m_feeder.stop();

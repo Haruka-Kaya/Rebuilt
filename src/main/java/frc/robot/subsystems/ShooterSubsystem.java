@@ -2,12 +2,15 @@ package frc.robot.subsystems;
 
 import java.util.OptionalDouble;
 
+import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.ShooterConstants;
+import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 
 public class ShooterSubsystem extends SubsystemBase {
     private final SparkMAXContainer actuatorMotor = new SparkMAXContainer(ShooterConstants.ACTUATOR_CAN_ID);
@@ -44,8 +47,8 @@ public class ShooterSubsystem extends SubsystemBase {
         flywheelMotor_1.setBreakMode(false);
         flywheelMotor_2.setBreakMode(false);
         actuatorMotor.setCurrentLimit(15);
-        flywheelMotor_1.setCurrentLimit(30);
-        flywheelMotor_2.setCurrentLimit(30);
+        flywheelMotor_1.setCurrentLimit(ShooterConstants.FLYWHEEL_CURRENT_LIMIT_AMPS);
+        flywheelMotor_2.setCurrentLimit(ShooterConstants.FLYWHEEL_CURRENT_LIMIT_AMPS);
 
         SmartDashboard.putNumber("Set flywheel_kP", 0.1);
         SmartDashboard.putNumber("Set flywheel_kI", 0);
@@ -190,11 +193,54 @@ public class ShooterSubsystem extends SubsystemBase {
         SmartDashboard.putBoolean("Shooter Ready To Feed", isReadyToFeed());
     }
 
-    public void runFollowerDiagnostic() {
+    public boolean runFollowerDiagnostic() {
         flywheelRequested = false;
         flywheelIsSet = false;
         flywheelMotor_1.stop();
-        flywheelMotor_2.beginFollowerDiagnostic(0.08);
+        return flywheelMotor_2.beginFollowerDiagnostic(0.08);
+    }
+
+    public boolean runFlywheelPairDiagnostic(double requestedDuty) {
+        flywheelRequested = false;
+        flywheelIsSet = false;
+        if (!DriverStation.isTestEnabled()
+                || DriverStation.isFMSAttached()
+                || !Double.isFinite(requestedDuty)
+                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE
+                || !flywheelPairReady()) {
+            flywheelMotor_1.stop();
+            return false;
+        }
+        return flywheelMotor_1.setDutyCycle(requestedDuty);
+    }
+
+    public void stopFlywheelPairDiagnostic() {
+        flywheelMotor_1.stop();
+        flywheelMotor_2.stop();
+    }
+
+    public Snapshot getFlywheelLeaderDiagnosticSnapshot(boolean commandAccepted) {
+        return flywheelMotor_1.getDiagnosticSnapshot(commandAccepted);
+    }
+
+    public Snapshot getFlywheelFollowerDiagnosticSnapshot(boolean commandAccepted) {
+        return flywheelMotor_2.getDiagnosticSnapshot(commandAccepted);
+    }
+
+    public Snapshot getIsolatedFollowerDiagnosticSnapshot(boolean commandAccepted) {
+        return flywheelMotor_2.getFollowerDiagnosticSnapshot(commandAccepted);
+    }
+
+    public boolean isFollowerDiagnosticActive() {
+        return flywheelMotor_2.isFollowerDiagnosticActive();
+    }
+
+    public boolean isFollowerDiagnosticOutputSafe() {
+        return flywheelMotor_2.isFollowerDiagnosticOutputSafe();
+    }
+
+    public boolean isFollowerDiagnosticTransitionSafe() {
+        return flywheelMotor_2.isFollowerDiagnosticTransitionSafe();
     }
 
     public void stopFollowerDiagnostic() {

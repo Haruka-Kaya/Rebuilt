@@ -2,13 +2,16 @@ package frc.robot.subsystems;
 
 import java.util.OptionalDouble;
 
+import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.IntakeConstants;
+import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.utils.SparkMAXContainer.PositionCommandStatus;
+import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 
 public class IntakeSubsystem extends SubsystemBase {
     private final SparkMAXContainer m_intakeRoller = new SparkMAXContainer(IntakeConstants.INTAKE_ROLLER_CAN_ID);
@@ -30,7 +33,7 @@ public class IntakeSubsystem extends SubsystemBase {
     public IntakeSubsystem() {
         m_intakeRoller.setBreakMode(false);
         m_actuatorMotor.setBreakMode(true);
-        m_intakeRoller.setCurrentLimit(20);
+        m_intakeRoller.setCurrentLimit(IntakeConstants.ROLLER_CURRENT_LIMIT_AMPS);
         m_actuatorMotor.setCurrentLimit(15);
 
         m_actuatorMotor.assignPIDValues(actuator_kP, actuator_kI, actuator_kD);
@@ -97,6 +100,21 @@ public class IntakeSubsystem extends SubsystemBase {
 
     public void stopRoller() {
         m_intakeRoller.stop();
+    }
+
+    public boolean runRollerDiagnostic(double requestedDuty) {
+        if (!DriverStation.isTestEnabled()
+                || DriverStation.isFMSAttached()
+                || !Double.isFinite(requestedDuty)
+                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE) {
+            stopRoller();
+            return false;
+        }
+        return m_intakeRoller.setDutyCycle(requestedDuty);
+    }
+
+    public Snapshot getRollerDiagnosticSnapshot(boolean commandAccepted) {
+        return m_intakeRoller.getDiagnosticSnapshot(commandAccepted);
     }
 
     public void stopAll() {
