@@ -7,6 +7,7 @@ import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.TreeMap;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -47,6 +48,9 @@ public class SparkMAXContainer implements MotorContainer {
   private static final double FOLLOWER_TRANSITION_TIMEOUT_SECONDS = 0.50;
   private static final double FOLLOWER_DIAGNOSTIC_STOPPED_RPM = 2.0;
   private static final double MAX_DIAGNOSTIC_DUTY_CYCLE = 0.10;
+  private static final SparkOutputStopEvaluator.Limits OUTPUT_STOP_LIMITS =
+      new SparkOutputStopEvaluator.Limits(
+          STATUS_FRESHNESS_SECONDS, 0.01, FOLLOWER_DIAGNOSTIC_STOPPED_RPM);
 
   private static final List<SparkMAXContainer> DEVICES = new CopyOnWriteArrayList<>();
   private static final Object OUTPUT_ORDER_LOCK = new Object();
@@ -100,6 +104,8 @@ public class SparkMAXContainer implements MotorContainer {
   private double nextSampleAt;
   private double lastSampleAt = Double.NEGATIVE_INFINITY;
   private double lastZeroConfirmedAt = Double.NEGATIVE_INFINITY;
+  private long outputEpoch;
+  private long lastZeroedOutputEpoch = -1;
   private volatile int firmwareVersion;
 
   private double cachedAppliedOutput;
@@ -299,15 +305,24 @@ public class SparkMAXContainer implements MotorContainer {
     }
     REVLibError resumeResult = null;
     String resumeException = null;
+    boolean resumeDeferredForLeader = false;
     if (result == REVLibError.kOk) {
       boolean resumeAfterZero;
+      SparkMAXContainer resumeLeader;
+      boolean leaderStoppedForResume;
       synchronized (OUTPUT_ORDER_LOCK) {
         synchronized (device.stateLock) {
           resumeAfterZero = device.followerDiagnosticMode
               == FollowerDiagnosticMode.RESUME_ZERO_PENDING;
+          resumeLeader = resumeAfterZero && device.desiredFollower
+              ? device.followerLeader : null;
         }
+        leaderStoppedForResume = !resumeAfterZero
+            || Double.isFinite(getLeaderStoppedAtLocked(
+                resumeLeader, Timer.getFPGATimestamp()));
       }
-      if (resumeAfterZero) {
+      resumeDeferredForLeader = resumeAfterZero && !leaderStoppedForResume;
+      if (resumeAfterZero && leaderStoppedForResume) {
         try {
           resumeResult = device.motor.resumeFollowerMode();
           if (resumeResult == null) {
@@ -343,11 +358,13 @@ public class SparkMAXContainer implements MotorContainer {
           device.outputGate.requireZero(now, true);
           if (zeroFailure != null) {
             device.recordFailureLocked(now, zeroFailure, false);
+            device.outputGate.zeroFailed(now);
           } else if (resumeFailure != null) {
             device.recordFailureLocked(now, resumeFailure, false);
+            device.outputGate.zeroFailed(now);
           }
         } else {
-          device.completeZeroLocked(result, resumeResult, now);
+          device.completeZeroLocked(result, resumeResult, resumeDeferredForLeader, now);
         }
         if (zeroFailure != null) {
           leaderToRevoke = device.desiredFollower ? device.followerLeader : null;
@@ -375,20 +392,31 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   private void completeZeroLocked(
-      REVLibError zeroResult, REVLibError resumeResult, double now) {
+      REVLibError zeroResult,
+      REVLibError resumeResult,
+      boolean resumeDeferredForLeader,
+      double now) {
     zeroInFlight = false;
     if (zeroResult != REVLibError.kOk) {
-      outputGate.zeroFailed(now);
       if (recoveryState.isConfigurationReady()) {
         recordFailureLocked(now, "zero " + zeroResult, false);
       }
+      // recordFailureLocked requests an immediate protective zero. This attempt itself just failed,
+      // so apply the bounded retry schedule after recording the failure.
+      outputGate.zeroFailed(now);
       return;
     }
 
     outputGate.zeroSucceeded();
     lastZeroConfirmedAt = now;
+    lastZeroedOutputEpoch = outputEpoch;
     if (followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING) {
-      if (resumeResult == REVLibError.kOk) {
+      if (resumeDeferredForLeader) {
+        // Never reconnect a diagnostic follower until fresh telemetry proves its leader is zero.
+        // Keep the follower at zero and retry on the bounded worker schedule.
+        outputGate.requireZero(now, true);
+        outputGate.zeroFailed(now);
+      } else if (resumeResult == REVLibError.kOk) {
         followerDiagnosticMode = FollowerDiagnosticMode.RESUME_PENDING;
         followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
         nextSampleAt = now;
@@ -397,6 +425,10 @@ public class SparkMAXContainer implements MotorContainer {
         outputGate.requireZero(now, true);
       } else {
         recordFailureLocked(now, "follower resume " + resumeResult, false);
+        // The output is physically zero, but follower restoration is still unconfirmed. Reuse the
+        // bounded zero retry schedule so a persistent REV error cannot spin zero+resume repeatedly
+        // inside one worker drain and starve every other controller.
+        outputGate.zeroFailed(now);
       }
     }
   }
@@ -563,6 +595,7 @@ public class SparkMAXContainer implements MotorContainer {
         if (result == REVLibError.kOk) {
           outputGate.zeroSucceeded();
           lastZeroConfirmedAt = now;
+          lastZeroedOutputEpoch = outputEpoch;
         } else {
           outputGate.zeroFailed(now);
         }
@@ -609,6 +642,7 @@ public class SparkMAXContainer implements MotorContainer {
         followerDiagnosticMode = FollowerDiagnosticMode.NONE;
         outputGate.zeroSucceeded();
         lastZeroConfirmedAt = now;
+        lastZeroedOutputEpoch = outputEpoch;
         invalidateSampleLocked(now);
       }
     }
@@ -823,7 +857,15 @@ public class SparkMAXContainer implements MotorContainer {
     } else {
       recoveryState.operationFailed(now, error);
     }
-    followerDiagnosticMode = FollowerDiagnosticMode.NONE;
+    // Once pause follower mode has been attempted, its result is not trustworthy after a
+    // communication error. Keep an ordered zero+resume pending until a fresh status frame proves
+    // that follower mode has been restored. Clearing the mode here could leave a partially
+    // successful pause latched in the controller with no recovery request queued.
+    followerDiagnosticMode = switch (followerDiagnosticMode) {
+      case PAUSE_PENDING, ACTIVE, RESUME_ZERO_PENDING, RESUME_PENDING ->
+          FollowerDiagnosticMode.RESUME_ZERO_PENDING;
+      default -> FollowerDiagnosticMode.NONE;
+    };
     invalidateSampleLocked(now);
     outputGate.requireZero(now, true);
   }
@@ -979,6 +1021,114 @@ public class SparkMAXContainer implements MotorContainer {
       summary.put(device.port, device.getHealthSummary());
     }
     return summary.toString();
+  }
+
+  /**
+   * Requests zero from the selected controllers and captures their current nonzero-output epochs.
+   * A returned batch can only confirm after fresh telemetry proves those exact epochs stopped.
+   */
+  public static OutputStopBatch requestOutputStops(int... canIds) {
+    Map<Integer, SparkMAXContainer> devicesById = new TreeMap<>();
+    for (SparkMAXContainer device : DEVICES) {
+      devicesById.put(device.port, device);
+    }
+
+    Map<Integer, Boolean> requestedIds = new TreeMap<>();
+    if (canIds != null) {
+      for (int canId : canIds) {
+        requestedIds.put(canId, true);
+      }
+    }
+
+    for (int canId : requestedIds.keySet()) {
+      SparkMAXContainer device = devicesById.get(canId);
+      if (device != null) {
+        device.stop();
+      }
+    }
+
+    List<OutputStopTarget> targets = new ArrayList<>();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      for (int canId : requestedIds.keySet()) {
+        SparkMAXContainer device = devicesById.get(canId);
+        if (device == null) {
+          targets.add(new OutputStopTarget(canId, null, -1));
+        } else {
+          synchronized (device.stateLock) {
+            targets.add(new OutputStopTarget(canId, device, device.outputEpoch));
+          }
+        }
+      }
+    }
+    return new OutputStopBatch(List.copyOf(targets));
+  }
+
+  /** Read-only handle for one atomic group of stop requests. */
+  public static final class OutputStopBatch {
+    private final List<OutputStopTarget> targets;
+
+    private OutputStopBatch(List<OutputStopTarget> targets) {
+      this.targets = targets;
+    }
+
+    public OutputStopSnapshot snapshot() {
+      Map<Integer, String> pending = new LinkedHashMap<>();
+      double now = Timer.getFPGATimestamp();
+      if (targets.isEmpty()) {
+        pending.put(-1, "NO_TARGETS");
+        return new OutputStopSnapshot(false, Map.copyOf(pending));
+      }
+
+      // Re-requesting stop is idempotent after a confirmed zero and repairs an unexpected
+      // nonzero status observation without creating a new output epoch.
+      for (OutputStopTarget target : targets) {
+        if (target.device() != null) {
+          target.device().stop();
+        }
+      }
+
+      synchronized (OUTPUT_ORDER_LOCK) {
+        for (OutputStopTarget target : targets) {
+          SparkMAXContainer device = target.device();
+          if (device == null) {
+            pending.put(target.canId(), "DEVICE_NOT_REGISTERED");
+            continue;
+          }
+          synchronized (device.stateLock) {
+            var observation = new SparkOutputStopEvaluator.Observation(
+                device.port,
+                target.outputEpoch(),
+                device.outputEpoch,
+                device.lastZeroedOutputEpoch,
+                device.recoveryState.isConfigurationReady(),
+                device.zeroInFlight,
+                device.outputGate.isZeroRequired(),
+                device.outputGate.outputMayBeNonzero(),
+                device.lastZeroConfirmedAt,
+                device.lastSampleAt,
+                now,
+                device.cachedAppliedOutput,
+                device.encoder != null,
+                device.cachedVelocity,
+                device.desiredFollower,
+                device.followerDiagnosticMode == FollowerDiagnosticMode.NONE,
+                device.cachedFollower);
+            SparkOutputStopEvaluator.Evaluation evaluation =
+                SparkOutputStopEvaluator.evaluate(observation, OUTPUT_STOP_LIMITS);
+            if (!evaluation.confirmed()) {
+              pending.put(device.port, evaluation.status().name());
+            }
+          }
+        }
+      }
+      return new OutputStopSnapshot(pending.isEmpty(), Map.copyOf(pending));
+    }
+  }
+
+  public record OutputStopSnapshot(boolean confirmed, Map<Integer, String> pendingByCanId) {
+    public String summary() {
+      return confirmed ? "CONFIRMED" : pendingByCanId.toString();
+    }
   }
 
   private String getHealthSummary() {
@@ -1462,12 +1612,14 @@ public class SparkMAXContainer implements MotorContainer {
             && isBaseReadyLocked(now)
             && followerOutputAllowed
             && positionReferenceAllowed) {
-          REVLibError result = sendSetpointTracked(value, controlType);
-          if (result == REVLibError.kOk) {
+          SparkVendorCall.Result result = SparkVendorCall.execute(
+              "setpoint", () -> sendSetpointTracked(value, controlType));
+          if (result.succeeded()) {
             outputGate.nonzeroSucceeded();
+            outputEpoch++;
             accepted = true;
           } else {
-            failure = "setpoint " + result;
+            failure = result.failure();
             recordFailureLocked(now, failure, false);
             leader = desiredFollower ? followerLeader : null;
           }
@@ -1531,14 +1683,19 @@ public class SparkMAXContainer implements MotorContainer {
             && lastSampleAt >= leaderStoppedAt
             && Math.abs(cachedAppliedOutput) <= 0.01
             && Math.abs(cachedVelocity) <= FOLLOWER_DIAGNOSTIC_STOPPED_RPM) {
-          REVLibError pauseResult = motor.pauseFollowerModeAsync();
-          if (pauseResult == REVLibError.kOk) {
+          // Latch recovery before issuing the asynchronous pause. An error return does not prove
+          // that the controller ignored the request, so every attempted pause must have a matching
+          // ordered resume path.
+          followerDiagnosticMode = FollowerDiagnosticMode.RESUME_ZERO_PENDING;
+          SparkVendorCall.Result pauseResult = SparkVendorCall.execute(
+              "follower pause", motor::pauseFollowerModeAsync);
+          if (pauseResult.succeeded()) {
             followerDiagnosticMode = FollowerDiagnosticMode.PAUSE_PENDING;
             followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
             nextSampleAt = now;
             accepted = true;
           } else {
-            failure = "follower pause " + pauseResult;
+            failure = pauseResult.failure();
             recordFailureLocked(now, failure, false);
           }
         }
@@ -1787,4 +1944,7 @@ public class SparkMAXContainer implements MotorContainer {
   private record SampleWork(SparkMAXContainer device) {}
 
   private record ZeroWork(SparkMAXContainer device, long generation) {}
+
+  private record OutputStopTarget(
+      int canId, SparkMAXContainer device, long outputEpoch) {}
 }

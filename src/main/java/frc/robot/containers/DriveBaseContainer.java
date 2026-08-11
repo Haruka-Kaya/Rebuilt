@@ -47,7 +47,6 @@ public class DriveBaseContainer {
             .withDeadband(MaxSpeed.getAsDouble() * OIConstants.kDriveDeadband)
             .withRotationalDeadband(MaxAngularRate.getAsDouble() * OIConstants.kDriveDeadband)
             .withDriveRequestType(DriveRequestType.OpenLoopVoltage);
-    private final SwerveRequest.Idle idle = new SwerveRequest.Idle();
     private final NeutralAfterEnableGate driveInputGate = new NeutralAfterEnableGate();
     // private final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
     // private final SwerveRequest.PointWheelsAt point = new SwerveRequest.PointWheelsAt();
@@ -86,7 +85,7 @@ public class DriveBaseContainer {
     public Command driveHider(){
             return drivetrain.applyRequest(() -> {
                 if (!driverInputsAllowed()) {
-                    return idle;
+                    return drivetrain.safeNeutralRequest();
                 }
                 double axisX = availableAxis(1);
                 double axisY = availableAxis(0);
@@ -99,7 +98,7 @@ public class DriveBaseContainer {
                         || !Double.isFinite(maxSpeed)
                         || !Double.isFinite(maxAngularRate)) {
                     driveInputGate.blockUntilNeutral();
-                    return idle;
+                    return drivetrain.safeNeutralRequest();
                 }
                 double velocityX = -axisX * maxSpeed;
                 double velocityY = -axisY * maxSpeed;
@@ -108,7 +107,7 @@ public class DriveBaseContainer {
                         || !Double.isFinite(velocityY)
                         || !Double.isFinite(rotation)) {
                     driveInputGate.blockUntilNeutral();
-                    return idle;
+                    return drivetrain.safeNeutralRequest();
                 }
                 if (drivetrain.isGyroConnected()) {
                     return drive.withVelocityX(velocityX)
@@ -138,7 +137,7 @@ public class DriveBaseContainer {
         // Idle while the robot is disabled. This ensures the configured
         // neutral mode is applied to the drive motors while disabled.
         RobotModeTriggers.disabled().whileTrue(
-            drivetrain.applyRequest(() -> idle).ignoringDisable(true)
+            drivetrain.safeIdleCommand().ignoringDisable(true)
         );
 
         final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
@@ -181,7 +180,10 @@ public class DriveBaseContainer {
             || rawButtonPressed(14);
         int sourceSignature = DriverStation.getStickButtonCount(
             OIConstants.kDriverControllerPort)
-            | (DriverStation.getStickAxisCount(OIConstants.kDriverControllerPort) << 8);
+            | (DriverStation.getStickAxisCount(OIConstants.kDriverControllerPort) << 8)
+            // Field-centric and robot-centric interpret the same held stick differently. Treat a
+            // gyro loss or recovery as a source change so both transitions require neutral input.
+            | (drivetrain.isGyroConnected() ? 1 << 16 : 0);
         return driveInputGate.allow(
             DriverStation.isTeleopEnabled() && drivetrain.areAllModulesConnected(),
             sourceSignature,

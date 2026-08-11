@@ -22,6 +22,7 @@ import frc.robot.constants.TunerConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.MotionResult;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
+import frc.robot.diagnostics.SelfTestRunState;
 import frc.robot.subsystems.ClimberSubsystem;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
 import frc.robot.subsystems.ConveyorSubsystem;
@@ -38,6 +39,7 @@ public final class HardwareSelfTestCommand {
 
     private static final double FOLLOWER_DIAGNOSTIC_DUTY = 0.08;
     private static final double FOLLOWER_DIAGNOSTIC_SECONDS = 1.20;
+    private static final int[] ALL_SPARK_IDS = {30, 31, 32, 33, 34, 35, 36, 37, 38, 39};
 
     private static final String COVERAGE_MANIFEST = String.join(
         "; ",
@@ -79,6 +81,7 @@ public final class HardwareSelfTestCommand {
             ClimberSubsystem climber) {
         Map<String, MotionResult> results = new LinkedHashMap<>();
         Map<Integer, Boolean> sparkCanResults = new LinkedHashMap<>();
+        SelfTestRunState runState = new SelfTestRunState();
         double duty = HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE;
 
         Command sequence = Commands.sequence(
@@ -121,11 +124,22 @@ public final class HardwareSelfTestCommand {
                 captureSparkCanResults(sparkCanResults);
                 SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
             }, drivetrain, intake, conveyor, feeder, shooter, turret, climber),
-            openLoopStage(
+            globalStopBarrier(
+                "GLOBAL_START",
+                drivetrain,
+                intake,
+                conveyor,
+                feeder,
+                shooter,
+                turret,
+                climber,
+                runState),
+            guardedStage(openLoopStage(
                 "SPARK_ID31_INTAKE_ROLLER",
                 () -> intake.getRollerDiagnosticSnapshot(false).ready(),
                 () -> intake.runRollerDiagnostic(duty),
                 intake::stopRoller,
+                new int[] {IntakeConstants.INTAKE_ROLLER_CAN_ID},
                 List.of(new DiagnosticTarget(
                     "SPARK_ID31_INTAKE_ROLLER",
                     duty,
@@ -133,12 +147,14 @@ public final class HardwareSelfTestCommand {
                     intake::getRollerDiagnosticSnapshot)),
                 HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
                 results,
-                intake),
-            openLoopStage(
+                runState,
+                intake), runState),
+            guardedStage(openLoopStage(
                 "SPARK_ID33_CONVEYOR",
                 () -> conveyor.getDiagnosticSnapshot(false).ready(),
                 () -> conveyor.runDiagnostic(duty),
                 conveyor::stop,
+                new int[] {ManipulatorConstants.CONVEYOR_CAN_ID},
                 List.of(new DiagnosticTarget(
                     "SPARK_ID33_CONVEYOR",
                     duty,
@@ -146,13 +162,18 @@ public final class HardwareSelfTestCommand {
                     conveyor::getDiagnosticSnapshot)),
                 HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
                 results,
-                conveyor),
-            openLoopStage(
+                runState,
+                conveyor), runState),
+            guardedStage(openLoopStage(
                 "SPARK_ID36_37_FLYWHEEL_PAIR",
                 () -> shooter.getFlywheelLeaderDiagnosticSnapshot(false).ready()
                     && shooter.getFlywheelFollowerDiagnosticSnapshot(false).ready(),
                 () -> shooter.runFlywheelPairDiagnostic(duty),
                 shooter::stopFlywheelPairDiagnostic,
+                new int[] {
+                    ShooterConstants.SHOOTER_1_CAN_ID,
+                    ShooterConstants.SHOOTER_2_CAN_ID
+                },
                 List.of(
                     new DiagnosticTarget(
                         "SPARK_ID36_FLYWHEEL_LEADER",
@@ -166,8 +187,9 @@ public final class HardwareSelfTestCommand {
                         shooter::getFlywheelFollowerDiagnosticSnapshot)),
                 HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
                 results,
-                shooter),
-            openLoopStage(
+                runState,
+                shooter), runState),
+            guardedStage(openLoopStage(
                 "SPARK_ID37_FOLLOWER_ISOLATED",
                 () -> shooter.getFlywheelLeaderDiagnosticSnapshot(false).ready()
                     && shooter.getFlywheelFollowerDiagnosticSnapshot(false).ready(),
@@ -176,6 +198,10 @@ public final class HardwareSelfTestCommand {
                     return accepted && shooter.isFollowerDiagnosticTransitionSafe();
                 },
                 shooter::stopFollowerDiagnostic,
+                new int[] {
+                    ShooterConstants.SHOOTER_1_CAN_ID,
+                    ShooterConstants.SHOOTER_2_CAN_ID
+                },
                 List.of(new DiagnosticTarget(
                     "SPARK_ID37_FOLLOWER_ISOLATED",
                     FOLLOWER_DIAGNOSTIC_DUTY,
@@ -183,33 +209,47 @@ public final class HardwareSelfTestCommand {
                     shooter::getIsolatedFollowerDiagnosticSnapshot)),
                 FOLLOWER_DIAGNOSTIC_SECONDS,
                 results,
-                shooter),
-            swerveStage(
+                runState,
+                shooter), runState),
+            guardedStage(swerveStage(
                 "SWERVE_FORWARD",
                 drivetrain,
                 () -> drivetrain.drive(0.015, 0, 0, false),
                 new edu.wpi.first.math.kinematics.ChassisSpeeds(
                     0.015 * TunerConstants.kSpeedAt12Volts.baseUnitMagnitude(), 0.0, 0.0),
                 1.0,
-                results),
-            swerveStage(
+                results,
+                runState), runState),
+            guardedStage(swerveStage(
                 "SWERVE_STRAFE",
                 drivetrain,
                 () -> drivetrain.drive(0, 0.015, 0, false),
                 new edu.wpi.first.math.kinematics.ChassisSpeeds(
                     0.0, 0.015 * TunerConstants.kSpeedAt12Volts.baseUnitMagnitude(), 0.0),
                 1.0,
-                results),
-            swerveStage(
+                results,
+                runState), runState),
+            guardedStage(swerveStage(
                 "SWERVE_ROTATE",
                 drivetrain,
                 () -> drivetrain.drive(0, 0, 0.12, false),
                 new edu.wpi.first.math.kinematics.ChassisSpeeds(0.0, 0.0, 0.12),
                 1.0,
-                results),
+                results,
+                runState), runState),
+            globalStopBarrier(
+                "GLOBAL_END",
+                drivetrain,
+                intake,
+                conveyor,
+                feeder,
+                shooter,
+                turret,
+                climber,
+                runState),
             Commands.runOnce(() -> {
                 captureSparkCanResults(sparkCanResults);
-                publishOverall(results, sparkCanResults);
+                publishOverall(results, sparkCanResults, runState);
             }));
 
         return sequence
@@ -225,10 +265,13 @@ public final class HardwareSelfTestCommand {
                 SmartDashboard.putBoolean(RUNNING_KEY, false);
                 if (interrupted || !testOutputsAllowed()) {
                     captureSparkCanResults(sparkCanResults);
-                    SmartDashboard.putString("Hardware Self-Test/Overall", "INTERRUPTED_OUTPUTS_ZERO");
+                    SmartDashboard.putString(
+                        "Hardware Self-Test/Overall", "INTERRUPTED_STOP_REQUESTED");
                 }
                 SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
-                log(interrupted ? "INTERRUPTED" : "END", "outputs forced to zero results=" + results);
+                log(
+                    interrupted ? "INTERRUPTED" : "END",
+                    "stop requested; confirmation requires a completed barrier results=" + results);
             })
             .withInterruptBehavior(Command.InterruptionBehavior.kCancelIncoming);
     }
@@ -238,9 +281,11 @@ public final class HardwareSelfTestCommand {
             BooleanSupplier preflightReady,
             BooleanSupplier action,
             Runnable stop,
+            int[] stopCanIds,
             List<DiagnosticTarget> targets,
             double durationSeconds,
             Map<String, MotionResult> report,
+            SelfTestRunState runState,
             Subsystem... requirements) {
         boolean[] eligible = {false};
         boolean[] attempted = {false};
@@ -310,9 +355,12 @@ public final class HardwareSelfTestCommand {
                 finalResults.forEach((name, result) -> publishResult(report, name, result));
                 log(stageName + "_RESULT", finalResults.toString());
             }),
-            Commands.runOnce(stop, requirements),
-            Commands.runOnce(() -> log(stageName + "_STOP", formatTargets(targets, false))),
-            Commands.waitSeconds(HardwareTestConstants.STAGE_SETTLE_SECONDS));
+            sparkStopBarrier(
+                stageName,
+                stop,
+                stopCanIds,
+                runState,
+                requirements));
     }
 
     private static Command swerveStage(
@@ -321,7 +369,8 @@ public final class HardwareSelfTestCommand {
             Runnable action,
             edu.wpi.first.math.kinematics.ChassisSpeeds expectedSpeeds,
             double durationSeconds,
-            Map<String, MotionResult> report) {
+            Map<String, MotionResult> report,
+            SelfTestRunState runState) {
         boolean[] eligible = {false};
         boolean[] connectionLost = {false};
         boolean[] motionObserved = {false};
@@ -400,8 +449,131 @@ public final class HardwareSelfTestCommand {
                     result + " evidence=" + latestEvidence[0]
                         + " telemetry=" + drivetrain.getMotionDiagnosticSummary());
             }),
-            Commands.runOnce(drivetrain::requestIdle, drivetrain),
-            Commands.waitSeconds(HardwareTestConstants.STAGE_SETTLE_SECONDS));
+            swerveStopBarrier(name, drivetrain, runState));
+    }
+
+    private static Command guardedStage(Command stage, SelfTestRunState runState) {
+        return Commands.either(stage, Commands.none(), runState::mayContinue);
+    }
+
+    private static Command sparkStopBarrier(
+            String stageName,
+            Runnable stop,
+            int[] canIds,
+            SelfTestRunState runState,
+            Subsystem... requirements) {
+        return stopBarrier(
+            stageName + "_SPARK_STOP",
+            () -> {
+                stop.run();
+                SparkMAXContainer.OutputStopBatch batch =
+                    SparkMAXContainer.requestOutputStops(canIds);
+                return () -> {
+                    SparkMAXContainer.OutputStopSnapshot snapshot = batch.snapshot();
+                    return new StopPoll(snapshot.confirmed(), snapshot.summary());
+                };
+            },
+            runState,
+            requirements);
+    }
+
+    private static Command swerveStopBarrier(
+            String stageName,
+            CommandSwerveDrivetrain drivetrain,
+            SelfTestRunState runState) {
+        return stopBarrier(
+            stageName + "_SWERVE_STOP",
+            () -> {
+                CommandSwerveDrivetrain.SwerveStopToken token = drivetrain.requestIdleWithToken();
+                return () -> {
+                    drivetrain.retryIdleIfNeeded(token);
+                    CommandSwerveDrivetrain.SwerveStopEvidence evidence = drivetrain.getStopEvidence(
+                        token,
+                        HardwareTestConstants.MAX_STOPPED_SWERVE_SPEED_METERS_PER_SECOND);
+                    return new StopPoll(evidence.confirmed(), evidence.reason());
+                };
+            },
+            runState,
+            drivetrain);
+    }
+
+    private static Command globalStopBarrier(
+            String stageName,
+            CommandSwerveDrivetrain drivetrain,
+            IntakeSubsystem intake,
+            ConveyorSubsystem conveyor,
+            FeederSubsystem feeder,
+            ShooterSubsystem shooter,
+            TurretSubsystem turret,
+            ClimberSubsystem climber,
+            SelfTestRunState runState) {
+        return stopBarrier(
+            stageName,
+            () -> {
+                intake.stopAll();
+                conveyor.stop();
+                feeder.stop();
+                shooter.stop();
+                turret.stop();
+                climber.stop();
+                SparkMAXContainer.OutputStopBatch sparkBatch =
+                    SparkMAXContainer.requestOutputStops(ALL_SPARK_IDS);
+                CommandSwerveDrivetrain.SwerveStopToken swerveToken =
+                    drivetrain.requestIdleWithToken();
+                return () -> {
+                    SparkMAXContainer.OutputStopSnapshot spark = sparkBatch.snapshot();
+                    drivetrain.retryIdleIfNeeded(swerveToken);
+                    CommandSwerveDrivetrain.SwerveStopEvidence swerve =
+                        drivetrain.getStopEvidence(
+                            swerveToken,
+                            HardwareTestConstants.MAX_STOPPED_SWERVE_SPEED_METERS_PER_SECOND);
+                    return new StopPoll(
+                        spark.confirmed() && swerve.confirmed(),
+                        "spark=" + spark.summary() + " swerve=" + swerve.reason());
+                };
+            },
+            runState,
+            drivetrain,
+            intake,
+            conveyor,
+            feeder,
+            shooter,
+            turret,
+            climber);
+    }
+
+    private static Command stopBarrier(
+            String name,
+            Supplier<StopMonitor> request,
+            SelfTestRunState runState,
+            Subsystem... requirements) {
+        StopMonitor[] monitor = {null};
+        StopPoll[] latest = {new StopPoll(false, "NOT_REQUESTED")};
+        String dashboardKey = "Hardware Self-Test/" + name + "/Stop Result";
+
+        return Commands.sequence(
+            Commands.runOnce(() -> {
+                latest[0] = new StopPoll(false, "PENDING");
+                SmartDashboard.putString(dashboardKey, "PENDING");
+                monitor[0] = request.get();
+                log(name + "_REQUESTED", "stop requested");
+            }, requirements),
+            Commands.waitUntil(() -> {
+                latest[0] = monitor[0].poll();
+                return latest[0].confirmed();
+            }).withTimeout(HardwareTestConstants.STOP_CONFIRM_TIMEOUT_SECONDS),
+            Commands.runOnce(() -> {
+                latest[0] = monitor[0].poll();
+                if (latest[0].confirmed()) {
+                    SmartDashboard.putString(dashboardKey, "CONFIRMED");
+                    log(name + "_CONFIRMED", latest[0].summary());
+                } else {
+                    String reason = name + " timeout " + latest[0].summary();
+                    runState.abort(reason);
+                    SmartDashboard.putString(dashboardKey, "TIMEOUT " + latest[0].summary());
+                    log(name + "_TIMEOUT", latest[0].summary());
+                }
+            }));
     }
 
     private static CommandSwerveDrivetrain.SwerveDiagnosticEvidence getSwerveEvidence(
@@ -476,7 +648,9 @@ public final class HardwareSelfTestCommand {
     }
 
     private static void publishOverall(
-            Map<String, MotionResult> results, Map<Integer, Boolean> sparkCanResults) {
+            Map<String, MotionResult> results,
+            Map<Integer, Boolean> sparkCanResults,
+            SelfTestRunState runState) {
         boolean attentionRequired = results.values().stream().anyMatch(result ->
             result == MotionResult.FAIL_NOT_READY
                 || result == MotionResult.FAIL_COMMAND_REJECTED
@@ -485,6 +659,7 @@ public final class HardwareSelfTestCommand {
                 || result == MotionResult.BLOCKED_KNOWN_FAULT);
         attentionRequired |= sparkCanResults.size() != 10
             || sparkCanResults.values().stream().anyMatch(ready -> !ready);
+        attentionRequired |= !runState.mayContinue();
         boolean incomplete = results.values().stream().anyMatch(result ->
             result == MotionResult.INCONCLUSIVE_NO_MOTION
                 || result == MotionResult.SKIPPED
@@ -494,6 +669,7 @@ public final class HardwareSelfTestCommand {
             : incomplete ? "INCOMPLETE_DESIGN_OR_MOTION_EVIDENCE" : "MOTION_OBSERVED_ONLY";
         SmartDashboard.putString("Hardware Self-Test/Overall", overall);
         SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
+        SmartDashboard.putString("Hardware Self-Test/Abort Reason", runState.abortReason());
         log(
             "SEQUENCE_COMPLETE",
             "overall=" + overall + " motion=" + results + " sparkCAN=" + sparkCanResults);
@@ -518,4 +694,11 @@ public final class HardwareSelfTestCommand {
         double requestedDuty,
         double currentLimitAmps,
         Function<Boolean, Snapshot> snapshot) {}
+
+    @FunctionalInterface
+    private interface StopMonitor {
+        StopPoll poll();
+    }
+
+    private record StopPoll(boolean confirmed, String summary) {}
 }

@@ -1,0 +1,51 @@
+package frc.robot;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import org.junit.jupiter.api.Test;
+
+class SwerveSafetyArchitectureTest {
+  private static final Path DRIVETRAIN_SOURCE = Path.of(
+      "src", "main", "java", "frc", "robot", "subsystems", "CommandSwerveDrivetrain.java");
+  private static final Path DRIVE_CONTAINER_SOURCE = Path.of(
+      "src", "main", "java", "frc", "robot", "containers", "DriveBaseContainer.java");
+
+  @Test
+  void failClosedPathsNeverUseCtreIdleBecauseItLeavesThePreviousRequestLatched()
+      throws IOException {
+    String drivetrain = Files.readString(DRIVETRAIN_SOURCE);
+    String container = Files.readString(DRIVE_CONTAINER_SOURCE);
+
+    assertFalse(drivetrain.contains("new SwerveRequest.Idle"));
+    assertFalse(container.contains("new SwerveRequest.Idle"));
+    assertTrue(drivetrain.contains("module.apply(driveNeutral, steerNeutral)"));
+    assertTrue(drivetrain.contains("appliedGeneration.get() == generation"));
+    assertTrue(drivetrain.contains("kNeutralRetryPeriodSeconds"));
+    assertTrue(container.contains("drivetrain.safeIdleCommand()"));
+  }
+
+  @Test
+  void criticalSignalHealthUsesNonblockingSilentRefreshes() throws IOException {
+    String drivetrain = Files.readString(DRIVETRAIN_SOURCE);
+
+    assertTrue(drivetrain.contains("getDriveMotor().getPosition(false)"));
+    assertTrue(drivetrain.contains("getDriveMotor().getVelocity(false)"));
+    assertTrue(drivetrain.contains("getSteerMotor().getPosition(false)"));
+    assertTrue(drivetrain.contains("getSteerMotor().getVelocity(false)"));
+    assertTrue(drivetrain.contains("getEncoder().getPosition(false)"));
+    assertTrue(drivetrain.contains("getEncoder().getAbsolutePosition(false)"));
+    assertTrue(drivetrain.contains("getPigeon2().getYaw(false)"));
+    assertTrue(drivetrain.contains("getPigeon2().getAngularVelocityZWorld(false)"));
+    assertTrue(drivetrain.contains("refresh(false)"));
+    assertFalse(drivetrain.contains("refreshAll("));
+    assertFalse(drivetrain.contains("waitForAll("));
+    assertFalse(drivetrain.contains("setUpdateFrequency("));
+    assertTrue(drivetrain.contains("getStateCopy()"));
+    assertFalse(drivetrain.contains("getState()"));
+  }
+}
