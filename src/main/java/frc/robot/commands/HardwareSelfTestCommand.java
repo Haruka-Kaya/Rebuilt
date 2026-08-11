@@ -29,6 +29,7 @@ import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
+import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.SparkMAXContainer;
 
 /** One-shot, low-output hardware test that only runs after the DS enters enabled Test mode. */
@@ -504,12 +505,12 @@ public final class HardwareSelfTestCommand {
 
     private static void log(String stage, String details) {
         var canStatus = RobotController.getCANStatus();
-        System.out.printf(
-            "SELFTEST stage=%s voltage=%.2fV canUtil=%.1f%% details=[%s]%n",
+        AsyncDiagnosticSink.log(String.format(
+            "SELFTEST stage=%s voltage=%.2fV canUtil=%.1f%% details=[%s]",
             stage,
             RobotController.getBatteryVoltage(),
             canStatus.percentBusUtilization * 100.0,
-            details);
+            details));
     }
 
     private record DiagnosticTarget(

@@ -88,9 +88,28 @@ public class DriveBaseContainer {
                 if (!driveInputsAllowed()) {
                     return idle;
                 }
-                double velocityX = -availableAxis(1) * MaxSpeed.getAsDouble();
-                double velocityY = -availableAxis(0) * MaxSpeed.getAsDouble();
-                double rotation = -availableAxis(2) * MaxAngularRate.getAsDouble();
+                double axisX = availableAxis(1);
+                double axisY = availableAxis(0);
+                double axisRotation = availableAxis(2);
+                double maxSpeed = MaxSpeed.getAsDouble();
+                double maxAngularRate = MaxAngularRate.getAsDouble();
+                if (!Double.isFinite(axisX)
+                        || !Double.isFinite(axisY)
+                        || !Double.isFinite(axisRotation)
+                        || !Double.isFinite(maxSpeed)
+                        || !Double.isFinite(maxAngularRate)) {
+                    driveInputGate.blockUntilNeutral();
+                    return idle;
+                }
+                double velocityX = -axisX * maxSpeed;
+                double velocityY = -axisY * maxSpeed;
+                double rotation = -axisRotation * maxAngularRate;
+                if (!Double.isFinite(velocityX)
+                        || !Double.isFinite(velocityY)
+                        || !Double.isFinite(rotation)) {
+                    driveInputGate.blockUntilNeutral();
+                    return idle;
+                }
                 if (drivetrain.isGyroConnected()) {
                     return drive.withVelocityX(velocityX)
                         .withVelocityY(velocityY)
@@ -134,7 +153,7 @@ public class DriveBaseContainer {
             .and(availableButton(12).negate())
             .onTrue(drivetrain.runOnce(drivetrain::seedFieldCentric));
 
-        drivetrain.registerTelemetry(logger::telemeterize);
+        drivetrain.registerTelemetry(logger::captureState);
     }
 
     private Trigger availableButton(int button) {
@@ -144,9 +163,18 @@ public class DriveBaseContainer {
     }
 
     private boolean driveInputsAllowed() {
-        boolean anyAxisActive = Math.abs(availableAxis(0)) > OIConstants.kDriveDeadband
-            || Math.abs(availableAxis(1)) > OIConstants.kDriveDeadband
-            || Math.abs(availableAxis(2)) > OIConstants.kDriveDeadband;
+        double axis0 = availableAxis(0);
+        double axis1 = availableAxis(1);
+        double axis2 = availableAxis(2);
+        if (!Double.isFinite(axis0)
+                || !Double.isFinite(axis1)
+                || !Double.isFinite(axis2)) {
+            driveInputGate.blockUntilNeutral();
+            return false;
+        }
+        boolean anyAxisActive = Math.abs(axis0) > OIConstants.kDriveDeadband
+            || Math.abs(axis1) > OIConstants.kDriveDeadband
+            || Math.abs(axis2) > OIConstants.kDriveDeadband;
         boolean anyControlButton = rawButtonPressed(9)
             || rawButtonPressed(12)
             || rawButtonPressed(14);

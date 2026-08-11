@@ -12,6 +12,7 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.commands.HardwareSelfTestCommand;
+import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.SparkMAXContainer;
 
 /**
@@ -60,10 +61,10 @@ public class Robot extends TimedRobot {
 
     if (!DriverStation.isFMSAttached() && Timer.getFPGATimestamp() >= m_nextDiagnosticTimestamp) {
       var canStatus = RobotController.getCANStatus();
-      System.out.printf(
+      AsyncDiagnosticSink.log(String.format(
           "DIAGNOSTICS ds=%s enabled=%s voltage=%.2fV canUtil=%.1f%% busOff=%d txFull=%d rxErr=%d txErr=%d "
               + "sticks=[0:'%s' a%d b%d; 1:'%s' a%d b%d; 2:'%s' a%d b%d] "
-              + "spark=%s ctre=[%s]%n",
+              + "spark=%s ctre=[%s]",
           DriverStation.isDSAttached(), DriverStation.isEnabled(), RobotController.getBatteryVoltage(),
           canStatus.percentBusUtilization * 100.0, canStatus.busOffCount, canStatus.txFullCount,
           canStatus.receiveErrorCount, canStatus.transmitErrorCount,
@@ -74,7 +75,7 @@ public class Robot extends TimedRobot {
           DriverStation.getJoystickName(2), DriverStation.getStickAxisCount(2),
           DriverStation.getStickButtonCount(2),
           m_robotContainer.getSparkDeviceHealthSummary(),
-          m_robotContainer.getSwerveDeviceHealthSummary());
+          m_robotContainer.getSwerveDeviceHealthSummary()));
       m_nextDiagnosticTimestamp = Timer.getFPGATimestamp() + 5.0;
     }
   }

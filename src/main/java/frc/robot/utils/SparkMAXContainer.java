@@ -8,6 +8,7 @@ import java.util.OptionalInt;
 import java.util.TreeMap;
 import java.util.ArrayList;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.revrobotics.PersistMode;
 import com.revrobotics.REVLibError;
@@ -86,6 +87,8 @@ public class SparkMAXContainer implements MotorContainer {
   private final SparkResetGuard resetGuard = new SparkResetGuard();
   private final SparkOutputGate outputGate = new SparkOutputGate();
   private final PositionReferenceGuard positionReferenceGuard = new PositionReferenceGuard();
+  private final AtomicLong lastSetpointCallNanos = new AtomicLong();
+  private final AtomicLong maximumSetpointCallNanos = new AtomicLong();
   private final List<SparkMAXContainer> requiredFollowers = new ArrayList<>();
   private final int port;
 
@@ -266,7 +269,7 @@ public class SparkMAXContainer implements MotorContainer {
     }
 
     // Vendor calls run with no application lock held. zeroInFlight blocks all nonzero commands.
-    REVLibError result = device.closedLoopController.setSetpoint(0.0, ControlType.kDutyCycle);
+    REVLibError result = device.sendSetpointTracked(0.0, ControlType.kDutyCycle);
     REVLibError resumeResult = null;
     if (result == REVLibError.kOk) {
       boolean resumeAfterZero;
@@ -510,7 +513,7 @@ public class SparkMAXContainer implements MotorContainer {
   private REVLibError sendPostConfigurationZero() {
     // Configuration is still marked in flight, so nonzero commands remain rejected while this
     // blocking vendor call runs. Do not hold application locks across REV JNI.
-    REVLibError result = closedLoopController.setSetpoint(0.0, ControlType.kDutyCycle);
+    REVLibError result = sendSetpointTracked(0.0, ControlType.kDutyCycle);
     double now = Timer.getFPGATimestamp();
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
@@ -950,7 +953,10 @@ public class SparkMAXContainer implements MotorContainer {
       if (followerDiagnosticMode != FollowerDiagnosticMode.NONE) {
         state += "/DIAGNOSTIC_" + followerDiagnosticMode;
       }
-      return state;
+      return state + String.format(
+          "/SETPOINT_US=%d/%d",
+          lastSetpointCallNanos.get() / 1_000L,
+          maximumSetpointCallNanos.get() / 1_000L);
     }
   }
 
@@ -1285,6 +1291,7 @@ public class SparkMAXContainer implements MotorContainer {
 
   private boolean setDutyCycleInternal(double output, boolean diagnosticFollowerOutput) {
     if (!Double.isFinite(output)) {
+      requestZeroOutput();
       return false;
     }
     double clampedOutput = Math.max(-1.0, Math.min(1.0, output));
@@ -1341,14 +1348,16 @@ public class SparkMAXContainer implements MotorContainer {
     }
   }
 
-  public double setVelocity(double velocity) {
+  public boolean setVelocity(double velocity) {
     if (!Double.isFinite(velocity)) {
-      return 0.0;
+      requestZeroOutput();
+      return false;
     }
-    if (!trySetpoint(velocity, ControlType.kVelocity, false, null)) {
-      return 0.0;
+    if (Math.abs(velocity) <= 1e-9) {
+      requestZeroOutput();
+      return true;
     }
-    return getVelocity();
+    return trySetpoint(velocity, ControlType.kVelocity, false, null);
   }
 
   /** Stops output even when the device is not READY; nonzero requests are never queued. */
@@ -1383,6 +1392,10 @@ public class SparkMAXContainer implements MotorContainer {
       ControlType controlType,
       boolean diagnosticFollowerOutput,
       PositionReferenceGuard.Token positionReference) {
+    if (!Double.isFinite(value)) {
+      requestZeroOutput();
+      return false;
+    }
     double now = Timer.getFPGATimestamp();
     String failure = null;
     SparkMAXContainer leader = null;
@@ -1406,7 +1419,7 @@ public class SparkMAXContainer implements MotorContainer {
             && isBaseReadyLocked(now)
             && followerOutputAllowed
             && positionReferenceAllowed) {
-          REVLibError result = closedLoopController.setSetpoint(value, controlType);
+          REVLibError result = sendSetpointTracked(value, controlType);
           if (result == REVLibError.kOk) {
             outputGate.nonzeroSucceeded();
             accepted = true;
@@ -1693,11 +1706,11 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   private void logState(String details) {
-    System.out.printf(
-        "SPARK_HEALTH id=%d state=%s details=[%s]%n",
+    AsyncDiagnosticSink.log(String.format(
+        "SPARK_HEALTH id=%d state=%s details=[%s]",
         port,
         getHealthSummary(),
-        details);
+        details));
   }
 
   private static boolean allFinite(double... values) {
@@ -1707,6 +1720,17 @@ public class SparkMAXContainer implements MotorContainer {
       }
     }
     return true;
+  }
+
+  private REVLibError sendSetpointTracked(double value, ControlType controlType) {
+    long startedAt = System.nanoTime();
+    try {
+      return closedLoopController.setSetpoint(value, controlType);
+    } finally {
+      long elapsed = Math.max(0L, System.nanoTime() - startedAt);
+      lastSetpointCallNanos.set(elapsed);
+      maximumSetpointCallNanos.accumulateAndGet(elapsed, Math::max);
+    }
   }
 
   private record ConfigurationWork(
