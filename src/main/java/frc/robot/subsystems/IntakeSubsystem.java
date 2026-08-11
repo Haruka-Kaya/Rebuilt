@@ -28,9 +28,6 @@ public class IntakeSubsystem extends SubsystemBase {
         m_actuatorMotor.setCurrentLimit(15);
 
         m_actuatorMotor.assignPIDValues(actuator_kP, actuator_kI, actuator_kD);
-        if (m_actuatorMotor.isAvailable()) {
-            m_actuatorMotor.motor.getEncoder().setPosition(0);
-        }
 
         SmartDashboard.putNumber("Set intake actuator_kP", 0.1);
         SmartDashboard.putNumber("Set intake actuator_kI", 0);
@@ -43,14 +40,12 @@ public class IntakeSubsystem extends SubsystemBase {
     }
 
     private void slurp() {
-        // m_intakeRoller.motor.set(IntakeConstants.ROLLER_IN_SPEED);
-        m_intakeRoller.motor.set(slurpPercent);
+        m_intakeRoller.setDutyCycle(slurpPercent);
         extendIntake();
     }
 
     private void spit() {
-        // m_intakeRoller.motor.set(IntakeConstants.ROLLER_OUT_SPEED);
-        m_intakeRoller.motor.set(spitPercent);
+        m_intakeRoller.setDutyCycle(spitPercent);
     }
 
     public void runIntake(boolean trueForIn) {
@@ -70,12 +65,12 @@ public class IntakeSubsystem extends SubsystemBase {
     }
 
     public void stop() {
-        m_intakeRoller.motor.stopMotor();
+        m_intakeRoller.stop();
     }
 
     public void stopAll() {
-        m_intakeRoller.motor.stopMotor();
-        m_actuatorMotor.motor.stopMotor();
+        m_intakeRoller.stop();
+        m_actuatorMotor.stop();
     }
     @Override
     public void periodic() {

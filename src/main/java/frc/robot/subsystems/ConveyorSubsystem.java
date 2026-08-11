@@ -23,18 +23,20 @@ public class ConveyorSubsystem extends SubsystemBase {
         SmartDashboard.putNumber("Set conveyer out percent", -0.15);
     }
 
-    public void runConveyor() {
-        // m_feederBelt.motor.set(ManipulatorConstants.CONVEYOR_IN_SPEED);
-        m_feederBelt.motor.set(inPercent);
+    public boolean runConveyor() {
+        return m_feederBelt.setDutyCycle(inPercent);
     }
 
     public void backfeedConveyor() {
-        // m_feederBelt.motor.set(ManipulatorConstants.CONVEYOR_OUT_SPEED);
-        m_feederBelt.motor.set(outPercent);
+        m_feederBelt.setDutyCycle(outPercent);
     }
 
     public void stop() {
-        m_feederBelt.motor.stopMotor();
+        m_feederBelt.stop();
+    }
+
+    public boolean isReady() {
+        return m_feederBelt.isReady();
     }
 
     @Override

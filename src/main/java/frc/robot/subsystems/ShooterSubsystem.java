@@ -20,8 +20,8 @@ public class ShooterSubsystem extends SubsystemBase {
     private double flywheelkI = 0.0;
     private double flywheelkD = 0.0;
 
-    public boolean flywheelIsSet = false;
-    private boolean followerDiagnosticActive = false;
+    private boolean flywheelIsSet = false;
+    private boolean flywheelRequested;
 
     
     private double actuatorPos = 5.0;
@@ -31,15 +31,13 @@ public class ShooterSubsystem extends SubsystemBase {
     private double actuatorkD = 0.0;
 
     public ShooterSubsystem() {
-        if (actuatorMotor.isAvailable()) {
-            actuatorMotor.motor.getEncoder().setPosition(0);
-        }
-
         flywheelMotor_1.assignPIDValues(flywheelkP, flywheelkI, flywheelkD);
         flywheelMotor_2.setupAsFollowerMotor(flywheelMotor_1, true);
         actuatorMotor.assignPIDValues(actuatorkP, actuatorkI, actuatorkD);
 
         actuatorMotor.setBreakMode(true);
+        flywheelMotor_1.setBreakMode(false);
+        flywheelMotor_2.setBreakMode(false);
         actuatorMotor.setCurrentLimit(15);
         flywheelMotor_1.setCurrentLimit(30);
         flywheelMotor_2.setCurrentLimit(30);
@@ -64,6 +62,13 @@ public class ShooterSubsystem extends SubsystemBase {
      * 
      */
     public void setShooterSpeed() {
+        if (!flywheelPairReady()) {
+            flywheelMotor_1.stop();
+            flywheelRequested = false;
+            flywheelIsSet = false;
+            return;
+        }
+        flywheelRequested = true;
         flywheelMotor_1.setVelocity(flywheelRPM);
     }
 
@@ -76,9 +81,11 @@ public class ShooterSubsystem extends SubsystemBase {
     }
 
     public void stop() {
-        actuatorMotor.motor.stopMotor();
-        flywheelMotor_1.motor.stopMotor();
-        flywheelMotor_2.motor.stopMotor();
+        flywheelRequested = false;
+        flywheelIsSet = false;
+        actuatorMotor.stop();
+        flywheelMotor_1.stop();
+        flywheelMotor_2.stop();
     }
 
     @Override
@@ -127,31 +134,47 @@ public class ShooterSubsystem extends SubsystemBase {
             flywheel_tolerance = 200;
         }
 
-        flywheelIsSet = MathUtil.isNear(flywheelRPM, flywheelMotor_1.getVelocity(), flywheel_tolerance);
+        boolean diagnosticActive = flywheelMotor_2.isFollowerDiagnosticActive();
+        boolean pairReady = flywheelPairReady();
+        if (!diagnosticActive && !pairReady) {
+            flywheelMotor_1.stop();
+        }
+        flywheelIsSet = isFlywheelReady();
 
         SmartDashboard.putBoolean("Flywheel reved up", flywheelIsSet);
     }
 
     public void runFollowerDiagnostic() {
-        if (flywheelMotor_2.isAvailable()) {
-            if (!followerDiagnosticActive) {
-                flywheelMotor_2.motor.pauseFollowerMode();
-                followerDiagnosticActive = true;
-            }
-            flywheelMotor_2.motor.set(0.08);
-        }
+        flywheelRequested = false;
+        flywheelIsSet = false;
+        flywheelMotor_1.stop();
+        flywheelMotor_2.beginFollowerDiagnostic(0.08);
     }
 
     public void stopFollowerDiagnostic() {
-        flywheelMotor_2.motor.stopMotor();
-        if (followerDiagnosticActive) {
-            flywheelMotor_2.motor.resumeFollowerMode();
-        }
-        followerDiagnosticActive = false;
+        flywheelMotor_2.endFollowerDiagnostic();
     }
 
     public String getFollowerDiagnosticStatus() {
         return flywheelMotor_2.getDiagnosticStatus();
+    }
+
+    public boolean isFlywheelReady() {
+        return flywheelRequested
+            && Math.abs(flywheelRPM) > flywheel_tolerance
+            && !flywheelMotor_2.isFollowerDiagnosticActive()
+            && flywheelPairReady()
+            && flywheelAtRequestedSpeed(flywheelMotor_1.getVelocity())
+            && flywheelAtRequestedSpeed(flywheelMotor_2.getVelocity());
+    }
+
+    private boolean flywheelPairReady() {
+        return flywheelMotor_1.isReady() && flywheelMotor_2.isReady();
+    }
+
+    private boolean flywheelAtRequestedSpeed(double measuredVelocity) {
+        return MathUtil.isNear(
+            Math.abs(flywheelRPM), Math.abs(measuredVelocity), flywheel_tolerance);
     }
 
     private static boolean pidChanged(

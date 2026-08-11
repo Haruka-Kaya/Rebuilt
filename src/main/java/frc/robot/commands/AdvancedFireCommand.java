@@ -32,14 +32,19 @@ public class AdvancedFireCommand extends Command {
         m_turret.autoAimWithLimelight();
         m_shooter.setShooterSpeed();    // remove in prod
 
-        if(m_shooter.flywheelIsSet && m_turret.onTarget && Telemetry.isHubActive()) {
-            m_feeder.feed();
-            m_conveyer.runConveyor();
+        boolean pathReady = m_feeder.isReady() && m_conveyer.isReady();
+        if(m_shooter.isFlywheelReady()
+                && m_turret.onTarget
+                && Telemetry.isHubActive()
+                && pathReady) {
+            boolean conveyorStarted = m_conveyer.runConveyor();
+            boolean feederStarted = conveyorStarted && m_feeder.feed();
+            if (conveyorStarted && feederStarted) {
+                return;
+            }
         }
-        else {
-            m_feeder.stop();
-            m_conveyer.stop();
-        }
+        m_feeder.stop();
+        m_conveyer.stop();
     }
 
     @Override

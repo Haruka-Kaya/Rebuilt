@@ -21,22 +21,24 @@ public class FeederSubsystem extends SubsystemBase {
         SmartDashboard.putNumber("Set feeder reject percent", -0.15);
     }
 
-    public void feed() {
-        // m_feeder.motor.set(ManipulatorConstants.FEEDER_IN_SPEED);
-        m_feeder.motor.set(feedPercent);
+    public boolean feed() {
+        return m_feeder.setDutyCycle(feedPercent);
     }
 
     public void reject() {
-        // m_feeder.motor.set(ManipulatorConstants.FEEDER_OUT_SPEED);
-        m_feeder.motor.set(rejectPercent);
+        m_feeder.setDutyCycle(rejectPercent);
     }
 
     public void stop() {
-        m_feeder.motor.stopMotor();
+        m_feeder.stop();
+    }
+
+    public boolean isReady() {
+        return m_feeder.isReady();
     }
 
     public void runDiagnostic() {
-        m_feeder.motor.set(0.03);
+        m_feeder.setDutyCycle(0.03);
     }
 
     public String getDiagnosticStatus() {
