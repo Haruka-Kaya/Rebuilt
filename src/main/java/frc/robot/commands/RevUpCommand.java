@@ -9,6 +9,7 @@ public class RevUpCommand extends Command {
 
     public RevUpCommand(ShooterSubsystem shooter) {
         this.m_shooter = shooter;
+        addRequirements(shooter);
     }
 
     @Override
@@ -28,6 +29,6 @@ public class RevUpCommand extends Command {
 
     @Override
     public boolean isFinished() {
-        return true;
+        return false;
     }
 }

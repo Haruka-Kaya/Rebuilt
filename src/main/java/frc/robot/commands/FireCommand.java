@@ -12,6 +12,7 @@ public class FireCommand extends Command {
     public FireCommand(FeederSubsystem feeder, ConveyorSubsystem conveyor) {
         this.m_feeder = feeder;
         this.m_conveyer = conveyor;
+        addRequirements(feeder, conveyor);
     }
 
     @Override
@@ -35,6 +36,6 @@ public class FireCommand extends Command {
 
     @Override
     public boolean isFinished() {
-        return true;
+        return false;
     }
 }

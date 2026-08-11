@@ -8,11 +8,14 @@ import com.ctre.phoenix6.swerve.SwerveModule.DriveRequestType;
 import com.ctre.phoenix6.swerve.SwerveRequest;
 
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
 import edu.wpi.first.wpilibj2.command.button.RobotModeTriggers;
+import edu.wpi.first.wpilibj2.command.button.Trigger;
 import frc.robot.Telemetry;
 import frc.robot.constants.TunerConstants;
+import frc.robot.constants.Constants.DebugConstants;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
 import frc.robot.subsystems.ConveyorSubsystem;
@@ -23,8 +26,8 @@ import frc.robot.subsystems.TurretSubsystem;
 
 public class DriveBaseContainer {
     public AutoContainer autoContainer;
-    public static double speedFactor = .2;
-    public static double rotationFactor = .2;
+    public static double speedFactor = .05;
+    public static double rotationFactor = .05;
     
     static {
         edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber("Speed Factor", speedFactor);
@@ -38,6 +41,11 @@ public class DriveBaseContainer {
     private final SwerveRequest.FieldCentric drive = new SwerveRequest.FieldCentric()
             .withDeadband(MaxSpeed.getAsDouble() * OIConstants.kDriveDeadband).withRotationalDeadband(MaxAngularRate.getAsDouble() * OIConstants.kDriveDeadband) // Add deadband
             .withDriveRequestType(DriveRequestType.OpenLoopVoltage); // Use open-loop control for drive motors
+    private final SwerveRequest.RobotCentric robotCentricDrive = new SwerveRequest.RobotCentric()
+            .withDeadband(MaxSpeed.getAsDouble() * OIConstants.kDriveDeadband)
+            .withRotationalDeadband(MaxAngularRate.getAsDouble() * OIConstants.kDriveDeadband)
+            .withDriveRequestType(DriveRequestType.OpenLoopVoltage);
+    private final SwerveRequest.Idle idle = new SwerveRequest.Idle();
     // private final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
     // private final SwerveRequest.PointWheelsAt point = new SwerveRequest.PointWheelsAt();
 
@@ -57,6 +65,7 @@ public class DriveBaseContainer {
         joystick = driverController;
         configureBindings();
         SmartDashboard.putBoolean("DriveBase Running",true);
+        SmartDashboard.putBoolean("Swerve Output Enabled", DebugConstants.ALLOW_SWERVE_OUTPUT);
 
         SmartDashboard.putString("MESSAGE", "we are at autoSetup");
 
@@ -70,11 +79,28 @@ public class DriveBaseContainer {
     }
 
     public Command driveHider(){
-            return drivetrain.applyRequest(() ->
-                drive.withVelocityX(-joystick.getLeftY() * MaxSpeed.getAsDouble()) // Drive forward with negative Y (forward)
-                    .withVelocityY(-joystick.getLeftX() * MaxSpeed.getAsDouble()) // Drive left with negative X (left)
-                    .withRotationalRate(-joystick.getRightX() * MaxAngularRate.getAsDouble()) // Drive counterclockwise with negative X (left)
-            );
+            return drivetrain.applyRequest(() -> {
+                if (!DriverStation.isTeleopEnabled()) {
+                    return idle;
+                }
+                double velocityX = -availableAxis(1) * MaxSpeed.getAsDouble();
+                double velocityY = -availableAxis(0) * MaxSpeed.getAsDouble();
+                double rotation = -availableAxis(2) * MaxAngularRate.getAsDouble();
+                if (drivetrain.isGyroConnected()) {
+                    return drive.withVelocityX(velocityX)
+                        .withVelocityY(velocityY)
+                        .withRotationalRate(rotation);
+                }
+                return robotCentricDrive.withVelocityX(velocityX)
+                    .withVelocityY(velocityY)
+                    .withRotationalRate(rotation);
+            });
+    }
+
+    private double availableAxis(int axis) {
+        return DriverStation.getStickAxisCount(OIConstants.kDriverControllerPort) > axis
+            ? joystick.getHID().getRawAxis(axis)
+            : 0.0;
     }
 
     private void configureBindings() {
@@ -87,19 +113,24 @@ public class DriveBaseContainer {
 
         // Idle while the robot is disabled. This ensures the configured
         // neutral mode is applied to the drive motors while disabled.
-        final var idle = new SwerveRequest.Idle();
         RobotModeTriggers.disabled().whileTrue(
             drivetrain.applyRequest(() -> idle).ignoringDisable(true)
         );
 
         final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
 
-        joystick.R1().whileTrue(drivetrain.applyRequest(() -> brake));
+        // Touchpad is reserved for wheel-lock so it does not conflict with R1/intake output.
+        availableButton(14).whileTrue(drivetrain.applyRequest(() -> brake));
 
-        // Reset the field-centric heading on left bumper press.
-        joystick.cross().onTrue(drivetrain.runOnce(drivetrain::seedFieldCentric));
+        // Create resets the field-centric heading without colliding with mechanism controls.
+        availableButton(9).onTrue(drivetrain.runOnce(drivetrain::seedFieldCentric));
 
         drivetrain.registerTelemetry(logger::telemeterize);
+    }
+
+    private Trigger availableButton(int button) {
+        return new Trigger(() -> DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort) >= button
+            && joystick.getHID().getRawButton(button));
     }
 
     public Command GetAutonCommand(){

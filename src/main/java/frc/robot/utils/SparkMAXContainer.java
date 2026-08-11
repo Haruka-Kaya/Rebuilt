@@ -1,5 +1,8 @@
 package frc.robot.utils;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentSkipListMap;
+
 import com.revrobotics.spark.SparkBase.ControlType;
 
 import com.revrobotics.spark.SparkClosedLoopController;
@@ -25,6 +28,8 @@ public class SparkMAXContainer implements MotorContainer {
   public RelativeEncoder encoder;
   private SparkMaxConfig config;
   public int port;
+  private final boolean available;
+  private static final Map<Integer, Boolean> DEVICE_AVAILABILITY = new ConcurrentSkipListMap<>();
 
   /**
    * Creates a new SparkMAXContainer with the given id ASSUMES THE MOTOR IS
@@ -49,6 +54,11 @@ public class SparkMAXContainer implements MotorContainer {
         isBrushless ? MotorType.kBrushless : MotorType.kBrushed);
     config = new SparkMaxConfig();
     motor.setCANTimeout(20);
+    available = motor.getFirmwareVersion() != 0;
+    DEVICE_AVAILABILITY.put(id, available);
+    System.out.printf(
+        "SPARK_HEALTH id=%d available=%s firmware=%s%n",
+        id, available, available ? motor.getFirmwareString() : "unavailable");
     if (isBrushless) {
       encoder = motor.getEncoder();
     } else {
@@ -69,6 +79,23 @@ public class SparkMAXContainer implements MotorContainer {
     return this.motor.getClosedLoopController();
   }
 
+  public boolean isAvailable() {
+    return available;
+  }
+
+  public static String getDeviceAvailabilitySummary() {
+    return DEVICE_AVAILABILITY.toString();
+  }
+
+  public String getDiagnosticStatus() {
+    if (!available) {
+      return String.format("id=%d offline", port);
+    }
+    return String.format(
+        "id=%d applied=%.3f current=%.2fA velocity=%.1frpm bus=%.2fV",
+        port, motor.getAppliedOutput(), motor.getOutputCurrent(), getVelocity(), motor.getBusVoltage());
+  }
+
   /**
    * Assigns the defualt PID values to the motor assumes P = 0.1, I = 0, D = 0
    */
@@ -86,6 +113,7 @@ public class SparkMAXContainer implements MotorContainer {
    */
   @Override
   public void assignPIDValues(double P, double I, double D) {
+    if (!available) return;
     config.closedLoop.p(P).i(I).d(D);
     motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
@@ -100,13 +128,15 @@ public class SparkMAXContainer implements MotorContainer {
   * @see https://docs.revrobotics.com/revlib/spark/closed-loop/feed-forward-control
   */ 
   public void assignFF(double kS, double kV, double kA, double kG, double kCos, double kCosRatio){
-    config.closedLoop.feedForward.kA(kA).kV(kV).kA(kA).kG(kG).kCos(kCos).kCosRatio(kCosRatio);
+    if (!available) return;
+    config.closedLoop.feedForward.kS(kS).kV(kV).kA(kA).kG(kG).kCos(kCos).kCosRatio(kCosRatio);
     motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
 
   @Override
   public void assignFF(double kS, double kV, double kA, double kG){
-    config.closedLoop.feedForward.kA(kA).kV(kV).kA(kA).kG(kG);
+    if (!available) return;
+    config.closedLoop.feedForward.kS(kS).kV(kV).kA(kA).kG(kG);
     motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
 
@@ -120,6 +150,7 @@ public class SparkMAXContainer implements MotorContainer {
   public void setupAsFollowerMotor(MotorContainer leader, boolean invert) throws IllegalArgumentException {
     if(leader instanceof SparkMAXContainer) {
       SparkMAXContainer lead = (SparkMAXContainer) leader;
+      if (!available || !lead.isAvailable()) return;
       config.follow(lead.port, invert);
       motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
     } else {
@@ -134,6 +165,7 @@ public class SparkMAXContainer implements MotorContainer {
    * @param gearRatio can be represeneted via a fraction
    */
   public void setGearRatio(double gearRatio) {
+    if (!available) return;
     // setPositionConversionFactor
     config.encoder.positionConversionFactor(gearRatio);
     motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
@@ -160,13 +192,14 @@ public class SparkMAXContainer implements MotorContainer {
    * @return true when within deadband
    */
   public boolean goToPostion(double pos, double deadband) {
+    if (!available) return false;
     try {
       var encoderPos = encoder.getPosition();
       motor.getClosedLoopController().setSetpoint(pos, ControlType.kPosition);
-      return encoderPos > pos - deadband || encoderPos < encoderPos + deadband;
+      return Math.abs(encoderPos - pos) <= Math.abs(deadband);
     } catch (Exception e) {
       DriverStation.reportError(e.getMessage(), false);
-      return true;
+      return false;
     }
   }
 
@@ -177,11 +210,15 @@ public class SparkMAXContainer implements MotorContainer {
    * @param limit
    */
   public void setCurrentLimit(double limit) {
-    this.setSecondaryCurrentLimit(100);
-    this.setSmartCurrentLimit((int)limit);
+    if (!available) return;
+    double safeLimit = Math.max(1, Math.abs(limit));
+    config.smartCurrentLimit((int) safeLimit);
+    config.secondaryCurrentLimit(Math.min(100, safeLimit + 5));
+    motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
 
   public void setInverted(boolean value){
+    if (!available) return;
     this.config.inverted(value);
     this.motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
@@ -191,6 +228,7 @@ public class SparkMAXContainer implements MotorContainer {
    * @param limit
    */
   public void setSmartCurrentLimit(int limit){
+    if (!available) return;
     config.smartCurrentLimit(limit);
     motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
@@ -200,6 +238,7 @@ public class SparkMAXContainer implements MotorContainer {
    * @param limit
    */
   public void setSecondaryCurrentLimit(double limit) {
+    if (!available) return;
     config.secondaryCurrentLimit(limit);
     motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
@@ -210,11 +249,13 @@ public class SparkMAXContainer implements MotorContainer {
    * @param isBreakMode true for break mode, false for coast mode
    */
   public void setBreakMode(boolean isBreakMode) {
+    if (!available) return;
     config.idleMode(isBreakMode ? IdleMode.kBrake : IdleMode.kCoast);
     motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
 
   public double getMotorTemperatureInC() {
+    if (!available) return 0;
     return this.motor.getMotorTemperature();
   }
 
@@ -227,12 +268,14 @@ public class SparkMAXContainer implements MotorContainer {
    * @param speed postive number < 1
    */
   public void setMaxSpeed(double speed){
+    if (!available) return;
     speed = Math.abs(speed);
     this.config.closedLoop.outputRange(-speed, speed);
     this.motor.configure(config, ResetMode.kResetSafeParameters, PersistMode.kNoPersistParameters);
   }
 
   public double getPosition(){
+    if (!available) return 0;
     if(encoder == null){
       DriverStation.reportError("Trying to get position of a brushed motor without an encoder", false);
       return 0;
@@ -245,6 +288,7 @@ public class SparkMAXContainer implements MotorContainer {
    * @return velocity in RPM
    */
   public double getVelocity(){
+    if (!available) return 0;
     if(encoder == null){
       DriverStation.reportError("Trying to get velocity of a brushed motor without an encoder", false);
       return 0;
@@ -258,6 +302,7 @@ public class SparkMAXContainer implements MotorContainer {
    * @return the set velocity
    */
   public double setVelocity(double velocity){
+    if (!available) return 0;
     motor.getClosedLoopController().setSetpoint(velocity, ControlType.kVelocity);
     return this.getVelocity();
   }
@@ -271,6 +316,7 @@ public class SparkMAXContainer implements MotorContainer {
    */
   private boolean canReadTemp = true;
   public void reportMotor(String key) {
+    if (!available) return;
     SmartDashboard.putNumber(key + "/Encoder Value", encoder.getPosition());
     SmartDashboard.putNumber(key + "/Velocity", encoder.getVelocity());
     SmartDashboard.putNumber(key + "/Current", motor.getOutputCurrent());
@@ -292,6 +338,7 @@ public class SparkMAXContainer implements MotorContainer {
 
   @Override
   public void getPID(String key) {
+    if (!available) return;
     // PID
     SmartDashboard.putNumber(key + "P", motor.configAccessor.closedLoop.getP());
     SmartDashboard.putNumber(key + "I", motor.configAccessor.closedLoop.getI());

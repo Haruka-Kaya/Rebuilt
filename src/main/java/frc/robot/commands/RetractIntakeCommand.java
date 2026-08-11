@@ -9,6 +9,7 @@ public class RetractIntakeCommand extends Command {
 
     public RetractIntakeCommand(IntakeSubsystem intake) {
         this.m_intake = intake;
+        addRequirements(intake);
     }
 
     @Override
@@ -24,6 +25,6 @@ public class RetractIntakeCommand extends Command {
 
     @Override
     public boolean isFinished() {
-        return true;
+        return false;
     }
 }

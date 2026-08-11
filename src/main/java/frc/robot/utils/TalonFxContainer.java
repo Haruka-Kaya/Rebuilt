@@ -14,7 +14,6 @@ import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.signals.MotorAlignmentValue;
 import com.ctre.phoenix6.signals.NeutralModeValue;
-import edu.wpi.first.units.measure.Angle;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 
 import com.ctre.phoenix6.controls.Follower;
@@ -145,7 +144,7 @@ public class TalonFxContainer implements MotorContainer{
     public boolean goToPostion(double pos, double deadband) {
         var request = new PositionDutyCycle(pos);
         motor.setControl(request);
-        return motor.getPosition().getValue().isNear(Angle.ofBaseUnits(pos, Degree), deadband);
+        return Math.abs(motor.getPosition().getValueAsDouble() - pos) <= Math.abs(deadband);
     }
     
     /**
@@ -202,16 +201,14 @@ public class TalonFxContainer implements MotorContainer{
     }
 
     private final VelocityVoltage velocityRequest = new VelocityVoltage(0);
-    public boolean setVelocity(double target_velocity){
-        // this.motor.setControl(null)
-        motor.setControl(velocityRequest.withVelocity(target_velocity));
-        return getVelocity() == target_velocity;
+    public boolean setVelocity(double targetVelocityRpm){
+        motor.setControl(velocityRequest.withVelocity(targetVelocityRpm / 60.0));
+        return getVelocity() == targetVelocityRpm;
     }
 
-    public boolean setVelocity(double target_velocity, double velocityThreshold){
-        // this.motor.setControl(null)
-        motor.setControl(velocityRequest.withVelocity(target_velocity));
-        return Math.abs(getVelocity()) - Math.abs(target_velocity) < velocityThreshold;
+    public boolean setVelocity(double targetVelocityRpm, double velocityThresholdRpm){
+        motor.setControl(velocityRequest.withVelocity(targetVelocityRpm / 60.0));
+        return Math.abs(getVelocity() - targetVelocityRpm) <= Math.abs(velocityThresholdRpm);
     }
 
     @Override
