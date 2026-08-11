@@ -44,7 +44,9 @@ public class RobotContainer {
   private final CommandPS5Controller m_maintenanceController = new CommandPS5Controller(OIConstants.kMaintenanceControllerPort);
 
   // The robot's subsystems
-  private final VisionSubsystem m_turretVision = new VisionSubsystem(LimelightConstants.TURRET_LIMELIGHT_NAME);
+  private final VisionSubsystem m_turretVision = new VisionSubsystem(
+      LimelightConstants.TURRET_LIMELIGHT_NAME,
+      LimelightConstants.PIPELINE_APRILTAG);
 
   private final CommandSwerveDrivetrain drivetrain;
 
@@ -111,7 +113,8 @@ public class RobotContainer {
     availableButton(m_operatorController, OIConstants.kOperatorControllerPort, 5).whileTrue(back_in_shell);
 
     availableButton(m_maintenanceController, OIConstants.kMaintenanceControllerPort, 5)
-        .whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret));
+        .whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret)
+            .finallyDo(interrupted -> m_turret.stop()));
   }
 
   private static Trigger availableButton(CommandPS5Controller controller, int port, int button) {
