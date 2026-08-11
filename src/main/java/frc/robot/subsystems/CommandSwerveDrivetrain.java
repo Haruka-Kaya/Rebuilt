@@ -29,6 +29,7 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Subsystem;
 import frc.robot.constants.Constants.DebugConstants;
+import frc.robot.constants.Constants.AutoConstants;
 import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.TunerConstants;
 import frc.robot.constants.TunerConstants.TunerSwerveDrivetrain;
@@ -48,6 +49,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private static final double kSingleTagMaxHeadingResidualRadians = Math.toRadians(20.0);
     private static final double kMultiTagMaxHeadingResidualRadians = Math.toRadians(30.0);
     private final SwerveRequest.Idle m_safeIdleRequest = new SwerveRequest.Idle();
+    private boolean m_pathPlannerConfigured;
     private Notifier m_simNotifier = null;
     private double m_lastSimTime;
 
@@ -149,7 +151,9 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
      */
     public Command applyRequest(Supplier<SwerveRequest> request) {
         return run(() -> this.setControl(
-            DebugConstants.ALLOW_SWERVE_OUTPUT ? request.get() : m_safeIdleRequest
+            DebugConstants.ALLOW_SWERVE_OUTPUT && areAllModulesConnected()
+                ? request.get()
+                : m_safeIdleRequest
         ));
     }
 
@@ -185,6 +189,20 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
                     LimelightConstants.VISION_STD_DEVS
             );
         });
+    }
+
+    /** Immediately replaces any latched drive request with neutral output. */
+    public void requestIdle() {
+        this.setControl(m_safeIdleRequest);
+    }
+
+    /** Holds every swerve output idle until the returned command is interrupted. */
+    public Command safeIdleCommand() {
+        return run(this::requestIdle).finallyDo(interrupted -> requestIdle());
+    }
+
+    public boolean isPathPlannerConfigured() {
+        return m_pathPlannerConfigured && AutoBuilder.isConfigured();
     }
 
     private boolean isVisionMeasurementAcceptable(PoseObservation observation) {
@@ -284,7 +302,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private final SwerveRequest.RobotCentric m_robotCentricDriveRequest = new SwerveRequest.RobotCentric();
 
     public void drive(double xSpeed, double ySpeed, double rot, boolean fieldRelative) {
-        if (!DebugConstants.ALLOW_SWERVE_OUTPUT) {
+        if (!DebugConstants.ALLOW_SWERVE_OUTPUT || !areAllModulesConnected()) {
             this.setControl(m_safeIdleRequest);
             return;
         }
@@ -346,6 +364,151 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         return getPigeon2().isConnected();
     }
 
+    /** True only when every CTRE controller and sensor required for swerve motion is online. */
+    public boolean areAllDevicesConnected() {
+        return isGyroConnected() && areAllModulesConnected();
+    }
+
+    /** Module-only health gate; teleop can still fall back to robot-centric if the gyro is absent. */
+    public boolean areAllModulesConnected() {
+        if (getModules().length == 0) {
+            return false;
+        }
+        for (var module : getModules()) {
+            if (!module.getDriveMotor().isConnected()
+                    || !module.getSteerMotor().isConnected()
+                    || !module.getEncoder().isConnected()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Motion-observed check only; it intentionally does not certify direction or calibration. */
+    public boolean hasMinimumModuleSpeed(double minimumMetersPerSecond) {
+        if (!Double.isFinite(minimumMetersPerSecond) || minimumMetersPerSecond < 0.0) {
+            return false;
+        }
+        var states = getState().ModuleStates;
+        if (states.length == 0) {
+            return false;
+        }
+        for (var state : states) {
+            if (!Double.isFinite(state.speedMetersPerSecond)
+                    || Math.abs(state.speedMetersPerSecond) < minimumMetersPerSecond) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Captures low-output swerve motion evidence, including each drive vector and steer current.
+     * This proves neither physical dimensions nor absolute calibration.
+     */
+    public SwerveDiagnosticEvidence getSwerveDiagnosticEvidence(
+            ChassisSpeeds expectedSpeeds,
+            double minimumModuleSpeedMetersPerSecond,
+            double maximumVectorErrorDegrees,
+            double maximumDriveCurrentAmps,
+            double maximumSteerCurrentAmps) {
+        boolean validRequest = expectedSpeeds != null
+            && Double.isFinite(expectedSpeeds.vxMetersPerSecond)
+            && Double.isFinite(expectedSpeeds.vyMetersPerSecond)
+            && Double.isFinite(expectedSpeeds.omegaRadiansPerSecond)
+            && Double.isFinite(minimumModuleSpeedMetersPerSecond)
+            && minimumModuleSpeedMetersPerSecond >= 0.0
+            && Double.isFinite(maximumVectorErrorDegrees)
+            && maximumVectorErrorDegrees >= 0.0
+            && Double.isFinite(maximumDriveCurrentAmps)
+            && maximumDriveCurrentAmps > 0.0
+            && Double.isFinite(maximumSteerCurrentAmps)
+            && maximumSteerCurrentAmps > 0.0;
+        if (!validRequest) {
+            return new SwerveDiagnosticEvidence(
+                false, false, false, false, true,
+                Double.NaN, Double.NaN, Double.NaN);
+        }
+
+        var actualStates = getState().ModuleStates;
+        var expectedStates = getKinematics().toSwerveModuleStates(expectedSpeeds);
+        boolean connected = areAllDevicesConnected();
+        boolean finite = actualStates.length == expectedStates.length && actualStates.length > 0;
+        boolean motionObserved = finite;
+        boolean steeringAligned = finite;
+        boolean overCurrent = false;
+        double minimumObservedSpeed = Double.POSITIVE_INFINITY;
+        double maximumVectorError = 0.0;
+        double maximumObservedDriveCurrent = 0.0;
+        double maximumObservedSteerCurrent = 0.0;
+
+        for (int i = 0; i < actualStates.length && i < expectedStates.length; i++) {
+            double actualSpeed = actualStates[i].speedMetersPerSecond;
+            double expectedSpeed = expectedStates[i].speedMetersPerSecond;
+            double driveCurrent = Math.abs(
+                getModule(i).getDriveMotor().getStatorCurrent().getValueAsDouble());
+            double steerCurrent = Math.abs(
+                getModule(i).getSteerMotor().getStatorCurrent().getValueAsDouble());
+            if (!Double.isFinite(actualSpeed)
+                    || !Double.isFinite(actualStates[i].angle.getRadians())
+                    || !Double.isFinite(expectedSpeed)
+                    || !Double.isFinite(expectedStates[i].angle.getRadians())
+                    || !Double.isFinite(driveCurrent)
+                    || !Double.isFinite(steerCurrent)) {
+                finite = false;
+                motionObserved = false;
+                steeringAligned = false;
+                continue;
+            }
+
+            double absoluteSpeed = Math.abs(actualSpeed);
+            minimumObservedSpeed = Math.min(minimumObservedSpeed, absoluteSpeed);
+            motionObserved &= absoluteSpeed >= minimumModuleSpeedMetersPerSecond;
+
+            double actualVx = actualSpeed * actualStates[i].angle.getCos();
+            double actualVy = actualSpeed * actualStates[i].angle.getSin();
+            double expectedVx = expectedSpeed * expectedStates[i].angle.getCos();
+            double expectedVy = expectedSpeed * expectedStates[i].angle.getSin();
+            double denominator = Math.abs(actualSpeed * expectedSpeed);
+            double vectorErrorDegrees = denominator <= 1e-9
+                ? 180.0
+                : Math.toDegrees(Math.acos(MathUtil.clamp(
+                    (actualVx * expectedVx + actualVy * expectedVy) / denominator,
+                    -1.0,
+                    1.0)));
+            maximumVectorError = Math.max(maximumVectorError, vectorErrorDegrees);
+            steeringAligned &= vectorErrorDegrees <= maximumVectorErrorDegrees;
+
+            maximumObservedDriveCurrent = Math.max(maximumObservedDriveCurrent, driveCurrent);
+            maximumObservedSteerCurrent = Math.max(maximumObservedSteerCurrent, steerCurrent);
+            overCurrent |= driveCurrent >= maximumDriveCurrentAmps
+                || steerCurrent >= maximumSteerCurrentAmps;
+        }
+
+        if (!Double.isFinite(minimumObservedSpeed)) {
+            minimumObservedSpeed = Double.NaN;
+        }
+        return new SwerveDiagnosticEvidence(
+            connected && finite,
+            motionObserved,
+            steeringAligned,
+            finite,
+            overCurrent,
+            minimumObservedSpeed,
+            maximumVectorError,
+            Math.max(maximumObservedDriveCurrent, maximumObservedSteerCurrent));
+    }
+
+    public record SwerveDiagnosticEvidence(
+        boolean ready,
+        boolean motionObserved,
+        boolean steeringAligned,
+        boolean telemetryFinite,
+        boolean overCurrent,
+        double minimumModuleSpeedMetersPerSecond,
+        double maximumVectorErrorDegrees,
+        double maximumMotorCurrentAmps) {}
+
     public String getMotionDiagnosticSummary() {
         StringBuilder summary = new StringBuilder();
         var state = getState();
@@ -368,22 +531,27 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     }
 
     private void configurePathPlanner() {
+        m_pathPlannerConfigured = false;
         RobotConfig config;
         try {
             config = RobotConfig.fromGUISettings();
         } catch (Exception e) {
-            // Handle the error if the config fails to load
-            // This usually happens if you haven't opened the PathPlanner GUI yet
-            e.printStackTrace();
+            DriverStation.reportError(
+                "PathPlanner robot configuration unavailable: " + e.getMessage(),
+                e.getStackTrace());
             return;
         }
 
-        AutoBuilder.configure(
+        try {
+            AutoBuilder.configure(
                 () -> this.getState().Pose, // Supplier of current robot pose
                 this::resetPose, // Method to reset odometry
                 () -> this.getState().Speeds, // Supplier of current robot speeds
                 (speeds, feedforwards) -> {
-                    if (DebugConstants.ALLOW_SWERVE_OUTPUT && isGyroConnected()) {
+                    if (AutoConstants.CALIBRATED_AUTONOMOUS_ENABLED
+                            && DriverStation.isAutonomousEnabled()
+                            && DebugConstants.ALLOW_SWERVE_OUTPUT
+                            && areAllDevicesConnected()) {
                         double maxTranslation = TunerConstants.kSpeedAt12Volts.baseUnitMagnitude()
                             * DebugConstants.MAX_SWERVE_TRANSLATION_FRACTION;
                         ChassisSpeeds limitedSpeeds = new ChassisSpeeds(
@@ -416,6 +584,12 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
                     return false;
                 },
                 this // Reference to this subsystem to set requirements
-        );
+            );
+            m_pathPlannerConfigured = true;
+        } catch (RuntimeException e) {
+            DriverStation.reportError(
+                "PathPlanner AutoBuilder configuration failed: " + e.getMessage(),
+                e.getStackTrace());
+        }
     }
 }

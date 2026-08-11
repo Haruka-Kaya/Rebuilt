@@ -45,10 +45,20 @@ public final class Constants {
   }
 
   public static final class AutoConstants {
-    public static final double kMaxSpeedMetersPerSecond = 3;
-    public static final double kMaxAccelerationMetersPerSecondSquared = 3;
-    public static final double kMaxAngularSpeedRadiansPerSecond = Math.PI;
-    public static final double kMaxAngularSpeedRadiansPerSecondSquared = Math.PI;
+    /**
+     * Keep PathPlanner motion disabled until wheel radius, module locations, gearing, and maximum
+     * speed are reconciled with the real robot/CAD. The current generated Tuner constants and
+     * PathPlanner settings disagree, so enabling an autonomous path would be an unverified motion.
+     */
+    public static final boolean CALIBRATED_AUTONOMOUS_ENABLED = false;
+
+    public static final String CALIBRATION_BLOCK_REASON =
+        "BLOCKED: verify swerve wheel radius, module geometry, gearing, and max speed";
+
+    public static final double kMaxSpeedMetersPerSecond = 0.45;
+    public static final double kMaxAccelerationMetersPerSecondSquared = 0.5;
+    public static final double kMaxAngularSpeedRadiansPerSecond = Math.toRadians(15.0);
+    public static final double kMaxAngularSpeedRadiansPerSecondSquared = Math.toRadians(30.0);
 
     public static final double kPXController = 1;
     public static final double kPYController = 1;
@@ -66,6 +76,7 @@ public final class Constants {
   public static final class IntakeConstants {
     public static final int INTAKE_ACTUATOR_CAN_ID = 30;
     public static final int INTAKE_ROLLER_CAN_ID = 31;
+    public static final int ROLLER_CURRENT_LIMIT_AMPS = 20;
 
     public static final double EXTENDED_ANGLE_DEGREES = 75;
 
@@ -77,6 +88,8 @@ public final class Constants {
   public static final class ManipulatorConstants {
     public static final int FEEDER_CAN_ID = 32;
     public static final int CONVEYOR_CAN_ID = 33;
+    public static final int FEEDER_CURRENT_LIMIT_AMPS = 10;
+    public static final int CONVEYOR_CURRENT_LIMIT_AMPS = 15;
 
     // Motor speeds from -1 to +1
     public static final double CONVEYOR_IN_SPEED = 0.75;
@@ -100,6 +113,17 @@ public final class Constants {
     public static final int SHOOTER_1_CAN_ID = 36;
     public static final int SHOOTER_2_CAN_ID = 37;
     public static final int ACTUATOR_CAN_ID = 38;
+    public static final int FLYWHEEL_CURRENT_LIMIT_AMPS = 30;
+  }
+
+  public static final class HardwareTestConstants {
+    public static final double OPEN_LOOP_DUTY_CYCLE = 0.03;
+    public static final double OPEN_LOOP_STAGE_SECONDS = 0.40;
+    public static final double STAGE_SETTLE_SECONDS = 0.35;
+    public static final double MIN_SWERVE_MODULE_SPEED_METERS_PER_SECOND = 0.02;
+    public static final double MAX_SWERVE_VECTOR_ERROR_DEGREES = 20.0;
+    public static final double MAX_SWERVE_DIAGNOSTIC_DRIVE_CURRENT_AMPS = 40.0;
+    public static final double MAX_SWERVE_DIAGNOSTIC_STEER_CURRENT_AMPS = 30.0;
   }
 
   public static final class LimelightConstants {

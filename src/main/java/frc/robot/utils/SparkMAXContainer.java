@@ -2,6 +2,7 @@ package frc.robot.utils;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.TreeMap;
@@ -26,6 +27,7 @@ import com.revrobotics.spark.config.SparkMaxConfig;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 import frc.robot.utils.SparkRecoveryState.ServiceAction;
 import frc.robot.utils.SparkOutputGate.ZeroDecision;
 import frc.robot.utils.SparkResetGuard.Observation;
@@ -42,7 +44,7 @@ public class SparkMAXContainer implements MotorContainer {
   private static final double STATUS_SAMPLE_PERIOD_SECONDS = 0.10;
   private static final double STATUS_FRESHNESS_SECONDS = 0.50;
   private static final double FOLLOWER_TRANSITION_TIMEOUT_SECONDS = 0.50;
-  private static final double FOLLOWER_DIAGNOSTIC_STOPPED_RPM = 50.0;
+  private static final double FOLLOWER_DIAGNOSTIC_STOPPED_RPM = 2.0;
   private static final double MAX_DIAGNOSTIC_DUTY_CYCLE = 0.10;
 
   private static final List<SparkMAXContainer> DEVICES = new CopyOnWriteArrayList<>();
@@ -965,6 +967,111 @@ public class SparkMAXContainer implements MotorContainer {
           cachedCurrent,
           cachedVelocity,
           cachedBusVoltage);
+    }
+  }
+
+  /** Returns one immutable telemetry sample for an external, read-only diagnostic evaluator. */
+  public Snapshot getDiagnosticSnapshot(boolean commandAccepted) {
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        boolean ready = followerDiagnosticMode == FollowerDiagnosticMode.NONE
+            && isBaseReadyLocked(now)
+            && requiredFollowersReadyLocked(now);
+        return new Snapshot(
+            port,
+            ready,
+            cachedAppliedOutput,
+            cachedCurrent,
+            cachedVelocity,
+            cachedBusVoltage,
+            commandAccepted);
+      }
+    }
+  }
+
+  /** Finds a configured SPARK by CAN ID without exposing the mutable controller instance. */
+  public static Optional<Snapshot> getDiagnosticSnapshotForId(int canId) {
+    for (SparkMAXContainer device : DEVICES) {
+      if (device.port == canId) {
+        return Optional.of(device.getControllerTelemetrySnapshot());
+      }
+    }
+    return Optional.empty();
+  }
+
+  private Snapshot getControllerTelemetrySnapshot() {
+    double now = Timer.getFPGATimestamp();
+    synchronized (stateLock) {
+      boolean ready = recoveryState.isConfigurationReady()
+          && Double.isFinite(lastSampleAt)
+          && now - lastSampleAt <= STATUS_FRESHNESS_SECONDS;
+      return new Snapshot(
+          port,
+          ready,
+          cachedAppliedOutput,
+          cachedCurrent,
+          cachedVelocity,
+          cachedBusVoltage,
+          false);
+    }
+  }
+
+  /** Same snapshot contract while an intentionally paused follower diagnostic is active. */
+  public Snapshot getFollowerDiagnosticSnapshot(boolean commandAccepted) {
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      double leaderStoppedAt = getLeaderStoppedAtLocked(followerLeader, now);
+      synchronized (stateLock) {
+        boolean diagnosticReady = followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE
+            && isBaseReadyLocked(now)
+            && Double.isFinite(leaderStoppedAt);
+        return new Snapshot(
+            port,
+            diagnosticReady,
+            cachedAppliedOutput,
+            cachedCurrent,
+            cachedVelocity,
+            cachedBusVoltage,
+            commandAccepted);
+      }
+    }
+  }
+
+  /** True only while isolated follower output and its stopped-leader dependency remain verified. */
+  public boolean isFollowerDiagnosticOutputSafe() {
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      double leaderStoppedAt = getLeaderStoppedAtLocked(followerLeader, now);
+      synchronized (stateLock) {
+        return followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE
+            && isBaseReadyLocked(now)
+            && Double.isFinite(leaderStoppedAt);
+      }
+    }
+  }
+
+  /**
+   * Latches the whole isolated-diagnostic transition to a continuously healthy leader. A leader
+   * loss before ACTIVE must require a new arm/gesture rather than resuming in the same stage.
+   */
+  public boolean isFollowerDiagnosticTransitionSafe() {
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      SparkMAXContainer leader = followerLeader;
+      boolean leaderControllerReady = leader != null
+          && leader.getControllerTelemetrySnapshot().ready();
+      double leaderStoppedAt = getLeaderStoppedAtLocked(leader, now);
+      synchronized (stateLock) {
+        if (!isBaseReadyLocked(now) || !leaderControllerReady) {
+          return false;
+        }
+        return switch (followerDiagnosticMode) {
+          case LEADER_ZERO_PENDING -> true;
+          case PAUSE_PENDING, ACTIVE -> Double.isFinite(leaderStoppedAt);
+          default -> false;
+        };
+      }
     }
   }
 

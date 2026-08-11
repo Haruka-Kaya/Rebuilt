@@ -15,7 +15,7 @@ public class FeederSubsystem extends SubsystemBase {
 
     public FeederSubsystem() {
         m_feeder.setBreakMode(false);
-        m_feeder.setCurrentLimit(10);
+        m_feeder.setCurrentLimit(ManipulatorConstants.FEEDER_CURRENT_LIMIT_AMPS);
 
         SmartDashboard.putNumber("Set feeder feed percent", 0.15);
         SmartDashboard.putNumber("Set feeder reject percent", -0.15);
@@ -35,10 +35,6 @@ public class FeederSubsystem extends SubsystemBase {
 
     public boolean isReady() {
         return m_feeder.isReady();
-    }
-
-    public void runDiagnostic() {
-        m_feeder.setDutyCycle(0.03);
     }
 
     public String getDiagnosticStatus() {

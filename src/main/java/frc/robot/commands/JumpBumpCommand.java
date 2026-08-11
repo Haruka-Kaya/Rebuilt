@@ -13,6 +13,7 @@ import frc.robot.subsystems.CommandSwerveDrivetrain;
 public class JumpBumpCommand extends Command {
     private final CommandSwerveDrivetrain m_drivetrain;
     private final CommandPS5Controller m_controller; // may be used
+    private boolean moduleFaulted;
 
     private final ProfiledPIDController m_rotationController = new ProfiledPIDController(4.0, 0.0, 0.0,
             new TrapezoidProfile.Constraints(
@@ -31,7 +32,20 @@ public class JumpBumpCommand extends Command {
     }
 
     @Override
+    public void initialize() {
+        moduleFaulted = !m_drivetrain.areAllModulesConnected();
+        if (moduleFaulted) {
+            m_drivetrain.requestIdle();
+        }
+    }
+
+    @Override
     public void execute() {
+        if (moduleFaulted || !m_drivetrain.areAllModulesConnected()) {
+            moduleFaulted = true;
+            m_drivetrain.requestIdle();
+            return;
+        }
         Pose2d currentPose = m_drivetrain.getState().Pose;
         double currentRotationRadians = currentPose.getRotation().getRadians();
 
@@ -54,11 +68,11 @@ public class JumpBumpCommand extends Command {
 
     @Override
     public void end(boolean interrupted) {
-        m_drivetrain.drive(0, 0, 0, true);
+        m_drivetrain.requestIdle();
     }
 
     @Override
     public boolean isFinished() {
-        return false;
+        return moduleFaulted;
     }
 }

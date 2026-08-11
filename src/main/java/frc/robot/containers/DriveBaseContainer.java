@@ -18,6 +18,7 @@ import frc.robot.constants.TunerConstants;
 import frc.robot.constants.Constants.DebugConstants;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
+import frc.robot.subsystems.ClimberSubsystem;
 import frc.robot.subsystems.ConveyorSubsystem;
 import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
@@ -61,9 +62,10 @@ public class DriveBaseContainer {
     // private final ConveyorSubsystem m_conveyor;
     // private final IntakeSubsystem m_intake;
 
-    public DriveBaseContainer(CommandPS5Controller driverController, TurretSubsystem turret, 
-                            ShooterSubsystem shooter, FeederSubsystem feeder, 
-                            ConveyorSubsystem conveyor, IntakeSubsystem intake) {
+    public DriveBaseContainer(CommandPS5Controller driverController, TurretSubsystem turret,
+                            ShooterSubsystem shooter, FeederSubsystem feeder,
+                            ConveyorSubsystem conveyor, IntakeSubsystem intake,
+                            ClimberSubsystem climber) {
         joystick = driverController;
         configureBindings();
         SmartDashboard.putBoolean("DriveBase Running",true);
@@ -77,7 +79,8 @@ public class DriveBaseContainer {
         // this.m_conveyor = conveyor;
         // this.m_intake = intake;
 
-        autoContainer = new AutoContainer(drivetrain, turret, shooter, feeder, conveyor, intake);
+        autoContainer = new AutoContainer(
+            drivetrain, turret, shooter, feeder, conveyor, intake, climber);
     }
 
     public Command driveHider(){
@@ -151,7 +154,9 @@ public class DriveBaseContainer {
             OIConstants.kDriverControllerPort)
             | (DriverStation.getStickAxisCount(OIConstants.kDriverControllerPort) << 8);
         return driveInputGate.allow(
-            DriverStation.isTeleopEnabled(), sourceSignature, anyAxisActive || anyControlButton);
+            DriverStation.isTeleopEnabled() && drivetrain.areAllModulesConnected(),
+            sourceSignature,
+            anyAxisActive || anyControlButton);
     }
 
     private boolean rawButtonPressed(int button) {
@@ -161,5 +166,9 @@ public class DriveBaseContainer {
 
     public Command GetAutonCommand(){
         return this.autoContainer.getAutonomousCommand();
+    }
+
+    public boolean shouldAbortActiveAutonomous() {
+        return autoContainer.shouldAbortActiveAutonomous();
     }
 }
