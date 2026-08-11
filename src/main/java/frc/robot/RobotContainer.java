@@ -7,6 +7,7 @@ package frc.robot;
 
 import edu.wpi.first.wpilibj.PS5Controller;
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import frc.robot.commands.FireCommand;
 import frc.robot.commands.IntakeCommand;
 import frc.robot.commands.HardwareSelfTestCommand;
@@ -16,8 +17,11 @@ import frc.robot.commands.OutputCommand;
 import frc.robot.commands.RetractIntakeCommand;
 import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.Constants.OIConstants;
+import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.containers.DriveBaseContainer;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
+import frc.robot.subsystems.ClimberDiagnosticLatch.MotorSide;
+import frc.robot.subsystems.ClimberSubsystem;
 import frc.robot.subsystems.ConveyorSubsystem;
 import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
@@ -25,7 +29,9 @@ import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.subsystems.VisionSubsystem;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.NeutralAfterEnableGate;
 import edu.wpi.first.wpilibj2.command.Command;
+import edu.wpi.first.wpilibj2.command.FunctionalCommand;
 import edu.wpi.first.wpilibj2.command.RunCommand;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
 import edu.wpi.first.wpilibj2.command.button.JoystickButton;
@@ -38,6 +44,16 @@ import edu.wpi.first.wpilibj2.command.button.Trigger;
  * (including subsystems, commands, and button mappings) should be declared here.
  */
 public class RobotContainer {
+  private enum IntakePathAction {
+    INTAKE,
+    OUTPUT,
+    FIRE,
+    RETRACT
+  }
+
+  private final NeutralAfterEnableGate m_teleopInputGate = new NeutralAfterEnableGate();
+  private final NeutralAfterEnableGate m_climberInputGate = new NeutralAfterEnableGate();
+
   // The driver's controller
   private final CommandPS5Controller m_driverController = new CommandPS5Controller(OIConstants.kDriverControllerPort);
   private final CommandPS5Controller m_operatorController = new CommandPS5Controller(OIConstants.kOperatorControllerPort);
@@ -55,6 +71,7 @@ public class RobotContainer {
   private final TurretSubsystem m_turret = new TurretSubsystem(m_turretVision);
   private final ConveyorSubsystem m_conveyor = new ConveyorSubsystem();
   private final FeederSubsystem m_feeder = new FeederSubsystem();
+  private final ClimberSubsystem m_climber = new ClimberSubsystem();
 
   // The robot's commands
   private final JumpBumpCommand jumpBump;
@@ -102,24 +119,171 @@ public class RobotContainer {
      * 
      */
 
-    availableButton(m_driverController, OIConstants.kDriverControllerPort, 5).whileTrue(slurp);
-    availableButton(m_driverController, OIConstants.kDriverControllerPort, 6).whileTrue(spit);
+    exclusiveIntakePathButton(IntakePathAction.INTAKE).whileTrue(slurp);
+    exclusiveIntakePathButton(IntakePathAction.OUTPUT).whileTrue(spit);
 
-    availableButton(m_driverController, OIConstants.kDriverControllerPort, 12).whileTrue(jumpBump);
+    availableButton(m_driverController, OIConstants.kDriverControllerPort, 12)
+        .and(availableButton(m_driverController, OIConstants.kDriverControllerPort, 14).negate())
+        .whileTrue(jumpBump);
 
     availableButton(m_driverController, OIConstants.kDriverControllerPort, 7).whileTrue(revWheel);
-    availableButton(m_driverController, OIConstants.kDriverControllerPort, 8).whileTrue(fire);
+    exclusiveIntakePathButton(IntakePathAction.FIRE).whileTrue(fire);
 
-    availableButton(m_operatorController, OIConstants.kOperatorControllerPort, 5).whileTrue(back_in_shell);
+    exclusiveIntakePathButton(IntakePathAction.RETRACT).whileTrue(back_in_shell);
 
-    availableButton(m_maintenanceController, OIConstants.kMaintenanceControllerPort, 5)
+    operatorOrDriverButton(
+        m_maintenanceController,
+        OIConstants.kMaintenanceControllerPort,
+        5,
+        4)
         .whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret)
             .finallyDo(interrupted -> m_turret.stop()));
+
+    configureClimberDiagnosticBindings();
   }
 
-  private static Trigger availableButton(CommandPS5Controller controller, int port, int button) {
-    return new Trigger(() -> DriverStation.getStickButtonCount(port) >= button
+  private Trigger availableButton(CommandPS5Controller controller, int port, int button) {
+    return new Trigger(() -> teleopInputsAllowed()
+        && DriverStation.getStickButtonCount(port) >= button
         && controller.getHID().getRawButton(button));
+  }
+
+  private Trigger exclusiveIntakePathButton(IntakePathAction requestedAction) {
+    return new Trigger(() -> {
+      if (!teleopInputsAllowed()) {
+        return false;
+      }
+      boolean intake = rawButtonPressed(m_driverController, OIConstants.kDriverControllerPort, 5);
+      boolean output = rawButtonPressed(m_driverController, OIConstants.kDriverControllerPort, 6);
+      boolean firePressed = rawButtonPressed(m_driverController, OIConstants.kDriverControllerPort, 8);
+      boolean retract = operatorOrDriverPressed(
+          m_operatorController,
+          OIConstants.kOperatorControllerPort,
+          5,
+          1);
+      int pressedCount = (intake ? 1 : 0)
+          + (output ? 1 : 0)
+          + (firePressed ? 1 : 0)
+          + (retract ? 1 : 0);
+      if (pressedCount != 1) {
+        return false;
+      }
+      return switch (requestedAction) {
+        case INTAKE -> intake;
+        case OUTPUT -> output;
+        case FIRE -> firePressed;
+        case RETRACT -> retract;
+      };
+    });
+  }
+
+  private Trigger operatorOrDriverButton(
+      CommandPS5Controller dedicatedController,
+      int dedicatedPort,
+      int dedicatedButton,
+      int driverFallbackButton) {
+    return new Trigger(() -> teleopInputsAllowed()
+        && operatorOrDriverPressed(
+            dedicatedController, dedicatedPort, dedicatedButton, driverFallbackButton));
+  }
+
+  private boolean teleopInputsAllowed() {
+    int driverButtonCount = DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort);
+    int operatorButtonCount = DriverStation.getStickButtonCount(OIConstants.kOperatorControllerPort);
+    int maintenanceButtonCount = DriverStation.getStickButtonCount(
+        OIConstants.kMaintenanceControllerPort);
+    int sourceSignature = (driverButtonCount & 0xff)
+        | ((operatorButtonCount & 0xff) << 8)
+        | ((maintenanceButtonCount & 0xff) << 16);
+    int[] driverButtons = {1, 4, 5, 6, 7, 8, 9, 12, 14};
+    boolean anyPressed = false;
+    for (int button : driverButtons) {
+      anyPressed |= rawButtonPressed(
+          m_driverController, OIConstants.kDriverControllerPort, button);
+    }
+    anyPressed |= rawButtonPressed(m_operatorController, OIConstants.kOperatorControllerPort, 5);
+    anyPressed |= rawButtonPressed(
+        m_maintenanceController, OIConstants.kMaintenanceControllerPort, 5);
+    return m_teleopInputGate.allow(
+        DriverStation.isTeleopEnabled(), sourceSignature, anyPressed);
+  }
+
+  private boolean operatorOrDriverPressed(
+      CommandPS5Controller dedicatedController,
+      int dedicatedPort,
+      int dedicatedButton,
+      int driverFallbackButton) {
+    if (DriverStation.getStickButtonCount(dedicatedPort) >= dedicatedButton) {
+      return dedicatedController.getHID().getRawButton(dedicatedButton);
+    }
+    return rawButtonPressed(
+        m_driverController, OIConstants.kDriverControllerPort, driverFallbackButton);
+  }
+
+  private static boolean rawButtonPressed(
+      CommandPS5Controller controller, int port, int button) {
+    return DriverStation.getStickButtonCount(port) >= button
+        && controller.getHID().getRawButton(button);
+  }
+
+  private void configureClimberDiagnosticBindings() {
+    bindClimberDiagnostic(1, MotorSide.LEFT, 1.0);
+    bindClimberDiagnostic(2, MotorSide.LEFT, -1.0);
+    bindClimberDiagnostic(3, MotorSide.RIGHT, 1.0);
+    bindClimberDiagnostic(4, MotorSide.RIGHT, -1.0);
+  }
+
+  private void bindClimberDiagnostic(int faceButton, MotorSide side, double sign) {
+    boolean[] active = {false};
+    new Trigger(() -> climberDiagnosticPressed(faceButton))
+        .whileTrue(new FunctionalCommand(
+            () -> active[0] = m_climber.canStartDiagnostic(),
+            () -> {
+              if (active[0]) {
+                active[0] = m_climber.runDiagnostic(
+                    side, sign * ClimberConstants.DIAGNOSTIC_MAX_DUTY_CYCLE);
+              }
+            },
+            interrupted -> {
+              active[0] = false;
+              m_climber.stop();
+            },
+            () -> !active[0],
+            m_climber)
+            .withTimeout(ClimberConstants.DIAGNOSTIC_PULSE_SECONDS)
+            .finallyDo(interrupted -> m_climber.stop()));
+  }
+
+  private boolean climberDiagnosticPressed(int selectedFaceButton) {
+    CommandPS5Controller controller = DriverStation.getStickButtonCount(
+        OIConstants.kMaintenanceControllerPort) >= 10
+            ? m_maintenanceController
+            : m_driverController;
+    int port = controller == m_maintenanceController
+        ? OIConstants.kMaintenanceControllerPort
+        : OIConstants.kDriverControllerPort;
+    boolean deadmanPressed = rawButtonPressed(controller, port, 10);
+    int pressedFaces = 0;
+    for (int button = 1; button <= 4; button++) {
+      if (rawButtonPressed(controller, port, button)) {
+        pressedFaces++;
+      }
+    }
+    if (pressedFaces > 1) {
+      m_climberInputGate.blockUntilNeutral();
+    }
+    boolean interlocksEnabled = DriverStation.isTestEnabled()
+        && !DriverStation.isFMSAttached()
+        && SmartDashboard.getBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false)
+        && SmartDashboard.getBoolean(ClimberSubsystem.MOTOR_TYPE_VERIFIED_KEY, false);
+    boolean anyPressed = deadmanPressed || pressedFaces > 0;
+    int sourceSignature = (port << 16) | DriverStation.getStickButtonCount(port);
+    if (!m_climberInputGate.allow(interlocksEnabled, sourceSignature, anyPressed)) {
+      return false;
+    }
+    return deadmanPressed
+        && pressedFaces == 1
+        && rawButtonPressed(controller, port, selectedFaceButton);
   }
 
   /**
@@ -132,7 +296,7 @@ public class RobotContainer {
   }
 
   public Command getHardwareSelfTestCommand() {
-    return HardwareSelfTestCommand.create(drivetrain, m_feeder, m_shooter);
+    return HardwareSelfTestCommand.create(drivetrain, m_feeder, m_shooter, m_climber);
   }
 
   public String getSwerveDeviceHealthSummary() {
@@ -149,5 +313,7 @@ public class RobotContainer {
     m_feeder.stop();
     m_shooter.stop();
     m_turret.stop();
+    m_climber.stop();
+    SmartDashboard.putBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false);
   }
 }

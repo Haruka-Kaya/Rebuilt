@@ -2,6 +2,7 @@ package frc.robot.subsystems;
 
 
 import java.util.Arrays;
+import java.util.OptionalDouble;
 
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj.DriverStation;
@@ -11,10 +12,14 @@ import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.TurretConstants;
 import frc.robot.constants.Constants.AprilTagConstants;
 import frc.robot.subsystems.VisionSubsystem.TargetObservation;
+import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
 
 public class TurretSubsystem extends SubsystemBase {
     private final SparkMAXContainer m_motor = new SparkMAXContainer(TurretConstants.TURRET_CAN_ID);
+    // Assigned only after future, sensor-validated homing or absolute reference succeeds.
+    private Token positionReference;
+    private String lastBlockedPositionCommand = "startup: homing/absolute reference未実装";
 
     private final VisionSubsystem m_vision;
 
@@ -24,7 +29,7 @@ public class TurretSubsystem extends SubsystemBase {
     private double lastAimFrameTimestamp = -1.0;
     private int alignedFrameCount = 0;
 
-    public boolean onTarget = false;
+    private boolean onTarget = false;
 
     public TurretSubsystem(VisionSubsystem vision) {
         this.m_vision = vision;
@@ -39,10 +44,28 @@ public class TurretSubsystem extends SubsystemBase {
         SmartDashboard.putNumber("Set turret_kD", 0.1);
     }
 
-    public void setTurretAngle(double angleDegrees) {
-        if (!m_motor.isAvailable()) return;
+    public boolean setTurretAngle(double angleDegrees) {
+        if (!Double.isFinite(angleDegrees)
+            || angleDegrees < TurretConstants.MIN_ANGLE_DEGREES
+            || angleDegrees > TurretConstants.MAX_ANGLE_DEGREES) {
+            lastBlockedPositionCommand = "angle outside configured limits";
+            stop();
+            return false;
+        }
+        if (!m_motor.isPositionReferenceValid(positionReference)) {
+            lastBlockedPositionCommand = "set angle: UNREFERENCED";
+            stop();
+            return false;
+        }
         // convert turret degrees -> motor rotations before commanding
-        m_motor.goToPostion(degreesToMotorRotations(angleDegrees));
+        boolean atTarget = m_motor.goToReferencedPosition(
+            degreesToMotorRotations(angleDegrees),
+            degreesToMotorRotations(TurretConstants.AIM_DEADBAND_DEG),
+            positionReference);
+        if (!atTarget) {
+            lastBlockedPositionCommand = "set angle: not at target or command rejected";
+        }
+        return atTarget;
     }
 
     public void stop() {
@@ -62,11 +85,13 @@ public class TurretSubsystem extends SubsystemBase {
         return (degrees / 360.0) * TurretConstants.GEAR_RATIO;
     }
 
-    public double getTurretAngle() {
-        if (!m_motor.isAvailable()) return 0;
+    public OptionalDouble getTurretAngle() {
+        OptionalDouble motorRotations = m_motor.getReferencedPosition(positionReference);
+        if (motorRotations.isEmpty()) {
+            return OptionalDouble.empty();
+        }
         // motor rotations -> turret degrees
-        double motorRotations = m_motor.getPosition();
-        return motorRotationsToTurretDegrees(motorRotations);
+        return OptionalDouble.of(motorRotationsToTurretDegrees(motorRotations.getAsDouble()));
     }
 
     private double motorRotationsToTurretDegrees(double motorRotations) {
@@ -76,7 +101,8 @@ public class TurretSubsystem extends SubsystemBase {
     }
     
     public void autoAimWithLimelight() {
-        if (!m_motor.isAvailable()) {
+        if (!m_motor.isPositionReferenceValid(positionReference)) {
+            lastBlockedPositionCommand = "auto aim: UNREFERENCED";
             stop();
             return;
         }
@@ -115,27 +141,34 @@ public class TurretSubsystem extends SubsystemBase {
         alignedFrameCount = 0;
 
         // compute new turret setpoint: add camera offset to current turret angle
-        double currentAngle = getTurretAngle();
+        OptionalDouble currentAngle = getTurretAngle();
+        if (currentAngle.isEmpty()) {
+            lastBlockedPositionCommand = "auto aim: position unavailable";
+            stop();
+            return;
+        }
         double correctionDegrees = MathUtil.clamp(
             -tx * TurretConstants.SAFE_KP,
             -TurretConstants.MAX_AIM_STEP_DEGREES,
             TurretConstants.MAX_AIM_STEP_DEGREES);
-        double commandedAngle = currentAngle + correctionDegrees;
+        double commandedAngle = currentAngle.getAsDouble() + correctionDegrees;
+        if (!setTurretAngle(commandedAngle)) {
+            onTarget = false;
+        }
+    }
 
-        // clamp to mechanical limits
-        commandedAngle = MathUtil.clamp(commandedAngle, TurretConstants.MIN_ANGLE_DEGREES, TurretConstants.MAX_ANGLE_DEGREES);
-
-        setTurretAngle(commandedAngle);
+    public boolean isOnTarget() {
+        return onTarget && m_motor.isPositionReferenceValid(positionReference);
     }
 
     @Override
     public void periodic() {
         boolean motorConnected = m_motor.isAvailable();
         SmartDashboard.putBoolean("Turret motor connected", motorConnected);
-        if (!motorConnected) {
+        boolean referenced = m_motor.isPositionReferenceValid(positionReference);
+        if (!motorConnected || !referenced) {
+            m_motor.stop();
             onTarget = false;
-            SmartDashboard.putBoolean("On target", false);
-            return;
         }
 
         double requestedTurretKp = SmartDashboard.getNumber("Set turret_kP", 2.4);
@@ -151,8 +184,19 @@ public class TurretSubsystem extends SubsystemBase {
             m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
         }
 
-        SmartDashboard.putNumber("Real turret angle", getTurretAngle());
+        OptionalDouble turretAngle = getTurretAngle();
+        OptionalDouble rawMotorRotations = m_motor.getPositionIfReady();
+        SmartDashboard.putString(
+            "Turret/Reference State", m_motor.getPositionReferenceStatus(positionReference));
+        SmartDashboard.putNumber(
+            "Turret/Continuity Epoch", m_motor.getPositionContinuityEpoch());
+        SmartDashboard.putBoolean("Turret/Position Valid", turretAngle.isPresent());
+        SmartDashboard.putNumber(
+            "Turret/Raw Encoder Rotations", rawMotorRotations.orElse(Double.NaN));
+        SmartDashboard.putNumber("Real turret angle", turretAngle.orElse(Double.NaN));
+        SmartDashboard.putString(
+            "Turret/Last Blocked Command", lastBlockedPositionCommand);
 
-        SmartDashboard.putBoolean("On target", onTarget);
+        SmartDashboard.putBoolean("On target", isOnTarget());
     }
 }

@@ -89,6 +89,11 @@ public final class Constants {
   public static final class ClimberConstants {
     public static final int LEFT_MOTOR_CAN_ID = 34;
     public static final int RIGHT_MOTOR_CAN_ID = 35;
+
+    /** Conservative limits until the motor type, gearing, and load are verified from the design. */
+    public static final int DIAGNOSTIC_CURRENT_LIMIT_AMPS = 10;
+    public static final double DIAGNOSTIC_MAX_DUTY_CYCLE = 0.03;
+    public static final double DIAGNOSTIC_PULSE_SECONDS = 0.35;
   }
 
   public static final class ShooterConstants {
