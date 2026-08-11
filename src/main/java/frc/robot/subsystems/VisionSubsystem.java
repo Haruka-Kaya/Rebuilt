@@ -16,6 +16,7 @@ public class VisionSubsystem extends SubsystemBase {
     static final double MAX_TARGET_AGE_SECONDS = 0.15;
     static final double MAX_TAG_DISTANCE_METERS = 8.0;
     static final double MAX_SINGLE_TAG_AMBIGUITY = 0.70;
+    static final double MAX_HEARTBEAT_AGE_SECONDS = 0.50;
 
     private final NetworkTable limelight;
     private final String limelightName;
@@ -66,11 +67,44 @@ public class VisionSubsystem extends SubsystemBase {
 
     /** Returns the pipeline that the Limelight reports it is currently running. */
     public int getPipeline() {
-        return limelight.getEntry("getpipe").getNumber(-1).intValue();
+        double reported = limelight.getEntry("getpipe").getDouble(-1.0);
+        return Double.isFinite(reported)
+                && reported >= 0.0
+                && reported <= 9.0
+                && reported == Math.rint(reported)
+            ? (int) reported
+            : -1;
     }
 
     private boolean isExpectedPipelineActive() {
         return expectedPipeline < 0 || getPipeline() == expectedPipeline;
+    }
+
+    /** Camera/pipeline preflight that does not require a target to already be visible. */
+    public boolean isTargetingPipelineReady() {
+        double heartbeatTimestampSeconds = limelight.getEntry("hb").getLastChange() / 1_000_000.0;
+        return cameraPipelineReady(
+            heartbeatTimestampSeconds,
+            Timer.getFPGATimestamp(),
+            getPipeline(),
+            expectedPipeline);
+    }
+
+    static boolean cameraPipelineReady(
+            double heartbeatTimestampSeconds,
+            double nowSeconds,
+            int reportedPipeline,
+            int expectedPipeline) {
+        if (!Double.isFinite(heartbeatTimestampSeconds)
+                || heartbeatTimestampSeconds <= 0.0
+                || !Double.isFinite(nowSeconds)) {
+            return false;
+        }
+        double ageSeconds = nowSeconds - heartbeatTimestampSeconds;
+        return ageSeconds >= 0.0
+            && ageSeconds <= MAX_HEARTBEAT_AGE_SECONDS
+            && reportedPipeline >= 0
+            && (expectedPipeline < 0 || reportedPipeline == expectedPipeline);
     }
 
     /* ---------------- Target Validity ---------------- */

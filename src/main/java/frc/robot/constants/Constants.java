@@ -123,6 +123,7 @@ public final class Constants {
   }
 
   public static final class HardwareTestConstants {
+    public static final double ARM_LIFETIME_SECONDS = 15.0;
     public static final double OPEN_LOOP_DUTY_CYCLE = 0.03;
     public static final double OPEN_LOOP_STAGE_SECONDS = 0.40;
     public static final double STAGE_SETTLE_SECONDS = 0.35;

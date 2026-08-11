@@ -15,6 +15,15 @@ import frc.robot.LimelightHelpers.RawFiducial;
 import frc.robot.subsystems.VisionSubsystem.TargetObservation;
 
 class VisionSubsystemTest {
+  @Test
+  void cameraPipelinePreflightRequiresFreshHeartbeatAndExactPipeline() {
+    assertTrue(VisionSubsystem.cameraPipelineReady(9.8, 10.0, 1, 1));
+    assertFalse(VisionSubsystem.cameraPipelineReady(9.0, 10.0, 1, 1));
+    assertFalse(VisionSubsystem.cameraPipelineReady(10.1, 10.0, 1, 1));
+    assertFalse(VisionSubsystem.cameraPipelineReady(9.8, 10.0, 0, 1));
+    assertFalse(VisionSubsystem.cameraPipelineReady(0.0, 10.0, 1, 1));
+  }
+
     @Test
     void targetObservationUsesOneAtomicFrameAndCompensatesLatency() {
         double[] frame = new double[17];

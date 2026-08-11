@@ -1,0 +1,175 @@
+package frc.robot;
+
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import org.junit.jupiter.api.Test;
+
+class OperatorAssetTest {
+  private static final Path COMP_LAYOUT = Path.of("elastic_configs", "comp.json");
+  private static final Path SIM_DRIVER_STATION = Path.of("simgui-ds.json");
+  private static final int DRIVER_PORT = 0;
+  private static final int OPERATOR_PORT = 1;
+  private static final int MAINTENANCE_PORT = 2;
+  // RobotContainer binds driver raw button 14 and maintenance deadman raw button 10.
+  private static final int REQUIRED_DRIVER_BUTTONS = 14;
+  private static final int REQUIRED_DRIVER_AXES = 3;
+  private static final int REQUIRED_OPERATOR_BUTTONS = 5;
+  private static final int REQUIRED_MAINTENANCE_BUTTONS = 10;
+
+  private static final Map<String, WidgetExpectation> REQUIRED_DIAGNOSTIC_WIDGETS = Map.ofEntries(
+      Map.entry("/SmartDashboard/Auto Chooser", new WidgetExpectation("ComboBox Chooser", null)),
+      Map.entry(
+          "/SmartDashboard/Autonomous/Ready", new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Autonomous/Status",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Armed",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Arm Valid",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Running",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Overall",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Results",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Run ID",
+          new WidgetExpectation("Text Display", "double")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Coverage",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/CAN Results",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Climber Diagnostic/Armed",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Climber Diagnostic/Brushless Motor Type Verified",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Climber/Controllers Ready",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Climber/Status",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Feeder/Known Fault Motion Blocked",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Intake Actuator/Reference State",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Intake Actuator/Position Valid",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Shooter Actuator/Reference State",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Shooter Actuator/Position Valid",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Turret/Reference State",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Turret/Position Valid",
+          new WidgetExpectation("Boolean Box", "boolean")));
+
+  private final ObjectMapper objectMapper = new ObjectMapper();
+
+  @Test
+  void competitionLayoutExposesRequiredDiagnosticsAndSafetyControls() throws IOException {
+    JsonNode root = objectMapper.readTree(COMP_LAYOUT.toFile());
+    JsonNode diagnosticsTab = findTab(root, "Diagnostics / Setup");
+    assertNotNull(diagnosticsTab, "Diagnostics / Setup tab is missing");
+
+    Map<String, JsonNode> widgetsByTopic = new HashMap<>();
+    diagnosticsTab.at("/grid_layout/containers").forEach(widget -> {
+      String topic = widget.at("/properties/topic").asText();
+      assertTrue(widgetsByTopic.put(topic, widget) == null, () -> "Duplicate widget topic: " + topic);
+    });
+
+    REQUIRED_DIAGNOSTIC_WIDGETS.forEach((topic, expectation) -> {
+      JsonNode widget = widgetsByTopic.get(topic);
+      assertNotNull(widget, () -> "Required diagnostics widget is missing: " + topic);
+      assertEquals(expectation.type(), widget.path("type").asText(), topic);
+      if (expectation.dataType() != null) {
+        assertEquals(expectation.dataType(), widget.at("/properties/data_type").asText(), topic);
+      }
+    });
+  }
+
+  @Test
+  void simulatedControllersCoverEveryProductionButtonBinding() throws IOException {
+    JsonNode joysticks = objectMapper.readTree(SIM_DRIVER_STATION.toFile())
+        .path("keyboardJoysticks");
+
+    assertAll(
+        () -> assertControllerMapping(
+            joysticks.get(DRIVER_PORT), REQUIRED_DRIVER_BUTTONS, REQUIRED_DRIVER_AXES,
+            "driver port 0"),
+        () -> assertControllerMapping(
+            joysticks.get(OPERATOR_PORT), REQUIRED_OPERATOR_BUTTONS, 0,
+            "operator port 1"),
+        () -> assertControllerMapping(
+            joysticks.get(MAINTENANCE_PORT), REQUIRED_MAINTENANCE_BUTTONS, 0,
+            "maintenance port 2"));
+  }
+
+  private static JsonNode findTab(JsonNode root, String name) {
+    for (JsonNode tab : root.path("tabs")) {
+      if (name.equals(tab.path("name").asText())) {
+        return tab;
+      }
+    }
+    return null;
+  }
+
+  private static void assertControllerMapping(
+      JsonNode controller, int requiredButtons, int requiredAxes, String description) {
+    assertNotNull(controller, description + " is missing");
+    int buttonCount = controller.path("buttonCount").asInt();
+    JsonNode buttonKeys = controller.path("buttonKeys");
+    Set<Integer> uniqueKeys = new HashSet<>();
+    buttonKeys.forEach(key -> uniqueKeys.add(key.asInt()));
+
+    assertAll(
+        () -> assertTrue(buttonCount >= requiredButtons, description + " buttonCount is too small"),
+        () -> assertTrue(
+            controller.path("axisCount").asInt() >= requiredAxes,
+            description + " axisCount is too small"),
+        () -> assertEquals(buttonCount, buttonKeys.size(), description + " buttonKeys length"),
+        () -> assertEquals(buttonCount, uniqueKeys.size(), description + " button keys must be distinct"),
+        () -> buttonKeys.forEach(key -> assertTrue(
+            isValidGlfwKey(key.asInt()), description + " contains invalid GLFW key " + key.asInt())));
+  }
+
+  private static boolean isValidGlfwKey(int key) {
+    return (key >= 32 && key <= 96)
+        || (key >= 161 && key <= 162)
+        || (key >= 256 && key <= 269)
+        || (key >= 280 && key <= 284)
+        || (key >= 290 && key <= 314)
+        || (key >= 320 && key <= 336)
+        || (key >= 340 && key <= 348);
+  }
+
+  private record WidgetExpectation(String type, String dataType) {}
+}
