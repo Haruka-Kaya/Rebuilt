@@ -129,6 +129,9 @@ public final class Constants {
     // Auto-aim tuning
     public static final double AIM_DEADBAND_DEG = 0.5; // don't react to tiny offsets
     public static final double SAFE_KP = 1.0;          // multiplier for tx -> turret degrees
+    public static final double MAX_AIM_STEP_DEGREES = 5.0;
+    public static final double MAX_CLOSED_LOOP_OUTPUT = 0.15;
+    public static final int REQUIRED_ON_TARGET_FRAMES = 2;
 
     // Mechanical limits — set to your real stops
     public static final double MIN_ANGLE_DEGREES = -180.0;

@@ -1,12 +1,16 @@
 package frc.robot.subsystems;
 
 
+import java.util.Arrays;
+
 import edu.wpi.first.math.MathUtil;
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.DriverStation.Alliance;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
-import frc.robot.Telemetry;
 import frc.robot.constants.Constants.TurretConstants;
 import frc.robot.constants.Constants.AprilTagConstants;
+import frc.robot.subsystems.VisionSubsystem.TargetObservation;
 import frc.robot.utils.SparkMAXContainer;
 
 public class TurretSubsystem extends SubsystemBase {
@@ -17,6 +21,8 @@ public class TurretSubsystem extends SubsystemBase {
     private double turret_kP = 2.4;
     private double turret_kI = 0.0;
     private double turret_kD = 0.1;
+    private double lastAimFrameTimestamp = -1.0;
+    private int alignedFrameCount = 0;
 
     public boolean onTarget = false;
 
@@ -26,6 +32,7 @@ public class TurretSubsystem extends SubsystemBase {
         m_motor.setBreakMode(true);
         m_motor.setCurrentLimit(15);
         m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
+        m_motor.setMaxSpeed(TurretConstants.MAX_CLOSED_LOOP_OUTPUT);
         
         SmartDashboard.putNumber("Set turret_kP", 2.4);
         SmartDashboard.putNumber("Set turret_kI", 0);
@@ -39,8 +46,13 @@ public class TurretSubsystem extends SubsystemBase {
     }
 
     public void stop() {
-        m_motor.stop();
+        stopMotorOutput();
         onTarget = false;
+        alignedFrameCount = 0;
+    }
+
+    private void stopMotorOutput() {
+        m_motor.stop();
     }
 
     private double degreesToMotorRotations(double degrees) {
@@ -65,52 +77,50 @@ public class TurretSubsystem extends SubsystemBase {
     
     public void autoAimWithLimelight() {
         if (!m_motor.isAvailable()) {
-            onTarget = false;
-            return;
-        }
-        // only act if target valid
-        if (!m_vision.hasTarget()) {
-            onTarget = false;
+            stop();
             return;
         }
 
-        boolean nope = true;
-        
-        if(Telemetry.isRedAlliance()) {
-            for(int i = 0; i < 6; i++) {
-                if(m_vision.isTrackingTag(AprilTagConstants.VALID_RED_HUB_TAG_IDS[i])) {
-                    nope = false;
-                    break;
-                }
-            }
-            if(nope == true) {
-                onTarget = false;
-                return;
-            }
-        } else {
-            for(int i = 0; i < 6; i++) {
-                if(m_vision.isTrackingTag(AprilTagConstants.VALID_BLUE_HUB_TAG_IDS[i])) {
-                    nope = false;
-                    break;
-                }
-            }
-            if(nope == true) {
-                onTarget = false;
-                return;
-            }
+        var observation = m_vision.getLatestTargetObservation();
+        var alliance = DriverStation.getAlliance();
+        if (observation.isEmpty() || alliance.isEmpty()) {
+            stop();
+            return;
         }
 
-        double tx = m_vision.getTx(); // degrees offset (crosshair -> target)
+        TargetObservation target = observation.get();
+        int[] validTagIds = alliance.get() == Alliance.Red
+            ? AprilTagConstants.VALID_RED_HUB_TAG_IDS
+            : AprilTagConstants.VALID_BLUE_HUB_TAG_IDS;
+        if (Arrays.stream(validTagIds).noneMatch(id -> id == target.tagId())) {
+            stop();
+            return;
+        }
+
+        // Apply at most one correction per camera frame.
+        if (target.timestampSeconds() <= lastAimFrameTimestamp + 1e-6) {
+            return;
+        }
+        lastAimFrameTimestamp = target.timestampSeconds();
+
+        double tx = target.txDegrees();
         if (Math.abs(tx) < TurretConstants.AIM_DEADBAND_DEG) {
-            onTarget = true;
+            stopMotorOutput();
+            alignedFrameCount++;
+            onTarget = alignedFrameCount >= TurretConstants.REQUIRED_ON_TARGET_FRAMES;
             return;
         }
 
         onTarget = false;
+        alignedFrameCount = 0;
 
         // compute new turret setpoint: add camera offset to current turret angle
         double currentAngle = getTurretAngle();
-        double commandedAngle = currentAngle - tx;
+        double correctionDegrees = MathUtil.clamp(
+            -tx * TurretConstants.SAFE_KP,
+            -TurretConstants.MAX_AIM_STEP_DEGREES,
+            TurretConstants.MAX_AIM_STEP_DEGREES);
+        double commandedAngle = currentAngle + correctionDegrees;
 
         // clamp to mechanical limits
         commandedAngle = MathUtil.clamp(commandedAngle, TurretConstants.MIN_ANGLE_DEGREES, TurretConstants.MAX_ANGLE_DEGREES);

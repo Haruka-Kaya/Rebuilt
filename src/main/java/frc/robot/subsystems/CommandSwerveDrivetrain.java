@@ -32,6 +32,7 @@ import frc.robot.constants.Constants.DebugConstants;
 import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.TunerConstants;
 import frc.robot.constants.TunerConstants.TunerSwerveDrivetrain;
+import frc.robot.subsystems.VisionSubsystem.PoseObservation;
 
 /**
  * Class that extends the Phoenix 6 SwerveDrivetrain class and implements
@@ -42,6 +43,10 @@ import frc.robot.constants.TunerConstants.TunerSwerveDrivetrain;
  */
 public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Subsystem {
     private static final double kSimLoopPeriod = 0.004; // 4 ms
+    private static final double kSingleTagMaxTranslationResidualMeters = 1.0;
+    private static final double kMultiTagMaxTranslationResidualMeters = 1.0;
+    private static final double kSingleTagMaxHeadingResidualRadians = Math.toRadians(20.0);
+    private static final double kMultiTagMaxHeadingResidualRadians = Math.toRadians(30.0);
     private final SwerveRequest.Idle m_safeIdleRequest = new SwerveRequest.Idle();
     private Notifier m_simNotifier = null;
     private double m_lastSimTime;
@@ -53,7 +58,9 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     /* Keep track if we've ever applied the operator perspective before or not */
     private boolean m_hasAppliedOperatorPerspective = false;
 
-    private final VisionSubsystem vision = new VisionSubsystem(LimelightConstants.DRIVE_LIMELIGHT_NAME);
+    private final VisionSubsystem vision = new VisionSubsystem(
+        LimelightConstants.DRIVE_LIMELIGHT_NAME,
+        LimelightConstants.PIPELINE_APRILTAG);
 
     /**
      * Constructs a CTRE SwerveDrivetrain using the specified constants.
@@ -169,13 +176,36 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         SmartDashboard.putData("Field", m_field);
         m_field.setRobotPose(this.getState().Pose);
 
-        vision.getEstimatedPose().ifPresent(visionPose -> {
+        vision.getEstimatedPose()
+            .filter(this::isVisionMeasurementAcceptable)
+            .ifPresent(observation -> {
             this.addVisionMeasurement(
-                    visionPose,
-                    vision.getLastPoseTimestamp(),
+                    observation.pose(),
+                    observation.timestampSeconds(),
                     LimelightConstants.VISION_STD_DEVS
             );
         });
+    }
+
+    private boolean isVisionMeasurementAcceptable(PoseObservation observation) {
+        Optional<Pose2d> sampledOdometry = samplePoseAt(observation.timestampSeconds());
+        if (sampledOdometry.isEmpty()) {
+            return false;
+        }
+
+        Pose2d reference = sampledOdometry.get();
+        double translationResidual = reference.getTranslation()
+            .getDistance(observation.pose().getTranslation());
+        double headingResidual = Math.abs(
+            reference.getRotation().minus(observation.pose().getRotation()).getRadians());
+
+        boolean multiTag = observation.tagCount() >= 2;
+        return translationResidual <= (multiTag
+                ? kMultiTagMaxTranslationResidualMeters
+                : kSingleTagMaxTranslationResidualMeters)
+            && headingResidual <= (multiTag
+                ? kMultiTagMaxHeadingResidualRadians
+                : kSingleTagMaxHeadingResidualRadians);
     }
 
     private final Field2d m_field = new Field2d();
