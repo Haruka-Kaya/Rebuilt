@@ -126,7 +126,8 @@ public final class Constants {
     public static final double ARM_LIFETIME_SECONDS = 15.0;
     public static final double OPEN_LOOP_DUTY_CYCLE = 0.03;
     public static final double OPEN_LOOP_STAGE_SECONDS = 0.40;
-    public static final double STAGE_SETTLE_SECONDS = 0.35;
+    public static final double STOP_CONFIRM_TIMEOUT_SECONDS = 2.0;
+    public static final double MAX_STOPPED_SWERVE_SPEED_METERS_PER_SECOND = 0.01;
     public static final double MIN_SWERVE_MODULE_SPEED_METERS_PER_SECOND = 0.02;
     public static final double MAX_SWERVE_VECTOR_ERROR_DEGREES = 20.0;
     public static final double MAX_SWERVE_DIAGNOSTIC_DRIVE_CURRENT_AMPS = 40.0;

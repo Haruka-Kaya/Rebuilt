@@ -1,11 +1,20 @@
 package frc.robot.subsystems;
 
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
+import com.ctre.phoenix6.StatusCode;
+import com.ctre.phoenix6.StatusSignal;
 import com.ctre.phoenix6.Utils;
+import com.ctre.phoenix6.controls.NeutralOut;
+import com.ctre.phoenix6.swerve.SwerveDrivetrain.SwerveControlParameters;
+import com.ctre.phoenix6.swerve.SwerveDrivetrain.SwerveDriveState;
 import com.ctre.phoenix6.swerve.SwerveDrivetrainConstants;
+import com.ctre.phoenix6.swerve.SwerveModule;
 import com.ctre.phoenix6.swerve.SwerveModuleConstants;
 import com.ctre.phoenix6.swerve.SwerveRequest;
 import com.pathplanner.lib.auto.AutoBuilder;
@@ -34,6 +43,9 @@ import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.TunerConstants;
 import frc.robot.constants.TunerConstants.TunerSwerveDrivetrain;
 import frc.robot.subsystems.VisionSubsystem.PoseObservation;
+import frc.robot.utils.CtreSignalFreshness;
+import frc.robot.utils.SwerveDaqFreshnessTracker;
+import frc.robot.utils.SwerveStateFreshnessTracker;
 
 /**
  * Class that extends the Phoenix 6 SwerveDrivetrain class and implements
@@ -48,7 +60,40 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private static final double kMultiTagMaxTranslationResidualMeters = 1.0;
     private static final double kSingleTagMaxHeadingResidualRadians = Math.toRadians(20.0);
     private static final double kMultiTagMaxHeadingResidualRadians = Math.toRadians(30.0);
-    private final SwerveRequest.Idle m_safeIdleRequest = new SwerveRequest.Idle();
+    private static final double kCriticalSignalMaxAgeSeconds = 0.100;
+    private static final double kHealthySignalProbePeriodSeconds = 0.050;
+    private static final double kFailedSignalProbePeriodSeconds = 0.500;
+    private static final double kNeutralRetryPeriodSeconds = 0.250;
+    private static final int kHealthySignalObservationsToRecover = 3;
+    private final SafeNeutralRequest m_safeNeutralRequest = new SafeNeutralRequest();
+    private final NeutralOut m_directDriveNeutral = new NeutralOut();
+    private final NeutralOut m_directSteerNeutral = new NeutralOut();
+    private final Object m_outputEvidenceLock = new Object();
+    private long m_outputEpoch;
+    private long m_lastNeutralizedOutputEpoch = -1;
+    private long m_lastNeutralAttemptedOutputEpoch = -1;
+    private double m_nextNeutralAttemptAt = Double.NEGATIVE_INFINITY;
+    private double m_lastNeutralCommandStateTimestamp = Double.NEGATIVE_INFINITY;
+    private int m_lastNeutralCommandSuccessfulDaqs = -1;
+    private double m_lastNeutralCommandSentAt = Double.NEGATIVE_INFINITY;
+    private final SwerveDaqFreshnessTracker m_daqFreshnessTracker =
+        new SwerveDaqFreshnessTracker();
+    private final SwerveStateFreshnessTracker m_stateFreshnessTracker =
+        new SwerveStateFreshnessTracker();
+    private final List<NamedCriticalSignal> m_moduleCriticalSignals = new ArrayList<>();
+    private final List<NamedCriticalSignal> m_gyroCriticalSignals = new ArrayList<>();
+    private volatile boolean m_daqFresh;
+    private volatile boolean m_stateLoopFresh;
+    private volatile boolean m_moduleSignalsFresh;
+    private volatile boolean m_gyroSignalsFresh;
+    private volatile String m_criticalSignalSummary = "STARTUP_NOT_VERIFIED";
+    private volatile int m_expectedModuleCount;
+    private String m_moduleSignalSummary = "NOT_PROBED";
+    private String m_gyroSignalSummary = "NOT_PROBED";
+    private int m_consecutiveModuleSignalObservations;
+    private int m_consecutiveGyroSignalObservations;
+    private double m_nextModuleSignalProbeAt;
+    private double m_nextGyroSignalProbeAt;
     private boolean m_pathPlannerConfigured;
     private Notifier m_simNotifier = null;
     private double m_lastSimTime;
@@ -144,8 +189,35 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     }
 
     private void finishInitialization() {
+        initializeCriticalSignals();
         configurePathPlanner();
         SmartDashboard.putData("Field", m_field);
+    }
+
+    private void initializeCriticalSignals() {
+        m_moduleCriticalSignals.clear();
+        m_expectedModuleCount = getModules().length;
+        for (int i = 0; i < m_expectedModuleCount; i++) {
+            var module = getModule(i);
+            m_moduleCriticalSignals.add(new NamedCriticalSignal(
+                "m" + i + "/drive-position", module.getDriveMotor().getPosition(false)));
+            m_moduleCriticalSignals.add(new NamedCriticalSignal(
+                "m" + i + "/drive-velocity", module.getDriveMotor().getVelocity(false)));
+            m_moduleCriticalSignals.add(new NamedCriticalSignal(
+                "m" + i + "/steer-position", module.getSteerMotor().getPosition(false)));
+            m_moduleCriticalSignals.add(new NamedCriticalSignal(
+                "m" + i + "/steer-velocity", module.getSteerMotor().getVelocity(false)));
+            m_moduleCriticalSignals.add(new NamedCriticalSignal(
+                "m" + i + "/encoder-position", module.getEncoder().getPosition(false)));
+            m_moduleCriticalSignals.add(new NamedCriticalSignal(
+                "m" + i + "/absolute-position", module.getEncoder().getAbsolutePosition(false)));
+        }
+        m_gyroCriticalSignals.clear();
+        m_gyroCriticalSignals.add(new NamedCriticalSignal(
+            "pigeon/yaw", getPigeon2().getYaw(false)));
+        m_gyroCriticalSignals.add(new NamedCriticalSignal(
+            "pigeon/angular-velocity-z-world",
+            getPigeon2().getAngularVelocityZWorld(false)));
     }
 
     /**
@@ -155,15 +227,53 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
      * @return Command to run
      */
     public Command applyRequest(Supplier<SwerveRequest> request) {
-        return run(() -> this.setControl(
-            DebugConstants.ALLOW_SWERVE_OUTPUT && areAllModulesConnected()
-                ? request.get()
-                : m_safeIdleRequest
-        ));
+        return run(() -> {
+            if (!DebugConstants.ALLOW_SWERVE_OUTPUT || !areAllModulesConnected()) {
+                requestIdle();
+                return;
+            }
+            SwerveRequest requested;
+            try {
+                requested = request.get();
+            } catch (RuntimeException exception) {
+                requestIdle();
+                return;
+            }
+            if (requested == null || requested == m_safeNeutralRequest) {
+                requestIdle();
+                return;
+            }
+            applyNonNeutralRequest(requested);
+        });
     }
 
     @Override
     public void periodic() {
+        try {
+            periodicChecked();
+        } catch (RuntimeException exception) {
+            // No vendor/NetworkTables exception may escape TimedRobot's main callback.
+            markCriticalDeviceHealthUnavailable(
+                "PERIODIC_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+        }
+    }
+
+    private void periodicChecked() {
+        SwerveDriveState currentState;
+        try {
+            currentState = this.getStateCopy();
+        } catch (RuntimeException exception) {
+            markCriticalDeviceHealthUnavailable(
+                "STATE_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+            return;
+        }
+        updateCriticalDeviceHealth(currentState);
+        if (!areAllModulesConnected()) {
+            requestIdle();
+        }
+
         /*
          * Periodically try to apply the operator perspective.
          * If we haven't applied the operator perspective before, then we should apply it regardless of DS state.
@@ -171,33 +281,306 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
          * Otherwise, only check and apply the operator perspective if the DS is disabled.
          * This ensures driving behavior doesn't change until an explicit disable event occurs during testing.
          */
-        if (!m_hasAppliedOperatorPerspective || DriverStation.isDisabled()) {
-            DriverStation.getAlliance().ifPresent(allianceColor -> {
-                setOperatorPerspectiveForward(
-                    allianceColor == Alliance.Red
-                        ? kRedAlliancePerspectiveRotation
-                        : kBlueAlliancePerspectiveRotation
-                );
-                m_hasAppliedOperatorPerspective = true;
-            });
+        try {
+            if (!m_hasAppliedOperatorPerspective || DriverStation.isDisabled()) {
+                DriverStation.getAlliance().ifPresent(allianceColor -> {
+                    setOperatorPerspectiveForward(
+                        allianceColor == Alliance.Red
+                            ? kRedAlliancePerspectiveRotation
+                            : kBlueAlliancePerspectiveRotation
+                    );
+                    m_hasAppliedOperatorPerspective = true;
+                });
+            }
+
+            m_field.setRobotPose(currentState.Pose);
+
+            if (areAllDevicesConnected()) {
+                vision.getEstimatedPose()
+                    .filter(this::isVisionMeasurementAcceptable)
+                    .ifPresent(observation -> this.addVisionMeasurement(
+                            observation.pose(),
+                            observation.timestampSeconds(),
+                            LimelightConstants.VISION_STD_DEVS));
+            }
+        } catch (RuntimeException exception) {
+            // Keep the default command from re-enabling output later in this scheduler cycle.
+            markCriticalDeviceHealthUnavailable(
+                "PERIODIC_IO_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+        }
+    }
+
+    private void updateCriticalDeviceHealth(SwerveDriveState state) {
+        if (state == null) {
+            markCriticalDeviceHealthUnavailable("STATE_MISSING");
+            return;
         }
 
-        m_field.setRobotPose(this.getState().Pose);
+        double now = Utils.getCurrentTimeSeconds();
+        m_stateLoopFresh = m_stateFreshnessTracker.observe(now, state.Timestamp);
+        m_daqFresh = m_daqFreshnessTracker.observe(
+            now, state.Timestamp, state.SuccessfulDaqs, state.FailedDaqs);
+        boolean probeUpdated = false;
+        if (now >= m_nextModuleSignalProbeAt) {
+            SignalProbeResult moduleResult = probeCriticalSignals(m_moduleCriticalSignals);
+            m_consecutiveModuleSignalObservations = moduleResult.healthy()
+                ? m_consecutiveModuleSignalObservations + 1 : 0;
+            m_moduleSignalsFresh = m_consecutiveModuleSignalObservations
+                >= kHealthySignalObservationsToRecover;
+            m_moduleSignalSummary = moduleResult.summary();
+            m_nextModuleSignalProbeAt = now + (moduleResult.healthy()
+                ? kHealthySignalProbePeriodSeconds : kFailedSignalProbePeriodSeconds);
+            probeUpdated = true;
+        }
+        if (now >= m_nextGyroSignalProbeAt) {
+            SignalProbeResult gyroResult = probeCriticalSignals(m_gyroCriticalSignals);
+            m_consecutiveGyroSignalObservations = gyroResult.healthy()
+                ? m_consecutiveGyroSignalObservations + 1 : 0;
+            m_gyroSignalsFresh = m_consecutiveGyroSignalObservations
+                >= kHealthySignalObservationsToRecover;
+            m_gyroSignalSummary = gyroResult.summary();
+            m_nextGyroSignalProbeAt = now + (gyroResult.healthy()
+                ? kHealthySignalProbePeriodSeconds : kFailedSignalProbePeriodSeconds);
+            probeUpdated = true;
+        }
+        if (probeUpdated) {
+            m_criticalSignalSummary = String.format(
+                "state=%s daq=%s modules=%s(%s) gyro=%s(%s)",
+                m_stateLoopFresh,
+                m_daqFresh,
+                m_moduleSignalsFresh,
+                m_moduleSignalSummary,
+                m_gyroSignalsFresh,
+                m_gyroSignalSummary);
+        }
+    }
 
-        vision.getEstimatedPose()
-            .filter(this::isVisionMeasurementAcceptable)
-            .ifPresent(observation -> {
-            this.addVisionMeasurement(
-                    observation.pose(),
-                    observation.timestampSeconds(),
-                    LimelightConstants.VISION_STD_DEVS
-            );
-        });
+    private void markCriticalDeviceHealthUnavailable(String reason) {
+        m_stateFreshnessTracker.reset();
+        m_daqFreshnessTracker.reset();
+        m_stateLoopFresh = false;
+        m_daqFresh = false;
+        m_moduleSignalsFresh = false;
+        m_gyroSignalsFresh = false;
+        m_consecutiveModuleSignalObservations = 0;
+        m_consecutiveGyroSignalObservations = 0;
+        m_moduleSignalSummary = "NOT_PROBED";
+        m_gyroSignalSummary = "NOT_PROBED";
+        m_nextModuleSignalProbeAt = Double.NEGATIVE_INFINITY;
+        m_nextGyroSignalProbeAt = Double.NEGATIVE_INFINITY;
+        m_criticalSignalSummary = reason;
+    }
+
+    private static SignalProbeResult probeCriticalSignals(List<NamedCriticalSignal> signals) {
+        if (signals.isEmpty()) {
+            return new SignalProbeResult(false, "NO_SIGNALS");
+        }
+        for (NamedCriticalSignal named : signals) {
+            try {
+                StatusSignal<?> signal = named.signal().refresh(false);
+                var timestamp = signal.getTimestamp();
+                if (!CtreSignalFreshness.isFresh(
+                        signal.getStatus().isOK(),
+                        timestamp != null && timestamp.isValid(),
+                        timestamp == null ? Double.NaN : timestamp.getLatency(),
+                        signal.getValueAsDouble(),
+                        kCriticalSignalMaxAgeSeconds)) {
+                    return new SignalProbeResult(false, named.name());
+                }
+            } catch (RuntimeException exception) {
+                return new SignalProbeResult(
+                    false, named.name() + "/" + exception.getClass().getSimpleName());
+            }
+        }
+        return new SignalProbeResult(true, "OK");
     }
 
     /** Immediately replaces any latched drive request with neutral output. */
     public void requestIdle() {
-        this.setControl(m_safeIdleRequest);
+        try {
+            requestIdleChecked();
+        } catch (RuntimeException exception) {
+            emergencyNeutralNoThrow();
+        }
+    }
+
+    private void requestIdleChecked() {
+        double now = safePhoenixTimeSeconds();
+        long outputEpoch;
+        synchronized (m_outputEvidenceLock) {
+            outputEpoch = m_outputEpoch;
+            if (m_lastNeutralAttemptedOutputEpoch == outputEpoch
+                    && Double.isFinite(now)
+                    && Double.isFinite(m_nextNeutralAttemptAt)
+                    && now < m_nextNeutralAttemptAt) {
+                return;
+            }
+            // Reserve this attempt before any vendor call so concurrent fail-closed paths cannot
+            // multiply CAN traffic. A newer nonzero output epoch always bypasses the retry delay.
+            m_lastNeutralAttemptedOutputEpoch = outputEpoch;
+            m_nextNeutralAttemptAt = Double.isFinite(now)
+                ? now + kNeutralRetryPeriodSeconds : Double.NEGATIVE_INFINITY;
+        }
+        double baselineTimestamp = Double.NaN;
+        int baselineSuccessfulDaqs = -1;
+        try {
+            var baseline = getStateCopy();
+            baselineTimestamp = baseline.Timestamp;
+            baselineSuccessfulDaqs = baseline.SuccessfulDaqs;
+        } catch (RuntimeException exception) {
+            // Continue issuing direct neutral requests; the stop token will remain unconfirmed.
+        }
+        boolean commandSucceeded = true;
+        m_safeNeutralRequest.arm(outputEpoch);
+        try {
+            this.setControl(m_safeNeutralRequest);
+        } catch (RuntimeException exception) {
+            commandSucceeded = false;
+        }
+        commandSucceeded &= issueDirectNeutralNoThrow();
+        // SwerveDriveState.Timestamp uses the same Phoenix current-time epoch. Recording this only
+        // after every neutral API returns prevents an odometry update from the send window from
+        // being mistaken for post-neutral evidence.
+        double commandCompletedAt = safePhoenixTimeSeconds();
+
+        if (commandSucceeded) {
+            synchronized (m_outputEvidenceLock) {
+                if (m_outputEpoch == outputEpoch) {
+                    m_lastNeutralizedOutputEpoch = outputEpoch;
+                    m_lastNeutralCommandStateTimestamp = baselineTimestamp;
+                    m_lastNeutralCommandSuccessfulDaqs = baselineSuccessfulDaqs;
+                    m_lastNeutralCommandSentAt = commandCompletedAt;
+                }
+            }
+        }
+    }
+
+    private boolean issueDirectNeutralNoThrow() {
+        boolean succeeded = true;
+        try {
+            for (var module : getModules()) {
+                try {
+                    succeeded &= module.getDriveMotor()
+                        .setControl(m_directDriveNeutral).isOK();
+                } catch (RuntimeException exception) {
+                    succeeded = false;
+                }
+                try {
+                    succeeded &= module.getSteerMotor()
+                        .setControl(m_directSteerNeutral).isOK();
+                } catch (RuntimeException exception) {
+                    succeeded = false;
+                }
+            }
+        } catch (RuntimeException exception) {
+            return false;
+        }
+        return succeeded;
+    }
+
+    private void emergencyNeutralNoThrow() {
+        long outputEpoch;
+        synchronized (m_outputEvidenceLock) {
+            outputEpoch = m_outputEpoch;
+        }
+        m_safeNeutralRequest.arm(outputEpoch);
+        try {
+            this.setControl(m_safeNeutralRequest);
+        } catch (RuntimeException exception) {
+            // Continue to the per-controller neutral commands below.
+        }
+        issueDirectNeutralNoThrow();
+    }
+
+    private static double safePhoenixTimeSeconds() {
+        try {
+            return Utils.getCurrentTimeSeconds();
+        } catch (RuntimeException exception) {
+            return Double.NaN;
+        }
+    }
+
+    /** Returns the active neutral request for command suppliers that cannot emit a drive request. */
+    public SwerveRequest safeNeutralRequest() {
+        return m_safeNeutralRequest;
+    }
+
+    /** Requests active neutral and returns a token that a later fresh odometry sample can verify. */
+    public SwerveStopToken requestIdleWithToken() {
+        requestIdle();
+        synchronized (m_outputEvidenceLock) {
+            return new SwerveStopToken(m_outputEpoch);
+        }
+    }
+
+    /** Retries a failed neutral command without invalidating its output-epoch token. */
+    public void retryIdleIfNeeded(SwerveStopToken token) {
+        boolean retry;
+        synchronized (m_outputEvidenceLock) {
+            retry = token != null
+                && token.outputEpoch() == m_outputEpoch
+                && (m_lastNeutralizedOutputEpoch != token.outputEpoch()
+                    || !Double.isFinite(m_lastNeutralCommandSentAt));
+        }
+        if (retry) {
+            requestIdle();
+        }
+    }
+
+    /** Returns post-neutral, fresh-DAQ stopping evidence for Hardware Self-Test barriers. */
+    public SwerveStopEvidence getStopEvidence(
+            SwerveStopToken token, double maximumModuleSpeedMetersPerSecond) {
+        if (token == null
+                || !Double.isFinite(maximumModuleSpeedMetersPerSecond)
+                || maximumModuleSpeedMetersPerSecond < 0.0) {
+            return new SwerveStopEvidence(false, "INVALID_REQUEST");
+        }
+
+        double baselineTimestamp;
+        int baselineDaqs;
+        double neutralCommandCompletedAt;
+        synchronized (m_outputEvidenceLock) {
+            if (token.outputEpoch() != m_outputEpoch) {
+                return new SwerveStopEvidence(false, "NEWER_OUTPUT_REQUESTED");
+            }
+            if (m_lastNeutralizedOutputEpoch != token.outputEpoch()) {
+                return new SwerveStopEvidence(false, "NEUTRAL_COMMAND_PENDING");
+            }
+            baselineTimestamp = m_lastNeutralCommandStateTimestamp;
+            baselineDaqs = m_lastNeutralCommandSuccessfulDaqs;
+            neutralCommandCompletedAt = m_lastNeutralCommandSentAt;
+        }
+
+        SwerveDriveState state;
+        try {
+            state = getStateCopy();
+        } catch (RuntimeException exception) {
+            return new SwerveStopEvidence(false, "STATE_READ_FAILED");
+        }
+        if (!areAllDevicesConnected()) {
+            return new SwerveStopEvidence(false, "DEVICE_OR_SIGNAL_NOT_READY");
+        }
+        if (!Double.isFinite(baselineTimestamp)
+                || !Double.isFinite(neutralCommandCompletedAt)
+                || !Double.isFinite(state.Timestamp)
+                || state.Timestamp <= neutralCommandCompletedAt
+                || state.Timestamp <= baselineTimestamp
+                || state.SuccessfulDaqs - baselineDaqs <= 0) {
+            return new SwerveStopEvidence(false, "POST_NEUTRAL_DAQ_PENDING");
+        }
+        if (state.ModuleStates == null || state.ModuleStates.length != m_expectedModuleCount) {
+            return new SwerveStopEvidence(false, "MODULE_STATE_MISSING");
+        }
+        for (var moduleState : state.ModuleStates) {
+            if (moduleState == null
+                    || !Double.isFinite(moduleState.speedMetersPerSecond)
+                    || Math.abs(moduleState.speedMetersPerSecond)
+                        > maximumModuleSpeedMetersPerSecond) {
+                return new SwerveStopEvidence(false, "MODULE_STILL_MOVING");
+            }
+        }
+        return new SwerveStopEvidence(true, "CONFIRMED");
     }
 
     /** Holds every swerve output idle until the returned command is interrupted. */
@@ -301,7 +684,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
     public void drive(double xSpeed, double ySpeed, double rot, boolean fieldRelative) {
         if (!DebugConstants.ALLOW_SWERVE_OUTPUT || !areAllModulesConnected()) {
-            this.setControl(m_safeIdleRequest);
+            requestIdle();
             return;
         }
 
@@ -309,7 +692,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         // It represents the theoretical max speed of the modules.
         double maxSpeed = TunerConstants.kSpeedAt12Volts.baseUnitMagnitude();
         if (!driveInputsAreFinite(xSpeed, ySpeed, rot, maxSpeed)) {
-            this.setControl(m_safeIdleRequest);
+            requestIdle();
             return;
         }
         double limitedX = MathUtil.clamp(
@@ -332,12 +715,12 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             m_fieldCentricDriveRequest.VelocityX = limitedX * maxSpeed;
             m_fieldCentricDriveRequest.VelocityY = limitedY * maxSpeed;
             m_fieldCentricDriveRequest.RotationalRate = limitedRot;
-            this.setControl(m_fieldCentricDriveRequest);
+            applyNonNeutralRequest(m_fieldCentricDriveRequest);
         } else {
             m_robotCentricDriveRequest.VelocityX = limitedX * maxSpeed;
             m_robotCentricDriveRequest.VelocityY = limitedY * maxSpeed;
             m_robotCentricDriveRequest.RotationalRate = limitedRot;
-            this.setControl(m_robotCentricDriveRequest);
+            applyNonNeutralRequest(m_robotCentricDriveRequest);
         }
     }
 
@@ -345,45 +728,45 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
     /** Returns a read-only connectivity snapshot for every CTRE device used by the swerve. */
     public String getDeviceHealthSummary() {
-        StringBuilder summary = new StringBuilder();
-        summary.append("pigeon").append(getPigeon2().getDeviceID())
-            .append('=').append(getPigeon2().isConnected());
-        for (int i = 0; i < getModules().length; i++) {
-            var module = getModule(i);
-            summary.append(" m").append(i)
-                .append("[d").append(module.getDriveMotor().getDeviceID())
-                .append('=').append(module.getDriveMotor().isConnected())
-                .append(",s").append(module.getSteerMotor().getDeviceID())
-                .append('=').append(module.getSteerMotor().isConnected())
-                .append(",e").append(module.getEncoder().getDeviceID())
-                .append('=').append(module.getEncoder().isConnected())
-                .append(']');
+        try {
+            StringBuilder summary = new StringBuilder(m_criticalSignalSummary);
+            summary.append(" pigeon").append(getPigeon2().getDeviceID())
+                .append('=').append(isGyroConnected());
+            for (int i = 0; i < m_expectedModuleCount; i++) {
+                var module = getModule(i);
+                summary.append(" m").append(i)
+                    .append("[d").append(module.getDriveMotor().getDeviceID())
+                    .append('=').append(areAllModulesConnected())
+                    .append(",s").append(module.getSteerMotor().getDeviceID())
+                    .append('=').append(areAllModulesConnected())
+                    .append(",e").append(module.getEncoder().getDeviceID())
+                    .append('=').append(areAllModulesConnected())
+                    .append(']');
+            }
+            return summary.toString();
+        } catch (RuntimeException exception) {
+            markCriticalDeviceHealthUnavailable(
+                "HEALTH_SUMMARY_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+            return m_criticalSignalSummary;
         }
-        return summary.toString();
     }
 
     public boolean isGyroConnected() {
-        return getPigeon2().isConnected();
+        return m_stateLoopFresh && m_gyroSignalsFresh;
     }
 
     /** True only when every CTRE controller and sensor required for swerve motion is online. */
     public boolean areAllDevicesConnected() {
-        return isGyroConnected() && areAllModulesConnected();
+        return m_daqFresh && isGyroConnected() && areAllModulesConnected();
     }
 
     /** Module-only health gate; teleop can still fall back to robot-centric if the gyro is absent. */
     public boolean areAllModulesConnected() {
-        if (getModules().length == 0) {
-            return false;
-        }
-        for (var module : getModules()) {
-            if (!module.getDriveMotor().isConnected()
-                    || !module.getSteerMotor().isConnected()
-                    || !module.getEncoder().isConnected()) {
-                return false;
-            }
-        }
-        return true;
+        // The aggregate odometry DAQ also contains Pigeon signals, so requiring it here would turn
+        // a gyro-only outage into a module outage and defeat the intentional robot-centric fallback.
+        // Drive, steer, and absolute-encoder freshness are verified individually above.
+        return m_expectedModuleCount > 0 && m_stateLoopFresh && m_moduleSignalsFresh;
     }
 
     /** Motion-observed check only; it intentionally does not certify direction or calibration. */
@@ -391,7 +774,11 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         if (!Double.isFinite(minimumMetersPerSecond) || minimumMetersPerSecond < 0.0) {
             return false;
         }
-        var states = getState().ModuleStates;
+        SwerveDriveState copiedState = getStateCopyForControl("MINIMUM_SPEED");
+        if (copiedState == null || copiedState.ModuleStates == null) {
+            return false;
+        }
+        var states = copiedState.ModuleStates;
         if (states.length == 0) {
             return false;
         }
@@ -432,19 +819,26 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
                 Double.NaN, Double.NaN, Double.NaN);
         }
 
-        var actualStates = getState().ModuleStates;
-        var expectedStates = getKinematics().toSwerveModuleStates(expectedSpeeds);
-        boolean connected = areAllDevicesConnected();
-        boolean finite = actualStates.length == expectedStates.length && actualStates.length > 0;
-        boolean motionObserved = finite;
-        boolean steeringAligned = finite;
-        boolean overCurrent = false;
-        double minimumObservedSpeed = Double.POSITIVE_INFINITY;
-        double maximumVectorError = 0.0;
-        double maximumObservedDriveCurrent = 0.0;
-        double maximumObservedSteerCurrent = 0.0;
+        try {
+            SwerveDriveState copiedState = getStateCopyForControl("DIAGNOSTIC_EVIDENCE");
+            if (copiedState == null || copiedState.ModuleStates == null) {
+                return new SwerveDiagnosticEvidence(
+                    false, false, false, false, true,
+                    Double.NaN, Double.NaN, Double.NaN);
+            }
+            var actualStates = copiedState.ModuleStates;
+            var expectedStates = getKinematics().toSwerveModuleStates(expectedSpeeds);
+            boolean connected = areAllDevicesConnected();
+            boolean finite = actualStates.length == expectedStates.length && actualStates.length > 0;
+            boolean motionObserved = finite;
+            boolean steeringAligned = finite;
+            boolean overCurrent = false;
+            double minimumObservedSpeed = Double.POSITIVE_INFINITY;
+            double maximumVectorError = 0.0;
+            double maximumObservedDriveCurrent = 0.0;
+            double maximumObservedSteerCurrent = 0.0;
 
-        for (int i = 0; i < actualStates.length && i < expectedStates.length; i++) {
+            for (int i = 0; i < actualStates.length && i < expectedStates.length; i++) {
             double actualSpeed = actualStates[i].speedMetersPerSecond;
             double expectedSpeed = expectedStates[i].speedMetersPerSecond;
             double driveCurrent = Math.abs(
@@ -485,20 +879,28 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             maximumObservedSteerCurrent = Math.max(maximumObservedSteerCurrent, steerCurrent);
             overCurrent |= driveCurrent >= maximumDriveCurrentAmps
                 || steerCurrent >= maximumSteerCurrentAmps;
-        }
+            }
 
-        if (!Double.isFinite(minimumObservedSpeed)) {
-            minimumObservedSpeed = Double.NaN;
+            if (!Double.isFinite(minimumObservedSpeed)) {
+                minimumObservedSpeed = Double.NaN;
+            }
+            return new SwerveDiagnosticEvidence(
+                connected && finite,
+                motionObserved,
+                steeringAligned,
+                finite,
+                overCurrent,
+                minimumObservedSpeed,
+                maximumVectorError,
+                Math.max(maximumObservedDriveCurrent, maximumObservedSteerCurrent));
+        } catch (RuntimeException exception) {
+            markCriticalDeviceHealthUnavailable(
+                "DIAGNOSTIC_EVIDENCE_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+            return new SwerveDiagnosticEvidence(
+                false, false, false, false, true,
+                Double.NaN, Double.NaN, Double.NaN);
         }
-        return new SwerveDiagnosticEvidence(
-            connected && finite,
-            motionObserved,
-            steeringAligned,
-            finite,
-            overCurrent,
-            minimumObservedSpeed,
-            maximumVectorError,
-            Math.max(maximumObservedDriveCurrent, maximumObservedSteerCurrent));
     }
 
     public record SwerveDiagnosticEvidence(
@@ -512,24 +914,90 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         double maximumMotorCurrentAmps) {}
 
     public String getMotionDiagnosticSummary() {
-        StringBuilder summary = new StringBuilder();
-        var state = getState();
-        summary.append(String.format(
-            "vx=%.3f vy=%.3f omega=%.3f",
-            state.Speeds.vxMetersPerSecond,
-            state.Speeds.vyMetersPerSecond,
-            state.Speeds.omegaRadiansPerSecond));
-        for (int i = 0; i < getModules().length; i++) {
-            var module = getModule(i);
+        try {
+            StringBuilder summary = new StringBuilder();
+            SwerveDriveState state = getStateCopyForControl("DIAGNOSTIC_SUMMARY");
+            if (state == null || state.Speeds == null || state.ModuleStates == null) {
+                return "STATE_UNAVAILABLE";
+            }
             summary.append(String.format(
-                " m%d[speed=%.3f angle=%.1f driveI=%.2fA steerI=%.2fA]",
-                i,
-                state.ModuleStates[i].speedMetersPerSecond,
-                state.ModuleStates[i].angle.getDegrees(),
-                module.getDriveMotor().getStatorCurrent().getValueAsDouble(),
-                module.getSteerMotor().getStatorCurrent().getValueAsDouble()));
+                "vx=%.3f vy=%.3f omega=%.3f",
+                state.Speeds.vxMetersPerSecond,
+                state.Speeds.vyMetersPerSecond,
+                state.Speeds.omegaRadiansPerSecond));
+            for (int i = 0; i < m_expectedModuleCount; i++) {
+                var module = getModule(i);
+                summary.append(String.format(
+                    " m%d[speed=%.3f angle=%.1f driveI=%.2fA steerI=%.2fA]",
+                    i,
+                    state.ModuleStates[i].speedMetersPerSecond,
+                    state.ModuleStates[i].angle.getDegrees(),
+                    module.getDriveMotor().getStatorCurrent().getValueAsDouble(),
+                    module.getSteerMotor().getStatorCurrent().getValueAsDouble()));
+            }
+            return summary.toString();
+        } catch (RuntimeException exception) {
+            markCriticalDeviceHealthUnavailable(
+                "DIAGNOSTIC_SUMMARY_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+            return "STATE_UNAVAILABLE";
         }
-        return summary.toString();
+    }
+
+    private SwerveDriveState getStateCopyForControl(String context) {
+        try {
+            return getStateCopy();
+        } catch (RuntimeException exception) {
+            markCriticalDeviceHealthUnavailable(
+                context + "_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+            return null;
+        }
+    }
+
+    private Pose2d getAutoPoseOrFailClosed() {
+        SwerveDriveState state = getStateCopyForControl("AUTO_POSE");
+        if (state == null
+                || state.Pose == null
+                || !Double.isFinite(state.Pose.getX())
+                || !Double.isFinite(state.Pose.getY())
+                || !Double.isFinite(state.Pose.getRotation().getRadians())) {
+            requestIdle();
+            return new Pose2d();
+        }
+        return state.Pose;
+    }
+
+    private ChassisSpeeds getAutoSpeedsOrFailClosed() {
+        SwerveDriveState state = getStateCopyForControl("AUTO_SPEEDS");
+        if (state == null
+                || state.Speeds == null
+                || !driveInputsAreFinite(
+                    state.Speeds.vxMetersPerSecond,
+                    state.Speeds.vyMetersPerSecond,
+                    state.Speeds.omegaRadiansPerSecond,
+                    1.0)) {
+            requestIdle();
+            return new ChassisSpeeds();
+        }
+        return state.Speeds;
+    }
+
+    private void resetAutoPoseFailClosed(Pose2d pose) {
+        if (pose == null
+                || !Double.isFinite(pose.getX())
+                || !Double.isFinite(pose.getY())
+                || !Double.isFinite(pose.getRotation().getRadians())) {
+            requestIdle();
+            return;
+        }
+        try {
+            resetPose(pose);
+        } catch (RuntimeException exception) {
+            markCriticalDeviceHealthUnavailable(
+                "AUTO_RESET_EXCEPTION/" + exception.getClass().getSimpleName());
+            requestIdle();
+        }
     }
 
     private void configurePathPlanner() {
@@ -546,9 +1014,9 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
         try {
             AutoBuilder.configure(
-                () -> this.getState().Pose, // Supplier of current robot pose
-                this::resetPose, // Method to reset odometry
-                () -> this.getState().Speeds, // Supplier of current robot speeds
+                this::getAutoPoseOrFailClosed, // Supplier of current robot pose
+                this::resetAutoPoseFailClosed, // Method to reset odometry
+                this::getAutoSpeedsOrFailClosed, // Supplier of current robot speeds
                 (speeds, feedforwards) -> {
                     double maxTranslation = TunerConstants.kSpeedAt12Volts.baseUnitMagnitude()
                         * DebugConstants.MAX_SWERVE_TRANSLATION_FRACTION;
@@ -573,9 +1041,9 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
                                 DebugConstants.MAX_SWERVE_ROTATION_RADIANS_PER_SECOND
                             )
                         );
-                        this.setControl(autoRequest.withSpeeds(limitedSpeeds));
+                        applyNonNeutralRequest(autoRequest.withSpeeds(limitedSpeeds));
                     } else {
-                        this.setControl(m_safeIdleRequest);
+                        requestIdle();
                     }
                 }, // Consumer of ChassisSpeeds (Ignore feedforwards for now
                                                          // unless using Torque control)
@@ -602,6 +1070,69 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
                 e.getStackTrace());
         }
     }
+
+    /**
+     * CTRE's native {@link SwerveRequest.Idle} intentionally leaves the previous module request
+     * unchanged. This request actively replaces both Talon outputs once for each new output epoch;
+     * direct NeutralOut commands provide the immediate, status-checked stop path.
+     */
+    private static final class SafeNeutralRequest implements SwerveRequest {
+        private final NeutralOut driveNeutral = new NeutralOut();
+        private final NeutralOut steerNeutral = new NeutralOut();
+        private final AtomicLong requestedGeneration = new AtomicLong(-1);
+        private final AtomicLong appliedGeneration = new AtomicLong(-2);
+
+        void arm(long generation) {
+            requestedGeneration.set(generation);
+        }
+
+        @Override
+        public StatusCode apply(
+                SwerveControlParameters parameters,
+                SwerveModule<?, ?, ?>... modulesToApply) {
+            if (modulesToApply == null) {
+                return StatusCode.GeneralError;
+            }
+            long generation = requestedGeneration.get();
+            if (appliedGeneration.get() == generation) {
+                return StatusCode.OK;
+            }
+            boolean succeeded = true;
+            for (SwerveModule<?, ?, ?> module : modulesToApply) {
+                try {
+                    module.apply(driveNeutral, steerNeutral);
+                } catch (RuntimeException exception) {
+                    succeeded = false;
+                }
+            }
+            // Each output epoch needs one odometry-thread application, not a new pair of control
+            // frames for every 100 Hz odometry update. Immediate direct NeutralOut commands and
+            // their bounded retry path remain the authoritative stop evidence.
+            if (requestedGeneration.get() == generation) {
+                appliedGeneration.set(generation);
+            }
+            return succeeded ? StatusCode.OK : StatusCode.GeneralError;
+        }
+    }
+
+    private void applyNonNeutralRequest(SwerveRequest request) {
+        synchronized (m_outputEvidenceLock) {
+            m_outputEpoch++;
+        }
+        try {
+            this.setControl(request);
+        } catch (RuntimeException exception) {
+            requestIdle();
+        }
+    }
+
+    public record SwerveStopToken(long outputEpoch) {}
+
+    public record SwerveStopEvidence(boolean confirmed, String reason) {}
+
+    private record NamedCriticalSignal(String name, StatusSignal<?> signal) {}
+
+    private record SignalProbeResult(boolean healthy, String summary) {}
 
     static boolean driveInputsAreFinite(
             double xSpeed, double ySpeed, double rot, double translationScale) {

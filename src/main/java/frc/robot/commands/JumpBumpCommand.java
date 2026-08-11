@@ -38,7 +38,14 @@ public class JumpBumpCommand extends Command {
             m_drivetrain.requestIdle();
             return;
         }
-        double currentHeading = m_drivetrain.getState().Pose.getRotation().getRadians();
+        double currentHeading;
+        try {
+            currentHeading = m_drivetrain.getStateCopy().Pose.getRotation().getRadians();
+        } catch (RuntimeException exception) {
+            moduleFaulted = true;
+            m_drivetrain.requestIdle();
+            return;
+        }
         if (!m_rotationController.reset(
                 currentHeading,
                 HeadingSnapController.closestBumpHeading(currentHeading))) {
@@ -58,7 +65,14 @@ public class JumpBumpCommand extends Command {
             m_drivetrain.requestIdle();
             return;
         }
-        Pose2d currentPose = m_drivetrain.getState().Pose;
+        Pose2d currentPose;
+        try {
+            currentPose = m_drivetrain.getStateCopy().Pose;
+        } catch (RuntimeException exception) {
+            moduleFaulted = true;
+            m_drivetrain.requestIdle();
+            return;
+        }
         double currentRotationRadians = currentPose.getRotation().getRadians();
 
         double rotationSpeed = m_rotationController.calculate(currentRotationRadians);
