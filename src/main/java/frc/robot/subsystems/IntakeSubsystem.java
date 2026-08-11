@@ -4,18 +4,26 @@ import java.util.OptionalDouble;
 
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
-import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.IntakeConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.utils.PositionReferenceGuard.Token;
+import frc.robot.utils.DashboardApplyGate;
+import frc.robot.utils.DashboardApplyGate.Decision;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.utils.SparkMAXContainer.PositionCommandStatus;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 
 public class IntakeSubsystem extends SubsystemBase {
+    private static final String TUNING_APPLY_KEY = "Tuning/Intake/Apply";
+    private static final String TUNING_STATUS_KEY = "Tuning/Intake/Status";
+    private static final double MAX_PID_GAIN = 10.0;
+    private static final double MAX_ACTUATOR_ANGLE_DEGREES = 10.0;
+    private static final double MAX_ROLLER_DUTY_CYCLE = 0.20;
+
     private final SparkMAXContainer m_intakeRoller = new SparkMAXContainer(IntakeConstants.INTAKE_ROLLER_CAN_ID);
     private final SparkMAXContainer m_actuatorMotor = new SparkMAXContainer(IntakeConstants.INTAKE_ACTUATOR_CAN_ID);
+    private final DashboardApplyGate tuningApplyGate = new DashboardApplyGate();
     // Assigned only after future, sensor-validated homing succeeds.
     private Token actuatorReference;
     private String lastBlockedActuatorCommand = "startup: homing未実装";
@@ -46,6 +54,8 @@ public class IntakeSubsystem extends SubsystemBase {
 
         SmartDashboard.putNumber("Set slurp roller percent", 0.15);
         SmartDashboard.putNumber("Set spit roller percent", -0.15);
+        SmartDashboard.putBoolean(TUNING_APPLY_KEY, false);
+        SmartDashboard.putString(TUNING_STATUS_KEY, "ACTIVE_DEFAULTS");
     }
 
     private boolean slurp() {
@@ -141,24 +151,72 @@ public class IntakeSubsystem extends SubsystemBase {
             "Real intake actuator degrees", positionDegrees.orElse(Double.NaN));
         SmartDashboard.putString("Intake Actuator/Last Blocked Command", lastBlockedActuatorCommand);
 
-        double requestedActuatorKp = SmartDashboard.getNumber("Set intake actuator_kP", 0.1);
-        double requestedActuatorKi = SmartDashboard.getNumber("Set intake actuator_kI", 0);
-        double requestedActuatorKd = SmartDashboard.getNumber("Set intake actuator_kD", 0);
+        processDashboardTuning();
+    }
 
-        if (Double.compare(actuator_kP, requestedActuatorKp) != 0
-                || Double.compare(actuator_kI, requestedActuatorKi) != 0
-                || Double.compare(actuator_kD, requestedActuatorKd) != 0) {
-            actuator_kP = requestedActuatorKp;
-            actuator_kI = requestedActuatorKi;
-            actuator_kD = requestedActuatorKd;
+    private void processDashboardTuning() {
+        Decision decision = tuningApplyGate.poll(TUNING_APPLY_KEY);
+        if (decision == Decision.NONE) {
+            return;
+        }
+        if (decision != Decision.APPLY
+                || !DriverStation.isDisabled()
+                || DriverStation.isFMSAttached()) {
+            publishActiveTuning();
+            SmartDashboard.putString(TUNING_STATUS_KEY, "REJECTED_" + decision.name());
+            return;
+        }
+
+        double requestedP = SmartDashboard.getNumber("Set intake actuator_kP", actuator_kP);
+        double requestedI = SmartDashboard.getNumber("Set intake actuator_kI", actuator_kI);
+        double requestedD = SmartDashboard.getNumber("Set intake actuator_kD", actuator_kD);
+        double requestedAngle = SmartDashboard.getNumber(
+            "Set intake actuator degrees", actuatorAngle);
+        double requestedSlurp = SmartDashboard.getNumber(
+            "Set slurp roller percent", slurpPercent);
+        double requestedSpit = SmartDashboard.getNumber(
+            "Set spit roller percent", spitPercent);
+
+        boolean valid = DashboardApplyGate.allFiniteInRange(
+            new double[] {
+                requestedP, requestedI, requestedD,
+                requestedAngle, requestedSlurp, requestedSpit
+            },
+            new double[] {0.0, 0.0, 0.0, 0.0, 0.0, -MAX_ROLLER_DUTY_CYCLE},
+            new double[] {
+                MAX_PID_GAIN, MAX_PID_GAIN, MAX_PID_GAIN,
+                MAX_ACTUATOR_ANGLE_DEGREES, MAX_ROLLER_DUTY_CYCLE, 0.0
+            });
+        if (!valid) {
+            publishActiveTuning();
+            SmartDashboard.putString(TUNING_STATUS_KEY, "REJECTED_INVALID_OR_WRONG_SIGN");
+            return;
+        }
+
+        if (pidChanged(requestedP, requestedI, requestedD)) {
+            actuator_kP = requestedP;
+            actuator_kI = requestedI;
+            actuator_kD = requestedD;
             m_actuatorMotor.assignPIDValues(actuator_kP, actuator_kI, actuator_kD);
         }
-        actuatorAngle = MathUtil.clamp(
-            SmartDashboard.getNumber("Set intake actuator degrees", 10), 0, 10);
+        actuatorAngle = requestedAngle;
+        slurpPercent = requestedSlurp;
+        spitPercent = requestedSpit;
+        SmartDashboard.putString(TUNING_STATUS_KEY, "QUEUED_DISABLED");
+    }
 
-        slurpPercent = MathUtil.clamp(
-            SmartDashboard.getNumber("Set slurp roller percent", 0.15), -0.20, 0.20);
-        spitPercent = MathUtil.clamp(
-            SmartDashboard.getNumber("Set spit roller percent", -0.15), -0.20, 0.20);
+    private boolean pidChanged(double requestedP, double requestedI, double requestedD) {
+        return Double.compare(actuator_kP, requestedP) != 0
+            || Double.compare(actuator_kI, requestedI) != 0
+            || Double.compare(actuator_kD, requestedD) != 0;
+    }
+
+    private void publishActiveTuning() {
+        SmartDashboard.putNumber("Set intake actuator_kP", actuator_kP);
+        SmartDashboard.putNumber("Set intake actuator_kI", actuator_kI);
+        SmartDashboard.putNumber("Set intake actuator_kD", actuator_kD);
+        SmartDashboard.putNumber("Set intake actuator degrees", actuatorAngle);
+        SmartDashboard.putNumber("Set slurp roller percent", slurpPercent);
+        SmartDashboard.putNumber("Set spit roller percent", spitPercent);
     }
 }

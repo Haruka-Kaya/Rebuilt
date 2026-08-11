@@ -20,14 +20,23 @@ import edu.wpi.first.networktables.StructArrayPublisher;
 import edu.wpi.first.networktables.StructPublisher;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.DriverStation.Alliance;
+import edu.wpi.first.wpilibj.Notifier;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.Mechanism2d;
 import edu.wpi.first.wpilibj.smartdashboard.MechanismLigament2d;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj.util.Color;
 import edu.wpi.first.wpilibj.util.Color8Bit;
-
+import frc.robot.utils.LatestValueMailbox;
 public class Telemetry {
+    private static final double PUBLISH_PERIOD_SECONDS = 0.05;
+    private static final long CAPTURE_PERIOD_NANOSECONDS = 50_000_000L;
+
     private final double MaxSpeed;
+    private final LatestValueMailbox<SwerveDriveState> pendingStates = new LatestValueMailbox<>();
+    private final Notifier publisher;
+    private double nextPublishErrorReportTimestamp;
+    private volatile long nextCaptureTimestampNanos;
 
     /**
      * Construct a telemetry object, with the specified max speed of the robot
@@ -37,6 +46,10 @@ public class Telemetry {
     public Telemetry(double maxSpeed) {
         MaxSpeed = maxSpeed;
         SignalLogger.start();
+
+        publisher = new Notifier(this::publishLatestState);
+        publisher.setName("swerve-telemetry-publisher");
+        publisher.startPeriodic(PUBLISH_PERIOD_SECONDS);
 
         /* Set up the module state Mechanism2d telemetry */
         for (int i = 0; i < 4; ++i) {
@@ -90,8 +103,37 @@ public class Telemetry {
 
     private final double[] m_poseArray = new double[3];
 
-    /** Accept the swerve drive state and telemeterize it to SmartDashboard and SignalLogger. */
-    public void telemeterize(SwerveDriveState state) {
+    /**
+     * Captures a thread-safe copy without performing I/O on CTRE's odometry callback thread.
+     * Phoenix invokes this callback while holding its internal state lock, so this method must stay
+     * cheap.
+     */
+    public void captureState(SwerveDriveState state) {
+        long now = System.nanoTime();
+        boolean captureDue = nextCaptureTimestampNanos == 0L
+            || now - nextCaptureTimestampNanos >= 0L;
+        if (state != null && captureDue) {
+            nextCaptureTimestampNanos = now + CAPTURE_PERIOD_NANOSECONDS;
+            pendingStates.offer(state.clone());
+        }
+    }
+
+    private void publishLatestState() {
+        pendingStates.takeLatest().ifPresent(state -> {
+            try {
+                publish(state);
+            } catch (RuntimeException exception) {
+                double now = Timer.getFPGATimestamp();
+                if (now >= nextPublishErrorReportTimestamp) {
+                    DriverStation.reportWarning(
+                        "Swerve telemetry publish failed: " + exception.getMessage(), false);
+                    nextPublishErrorReportTimestamp = now + 1.0;
+                }
+            }
+        });
+    }
+
+    private void publish(SwerveDriveState state) {
         /* Telemeterize the swerve drive state */
         drivePose.set(state.Pose);
         driveSpeeds.set(state.Speeds);

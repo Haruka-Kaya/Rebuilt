@@ -12,11 +12,18 @@ import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.TurretConstants;
 import frc.robot.constants.Constants.AprilTagConstants;
 import frc.robot.subsystems.VisionSubsystem.TargetObservation;
+import frc.robot.utils.DashboardApplyGate;
+import frc.robot.utils.DashboardApplyGate.Decision;
 import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
 
 public class TurretSubsystem extends SubsystemBase {
+    private static final String TUNING_APPLY_KEY = "Tuning/Turret/Apply";
+    private static final String TUNING_STATUS_KEY = "Tuning/Turret/Status";
+    private static final double MAX_PID_GAIN = 10.0;
+
     private final SparkMAXContainer m_motor = new SparkMAXContainer(TurretConstants.TURRET_CAN_ID);
+    private final DashboardApplyGate tuningApplyGate = new DashboardApplyGate();
     // Assigned only after future, sensor-validated homing or absolute reference succeeds.
     private Token positionReference;
     private String lastBlockedPositionCommand = "startup: homing/absolute reference未実装";
@@ -42,6 +49,8 @@ public class TurretSubsystem extends SubsystemBase {
         SmartDashboard.putNumber("Set turret_kP", 2.4);
         SmartDashboard.putNumber("Set turret_kI", 0);
         SmartDashboard.putNumber("Set turret_kD", 0.1);
+        SmartDashboard.putBoolean(TUNING_APPLY_KEY, false);
+        SmartDashboard.putString(TUNING_STATUS_KEY, "ACTIVE_DEFAULTS");
     }
 
     public boolean setTurretAngle(double angleDegrees) {
@@ -171,18 +180,7 @@ public class TurretSubsystem extends SubsystemBase {
             onTarget = false;
         }
 
-        double requestedTurretKp = SmartDashboard.getNumber("Set turret_kP", 2.4);
-        double requestedTurretKi = SmartDashboard.getNumber("Set turret_kI", 0);
-        double requestedTurretKd = SmartDashboard.getNumber("Set turret_kD", 0.1);
-
-        if (Double.compare(turret_kP, requestedTurretKp) != 0
-                || Double.compare(turret_kI, requestedTurretKi) != 0
-                || Double.compare(turret_kD, requestedTurretKd) != 0) {
-            turret_kP = requestedTurretKp;
-            turret_kI = requestedTurretKi;
-            turret_kD = requestedTurretKd;
-            m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
-        }
+        processDashboardTuning();
 
         OptionalDouble turretAngle = getTurretAngle();
         OptionalDouble rawMotorRotations = m_motor.getPositionIfReady();
@@ -198,5 +196,47 @@ public class TurretSubsystem extends SubsystemBase {
             "Turret/Last Blocked Command", lastBlockedPositionCommand);
 
         SmartDashboard.putBoolean("On target", isOnTarget());
+    }
+
+    private void processDashboardTuning() {
+        Decision decision = tuningApplyGate.poll(TUNING_APPLY_KEY);
+        if (decision == Decision.NONE) {
+            return;
+        }
+        if (decision != Decision.APPLY
+                || !DriverStation.isDisabled()
+                || DriverStation.isFMSAttached()) {
+            publishActiveTuning();
+            SmartDashboard.putString(TUNING_STATUS_KEY, "REJECTED_" + decision.name());
+            return;
+        }
+
+        double requestedP = SmartDashboard.getNumber("Set turret_kP", turret_kP);
+        double requestedI = SmartDashboard.getNumber("Set turret_kI", turret_kI);
+        double requestedD = SmartDashboard.getNumber("Set turret_kD", turret_kD);
+        if (!DashboardApplyGate.allFiniteInRange(
+                new double[] {requestedP, requestedI, requestedD},
+                new double[] {0.0, 0.0, 0.0},
+                new double[] {MAX_PID_GAIN, MAX_PID_GAIN, MAX_PID_GAIN})) {
+            publishActiveTuning();
+            SmartDashboard.putString(TUNING_STATUS_KEY, "REJECTED_INVALID_OR_OUT_OF_RANGE");
+            return;
+        }
+
+        if (Double.compare(turret_kP, requestedP) != 0
+                || Double.compare(turret_kI, requestedI) != 0
+                || Double.compare(turret_kD, requestedD) != 0) {
+            turret_kP = requestedP;
+            turret_kI = requestedI;
+            turret_kD = requestedD;
+            m_motor.assignPIDValues(turret_kP, turret_kI, turret_kD);
+        }
+        SmartDashboard.putString(TUNING_STATUS_KEY, "QUEUED_DISABLED");
+    }
+
+    private void publishActiveTuning() {
+        SmartDashboard.putNumber("Set turret_kP", turret_kP);
+        SmartDashboard.putNumber("Set turret_kI", turret_kI);
+        SmartDashboard.putNumber("Set turret_kD", turret_kD);
     }
 }

@@ -8,19 +8,28 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.ShooterConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
+import frc.robot.utils.DashboardApplyGate;
+import frc.robot.utils.DashboardApplyGate.Decision;
 import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 
 public class ShooterSubsystem extends SubsystemBase {
+    private static final String TUNING_APPLY_KEY = "Tuning/Shooter/Apply";
+    private static final String TUNING_STATUS_KEY = "Tuning/Shooter/Status";
+    private static final double MAX_PID_GAIN = 10.0;
+    private static final double MIN_FLYWHEEL_RPM = 100.0;
+    private static final double MAX_FLYWHEEL_RPM = 1000.0;
+    private static final double FLYWHEEL_TOLERANCE_RPM = 50.0;
+    private static final double MAX_ACTUATOR_ANGLE_DEGREES = 5.0;
+
     private final SparkMAXContainer actuatorMotor = new SparkMAXContainer(ShooterConstants.ACTUATOR_CAN_ID);
     private final SparkMAXContainer flywheelMotor_1 = new SparkMAXContainer(ShooterConstants.SHOOTER_1_CAN_ID);
     private final SparkMAXContainer flywheelMotor_2 = new SparkMAXContainer(ShooterConstants.SHOOTER_2_CAN_ID);
+    private final DashboardApplyGate tuningApplyGate = new DashboardApplyGate();
     // Assigned only after future, sensor-validated homing succeeds.
     private Token actuatorReference;
     private String lastBlockedActuatorCommand = "startup: homing未実装";
-
-    private int flywheel_tolerance = 50;
 
     private double flywheelRPM = 500.0;
 
@@ -62,6 +71,8 @@ public class ShooterSubsystem extends SubsystemBase {
         SmartDashboard.putNumber("Set shooter actuator_kD", 0);
 
         SmartDashboard.putNumber("Set shooter actuator degrees", 5);
+        SmartDashboard.putBoolean(TUNING_APPLY_KEY, false);
+        SmartDashboard.putString(TUNING_STATUS_KEY, "ACTIVE_DEFAULTS");
     }
 
     /**
@@ -77,7 +88,11 @@ public class ShooterSubsystem extends SubsystemBase {
             return;
         }
         flywheelRequested = true;
-        flywheelMotor_1.setVelocity(flywheelRPM);
+        if (!flywheelMotor_1.setVelocity(flywheelRPM)) {
+            flywheelRequested = false;
+            flywheelIsSet = false;
+            flywheelMotor_1.stop();
+        }
     }
 
     public boolean setActuatorAngle() {
@@ -85,6 +100,11 @@ public class ShooterSubsystem extends SubsystemBase {
     }
 
     public boolean setActuatorAngle(double degrees) {
+        if (!Double.isFinite(degrees)) {
+            lastBlockedActuatorCommand = "set angle: invalid value";
+            actuatorMotor.stop();
+            return false;
+        }
         double safeDegrees = MathUtil.clamp(degrees, 0.0, 5.0);
         if (!actuatorMotor.isPositionReferenceValid(actuatorReference)) {
             lastBlockedActuatorCommand = "set angle: UNREFERENCED";
@@ -123,38 +143,7 @@ public class ShooterSubsystem extends SubsystemBase {
         if (!isActuatorReferenced()) {
             actuatorMotor.stop();
         }
-        double requestedFlywheelkP = SmartDashboard.getNumber("Set flywheel_kP", 0.1);
-        double requestedFlywheelkI = SmartDashboard.getNumber("Set flywheel_kI", 0);
-        double requestedFlywheelkD = SmartDashboard.getNumber("Set flywheel_kD", 0);
-
-        if (pidChanged(
-                flywheelkP, flywheelkI, flywheelkD,
-                requestedFlywheelkP, requestedFlywheelkI, requestedFlywheelkD)) {
-            flywheelkP = requestedFlywheelkP;
-            flywheelkI = requestedFlywheelkI;
-            flywheelkD = requestedFlywheelkD;
-            flywheelMotor_1.assignPIDValues(flywheelkP, flywheelkI, flywheelkD);
-        }
-
-        // Change to linear regresion line
-        flywheelRPM = MathUtil.clamp(SmartDashboard.getNumber("Set flywheelRPM", 500), 0, 1000);
-
-
-        double requestedActuatorkP = SmartDashboard.getNumber("Set shooter actuator_kP", 0.1);
-        double requestedActuatorkI = SmartDashboard.getNumber("Set shooter actuator_kI", 0);
-        double requestedActuatorkD = SmartDashboard.getNumber("Set shooter actuator_kD", 0);
-
-        if (pidChanged(
-                actuatorkP, actuatorkI, actuatorkD,
-                requestedActuatorkP, requestedActuatorkI, requestedActuatorkD)) {
-            actuatorkP = requestedActuatorkP;
-            actuatorkI = requestedActuatorkI;
-            actuatorkD = requestedActuatorkD;
-            actuatorMotor.assignPIDValues(actuatorkP, actuatorkI, actuatorkD);
-        }
-
-        actuatorPos = MathUtil.clamp(
-            SmartDashboard.getNumber("Set shooter actuator degrees", 5), 0, 5);
+        processDashboardTuning();
 
         OptionalDouble actuatorDegrees = getReferencedActuatorDegrees();
         OptionalDouble rawActuatorRotations = actuatorMotor.getPositionIfReady();
@@ -173,14 +162,6 @@ public class ShooterSubsystem extends SubsystemBase {
         SmartDashboard.putString(
             "Shooter Actuator/Last Blocked Command", lastBlockedActuatorCommand);
         SmartDashboard.putNumber("Real flywheelRPM", flywheelMotor_1.getVelocity());
-
-        if(flywheelRPM < 3500) {
-            flywheel_tolerance = 50;
-        } else if(flywheelRPM < 4500) {
-            flywheel_tolerance = 100;
-        } else {
-            flywheel_tolerance = 200;
-        }
 
         boolean diagnosticActive = flywheelMotor_2.isFollowerDiagnosticActive();
         boolean pairReady = flywheelPairReady();
@@ -253,7 +234,7 @@ public class ShooterSubsystem extends SubsystemBase {
 
     public boolean isFlywheelReady() {
         return flywheelRequested
-            && Math.abs(flywheelRPM) > flywheel_tolerance
+            && Math.abs(flywheelRPM) > FLYWHEEL_TOLERANCE_RPM
             && !flywheelMotor_2.isFollowerDiagnosticActive()
             && flywheelPairReady()
             && flywheelAtRequestedSpeed(flywheelMotor_1.getVelocity())
@@ -274,7 +255,7 @@ public class ShooterSubsystem extends SubsystemBase {
 
     private boolean flywheelAtRequestedSpeed(double measuredVelocity) {
         return MathUtil.isNear(
-            Math.abs(flywheelRPM), Math.abs(measuredVelocity), flywheel_tolerance);
+            Math.abs(flywheelRPM), Math.abs(measuredVelocity), FLYWHEEL_TOLERANCE_RPM);
     }
 
     private static boolean pidChanged(
@@ -283,5 +264,80 @@ public class ShooterSubsystem extends SubsystemBase {
         return Double.compare(currentP, requestedP) != 0
                 || Double.compare(currentI, requestedI) != 0
                 || Double.compare(currentD, requestedD) != 0;
+    }
+
+    private void processDashboardTuning() {
+        Decision decision = tuningApplyGate.poll(TUNING_APPLY_KEY);
+        if (decision == Decision.NONE) {
+            return;
+        }
+        if (decision != Decision.APPLY
+                || !DriverStation.isDisabled()
+                || DriverStation.isFMSAttached()) {
+            publishActiveTuning();
+            SmartDashboard.putString(TUNING_STATUS_KEY, "REJECTED_" + decision.name());
+            return;
+        }
+
+        double requestedFlywheelP = SmartDashboard.getNumber("Set flywheel_kP", flywheelkP);
+        double requestedFlywheelI = SmartDashboard.getNumber("Set flywheel_kI", flywheelkI);
+        double requestedFlywheelD = SmartDashboard.getNumber("Set flywheel_kD", flywheelkD);
+        double requestedRpm = SmartDashboard.getNumber("Set flywheelRPM", flywheelRPM);
+        double requestedActuatorP = SmartDashboard.getNumber(
+            "Set shooter actuator_kP", actuatorkP);
+        double requestedActuatorI = SmartDashboard.getNumber(
+            "Set shooter actuator_kI", actuatorkI);
+        double requestedActuatorD = SmartDashboard.getNumber(
+            "Set shooter actuator_kD", actuatorkD);
+        double requestedActuatorPosition = SmartDashboard.getNumber(
+            "Set shooter actuator degrees", actuatorPos);
+
+        boolean valid = DashboardApplyGate.allFiniteInRange(
+            new double[] {
+                requestedFlywheelP, requestedFlywheelI, requestedFlywheelD, requestedRpm,
+                requestedActuatorP, requestedActuatorI, requestedActuatorD,
+                requestedActuatorPosition
+            },
+            new double[] {0.0, 0.0, 0.0, MIN_FLYWHEEL_RPM, 0.0, 0.0, 0.0, 0.0},
+            new double[] {
+                MAX_PID_GAIN, MAX_PID_GAIN, MAX_PID_GAIN, MAX_FLYWHEEL_RPM,
+                MAX_PID_GAIN, MAX_PID_GAIN, MAX_PID_GAIN, MAX_ACTUATOR_ANGLE_DEGREES
+            });
+        if (!valid) {
+            publishActiveTuning();
+            SmartDashboard.putString(TUNING_STATUS_KEY, "REJECTED_INVALID_OR_OUT_OF_RANGE");
+            return;
+        }
+
+        if (pidChanged(
+                flywheelkP, flywheelkI, flywheelkD,
+                requestedFlywheelP, requestedFlywheelI, requestedFlywheelD)) {
+            flywheelkP = requestedFlywheelP;
+            flywheelkI = requestedFlywheelI;
+            flywheelkD = requestedFlywheelD;
+            flywheelMotor_1.assignPIDValues(flywheelkP, flywheelkI, flywheelkD);
+        }
+        if (pidChanged(
+                actuatorkP, actuatorkI, actuatorkD,
+                requestedActuatorP, requestedActuatorI, requestedActuatorD)) {
+            actuatorkP = requestedActuatorP;
+            actuatorkI = requestedActuatorI;
+            actuatorkD = requestedActuatorD;
+            actuatorMotor.assignPIDValues(actuatorkP, actuatorkI, actuatorkD);
+        }
+        flywheelRPM = requestedRpm;
+        actuatorPos = requestedActuatorPosition;
+        SmartDashboard.putString(TUNING_STATUS_KEY, "QUEUED_DISABLED");
+    }
+
+    private void publishActiveTuning() {
+        SmartDashboard.putNumber("Set flywheel_kP", flywheelkP);
+        SmartDashboard.putNumber("Set flywheel_kI", flywheelkI);
+        SmartDashboard.putNumber("Set flywheel_kD", flywheelkD);
+        SmartDashboard.putNumber("Set flywheelRPM", flywheelRPM);
+        SmartDashboard.putNumber("Set shooter actuator_kP", actuatorkP);
+        SmartDashboard.putNumber("Set shooter actuator_kI", actuatorkI);
+        SmartDashboard.putNumber("Set shooter actuator_kD", actuatorkD);
+        SmartDashboard.putNumber("Set shooter actuator degrees", actuatorPos);
     }
 }

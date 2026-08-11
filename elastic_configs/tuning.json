@@ -146,6 +146,32 @@
               "data_type": "double",
               "show_submit_button": false
             }
+          },
+          {
+            "title": "Apply Shooter Tuning (OFF -> ON)",
+            "x": 0.0,
+            "y": 384.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Shooter/Apply",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Shooter Tuning Status",
+            "x": 256.0,
+            "y": 384.0,
+            "width": 512.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Shooter/Status",
+              "period": 0.06,
+              "data_type": "string"
+            }
           }
         ]
       }
@@ -209,6 +235,32 @@
               "period": 0.06,
               "data_type": "double",
               "show_submit_button": false
+            }
+          },
+          {
+            "title": "Apply Turret Tuning (OFF -> ON)",
+            "x": 0.0,
+            "y": 384.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Turret/Apply",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Turret Tuning Status",
+            "x": 256.0,
+            "y": 384.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Turret/Status",
+              "period": 0.06,
+              "data_type": "string"
             }
           }
         ]
@@ -316,6 +368,32 @@
               "data_type": "double",
               "show_submit_button": false
             }
+          },
+          {
+            "title": "Apply Intake Tuning (OFF -> ON)",
+            "x": 0.0,
+            "y": 384.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Intake/Apply",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Intake Tuning Status",
+            "x": 256.0,
+            "y": 384.0,
+            "width": 512.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Intake/Status",
+              "period": 0.06,
+              "data_type": "string"
+            }
           }
         ]
       }
@@ -379,6 +457,58 @@
               "period": 0.06,
               "data_type": "double",
               "show_submit_button": false
+            }
+          },
+          {
+            "title": "Apply Feeder Tuning (OFF -> ON)",
+            "x": 0.0,
+            "y": 256.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Feeder/Apply",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Feeder Tuning Status",
+            "x": 0.0,
+            "y": 384.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Feeder/Status",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Apply Conveyor Tuning (OFF -> ON)",
+            "x": 384.0,
+            "y": 256.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Conveyor/Apply",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Conveyor Tuning Status",
+            "x": 384.0,
+            "y": 384.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Tuning/Conveyor/Status",
+              "period": 0.06,
+              "data_type": "string"
             }
           }
         ]
