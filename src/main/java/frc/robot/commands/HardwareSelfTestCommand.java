@@ -45,7 +45,9 @@ public final class HardwareSelfTestCommand {
         "; ",
         "Spark30 intake actuator=SKIP_UNREFERENCED",
         "Spark31 intake roller=LOW_OUTPUT_STAGE",
-        "Spark32 feeder=SKIP_KNOWN_STALL_SUSPECTED",
+        "Spark32 feeder=" + (ManipulatorConstants.FEEDER_CONTROLLED_RETEST_ENABLED
+            ? "CONTROLLED_RETEST_STAGE"
+            : "SKIP_KNOWN_STALL_SUSPECTED"),
         "Spark33 conveyor=LOW_OUTPUT_STAGE",
         "Spark34/35 climber=MANUAL_ARMED_PULSE_ONLY",
         "Spark36/37 flywheel=PAIR_STAGE",
@@ -102,12 +104,14 @@ public final class HardwareSelfTestCommand {
                     results,
                     "SPARK_ID30_INTAKE_ACTUATOR",
                     "homing/reference sensor is not implemented");
-                recordSkipped(
-                    results,
-                    "SPARK_ID32_FEEDER",
-                    MotionResult.BLOCKED_KNOWN_FAULT,
-                    "2026-08-10 log: 44.14A and approximately 0rpm; inspect jam/power branch first; "
-                        + feeder.getDiagnosticStatus());
+                if (!feeder.isControlledRetestEnabled()) {
+                    recordSkipped(
+                        results,
+                        "SPARK_ID32_FEEDER",
+                        MotionResult.BLOCKED_KNOWN_FAULT,
+                        "2026-08-10 log: 44.14A and approximately 0rpm; inspect jam/power branch first; "
+                            + feeder.getDiagnosticStatus());
+                }
                 recordSkipped(
                     results,
                     "SPARK_ID34_35_CLIMBER",
@@ -149,6 +153,24 @@ public final class HardwareSelfTestCommand {
                 results,
                 runState,
                 intake), runState),
+            guardedStage(Commands.either(
+                openLoopStage(
+                    "SPARK_ID32_FEEDER_CONTROLLED_RETEST",
+                    () -> feeder.getDiagnosticSnapshot(false).ready(),
+                    () -> feeder.runControlledDiagnostic(duty),
+                    feeder::stop,
+                    new int[] {ManipulatorConstants.FEEDER_CAN_ID},
+                    List.of(new DiagnosticTarget(
+                        "SPARK_ID32_FEEDER",
+                        duty,
+                        ManipulatorConstants.FEEDER_CURRENT_LIMIT_AMPS,
+                        feeder::getDiagnosticSnapshot)),
+                    HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
+                    results,
+                    runState,
+                    feeder),
+                Commands.none(),
+                feeder::isControlledRetestEnabled), runState),
             guardedStage(openLoopStage(
                 "SPARK_ID33_CONVEYOR",
                 () -> conveyor.getDiagnosticSnapshot(false).ready(),

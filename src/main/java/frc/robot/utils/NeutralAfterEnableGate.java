@@ -4,9 +4,9 @@ package frc.robot.utils;
 public final class NeutralAfterEnableGate {
   private boolean previouslyEnabled;
   private boolean neutralObserved;
-  private int sourceId = Integer.MIN_VALUE;
+  private long sourceId = Long.MIN_VALUE;
 
-  public synchronized boolean allow(boolean enabled, int currentSourceId, boolean anyPressed) {
+  public synchronized boolean allow(boolean enabled, long currentSourceId, boolean anyPressed) {
     if (!enabled) {
       previouslyEnabled = false;
       neutralObserved = false;

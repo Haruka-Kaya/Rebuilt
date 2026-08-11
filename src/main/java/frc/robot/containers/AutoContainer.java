@@ -2,6 +2,10 @@ package frc.robot.containers;
 
 import com.pathplanner.lib.auto.AutoBuilder;
 import com.pathplanner.lib.auto.NamedCommands;
+import com.pathplanner.lib.commands.PathPlannerAuto;
+
+import java.util.IdentityHashMap;
+import java.util.Map;
 
 import edu.wpi.first.wpilibj.smartdashboard.SendableChooser;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
@@ -21,7 +25,10 @@ import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 
 public class AutoContainer {
+    private static final String SAFE_STOP_OPTION = "SAFE STOP / NO AUTO SELECTED";
+
     private SendableChooser<Command> autoChooser;
+    private final Map<Command, String> reviewedAutoNames = new IdentityHashMap<>();
     private final CommandSwerveDrivetrain drivetrain;
 
     private final TurretSubsystem m_turret;
@@ -32,9 +39,11 @@ public class AutoContainer {
     private final ClimberSubsystem m_climber;
     private final Command safeStopCommand;
     private String readinessStatus;
+    private String lastAutonomousResult = "NO AUTONOMOUS RUN";
     private double nextStatusPublishTimestamp;
     private boolean chooserOperational;
     private String permanentBlockReason;
+    private final AutonomousRunState runState = new AutonomousRunState();
 
     public AutoContainer(CommandSwerveDrivetrain drivetrain, TurretSubsystem turret,
                             ShooterSubsystem shooter, FeederSubsystem feeder,
@@ -71,6 +80,7 @@ public class AutoContainer {
             .withName("Autonomous Safe Stop");
 
         this.configureAutoBindings();
+        publishLastResult();
     }
 
     private void configureAutoBindings() {
@@ -87,7 +97,18 @@ public class AutoContainer {
         NamedCommands.registerCommand("Slurp", new IntakeCommand(m_intake, m_conveyor));
 
         try {
-            autoChooser = AutoBuilder.buildAutoChooser(); // Default auto will be `Commands.none()`
+            autoChooser = new SendableChooser<>();
+            autoChooser.setDefaultOption(SAFE_STOP_OPTION, safeStopCommand);
+            reviewedAutoNames.clear();
+            AutoBuilder.getAllAutoNames().stream().sorted().forEach(autoName -> {
+                Command auto = new PathPlannerAuto(autoName);
+                reviewedAutoNames.put(auto, autoName);
+                autoChooser.addOption(autoName, auto);
+            });
+            if (reviewedAutoNames.isEmpty()) {
+                configureSafeChooser("BLOCKED: no deployed autonomous routines were found");
+                return;
+            }
             chooserOperational = true;
             permanentBlockReason = null;
         } catch (RuntimeException e) {
@@ -106,8 +127,10 @@ public class AutoContainer {
         chooserOperational = false;
         permanentBlockReason = reason;
         readinessStatus = reason;
+        reviewedAutoNames.clear();
         autoChooser = new SendableChooser<>();
-        autoChooser.setDefaultOption("SAFE STOP - calibration required", safeStopCommand);
+        autoChooser.setDefaultOption(SAFE_STOP_OPTION, safeStopCommand);
+        publishSelected(null);
         publishStatus(false);
         SmartDashboard.putData("Auto Chooser", autoChooser);
     }
@@ -128,7 +151,11 @@ public class AutoContainer {
             publishStatus(false);
             return safeStopCommand;
         }
-        AutonomousReadiness.Result readiness = currentReadiness();
+        Command selected = autoChooser == null ? null : autoChooser.getSelected();
+        String selectedName = reviewedAutoNames.get(selected);
+        AutonomousSelectionPolicy.Result readiness =
+            AutonomousSelectionPolicy.evaluate(currentReadiness(), selectedName);
+        publishSelected(selectedName);
         if (!readiness.ready()) {
             readinessStatus = "BLOCKED: " + readiness.reason();
             publishStatus(false);
@@ -136,25 +163,65 @@ public class AutoContainer {
         }
         readinessStatus = "READY: " + readiness.reason();
         publishStatus(true);
-        Command selected = autoChooser == null ? null : autoChooser.getSelected();
-        return selected == null ? safeStopCommand : selected;
+        Command freshSelectedAuto;
+        try {
+            // Chooser options persist for the process lifetime and may not be decorated twice.
+            freshSelectedAuto = AutoBuilder.buildAuto(selectedName);
+        } catch (RuntimeException exception) {
+            readinessStatus = "BLOCKED: selected auto could not be rebuilt: " + exception.getMessage();
+            publishStatus(false);
+            return safeStopCommand;
+        }
+        return freshSelectedAuto
+            .beforeStarting(() -> {
+                runState.started();
+                readinessStatus = "RUNNING: " + selectedName;
+                lastAutonomousResult = readinessStatus;
+                publishStatus(false);
+                publishLastResult();
+            })
+            .finallyDo(interrupted -> {
+                stopAllOutputs();
+                AutonomousRunState.Phase phase = runState.finished(interrupted);
+                if (phase == AutonomousRunState.Phase.ABORTED) {
+                    // shouldAbortActiveAutonomous() already published the precise failure reason.
+                    publishLastResult();
+                    return;
+                }
+                readinessStatus = (phase == AutonomousRunState.Phase.INTERRUPTED
+                    ? "INTERRUPTED: "
+                    : "COMPLETED: ") + selectedName;
+                lastAutonomousResult = readinessStatus;
+                publishStatus(false);
+                publishLastResult();
+            })
+            .withName("Managed Auto: " + selectedName);
     }
 
     /** Runtime interlock for a calibrated path that was already scheduled. */
     public boolean shouldAbortActiveAutonomous() {
+        if (!runState.running()) {
+            return false;
+        }
         if (!AutoConstants.CALIBRATED_AUTONOMOUS_ENABLED) {
             return false;
         }
         if (permanentBlockReason != null) {
+            runState.abort();
             readinessStatus = "ABORTED: " + withoutBlockedPrefix(permanentBlockReason);
+            lastAutonomousResult = readinessStatus;
             publishStatus(false);
+            publishLastResult();
             return true;
         }
         AutonomousReadiness.Result readiness = currentReadiness();
         boolean abort = !readiness.ready();
         if (abort) {
+            runState.abort();
             readinessStatus = "ABORTED: " + readiness.reason();
+            lastAutonomousResult = readinessStatus;
             publishStatus(false);
+            publishLastResult();
         }
         return abort;
     }
@@ -183,9 +250,35 @@ public class AutoContainer {
     }
 
     private void publishCurrentReadiness() {
-        AutonomousReadiness.Result readiness = currentReadiness();
+        String selectedName = selectedAutoName();
+        AutonomousSelectionPolicy.Result readiness =
+            AutonomousSelectionPolicy.evaluate(currentReadiness(), selectedName);
+        publishSelected(selectedName);
         readinessStatus = (readiness.ready() ? "READY: " : "BLOCKED: ") + readiness.reason();
         publishStatus(readiness.ready());
+    }
+
+    private String selectedAutoName() {
+        return autoChooser == null ? null : reviewedAutoNames.get(autoChooser.getSelected());
+    }
+
+    private void publishSelected(String selectedName) {
+        SmartDashboard.putString(
+            "Autonomous/Selected", selectedName == null ? SAFE_STOP_OPTION : selectedName);
+    }
+
+    private void publishLastResult() {
+        SmartDashboard.putString("Autonomous/Last Result", lastAutonomousResult);
+    }
+
+    private void stopAllOutputs() {
+        drivetrain.requestIdle();
+        m_turret.stop();
+        m_shooter.stop();
+        m_feeder.stop();
+        m_conveyor.stop();
+        m_intake.stopAll();
+        m_climber.stop();
     }
 
     private AutonomousReadiness.Result currentReadiness() {

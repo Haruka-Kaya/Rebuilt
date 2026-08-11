@@ -31,4 +31,17 @@ class NeutralAfterEnableGateTest {
     assertFalse(gate.allow(true, 2, false));
     assertTrue(gate.allow(true, 2, true));
   }
+
+  @Test
+  void deviceRecoveryWhileHeldRequiresReleaseAndANewPress() {
+    NeutralAfterEnableGate gate = new NeutralAfterEnableGate();
+    long offlineSignature = 0x01L;
+    long recoveredSignature = 0x01L | (1L << 36);
+
+    assertFalse(gate.allow(true, offlineSignature, false));
+    assertTrue(gate.allow(true, offlineSignature, true));
+    assertFalse(gate.allow(true, recoveredSignature, true));
+    assertFalse(gate.allow(true, recoveredSignature, false));
+    assertTrue(gate.allow(true, recoveredSignature, true));
+  }
 }

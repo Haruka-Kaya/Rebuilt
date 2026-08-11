@@ -184,6 +184,10 @@ public class ShooterSubsystem extends SubsystemBase {
         flywheelRequested = false;
         flywheelIsSet = false;
         flywheelMotor_1.stop();
+        if (!DriverStation.isTestEnabled() || DriverStation.isFMSAttached()) {
+            flywheelMotor_2.endFollowerDiagnostic();
+            return false;
+        }
         return flywheelMotor_2.beginFollowerDiagnostic(0.08);
     }
 
@@ -240,11 +244,13 @@ public class ShooterSubsystem extends SubsystemBase {
 
     public boolean isFlywheelReady() {
         return flywheelRequested
-            && Math.abs(flywheelRPM) > FLYWHEEL_TOLERANCE_RPM
             && !flywheelMotor_2.isFollowerDiagnosticActive()
             && flywheelPairReady()
-            && flywheelAtRequestedSpeed(flywheelMotor_1.getVelocity())
-            && flywheelAtRequestedSpeed(flywheelMotor_2.getVelocity());
+            && FlywheelPairReadiness.atRequestedSpeed(
+                flywheelRPM,
+                flywheelMotor_1.getVelocity(),
+                flywheelMotor_2.getVelocity(),
+                FLYWHEEL_TOLERANCE_RPM);
     }
 
     /** Feed interlock: an unknown hood/actuator angle must never release a game piece. */
@@ -264,11 +270,6 @@ public class ShooterSubsystem extends SubsystemBase {
 
     private boolean flywheelPairReady() {
         return flywheelMotor_1.isReady() && flywheelMotor_2.isReady();
-    }
-
-    private boolean flywheelAtRequestedSpeed(double measuredVelocity) {
-        return MathUtil.isNear(
-            Math.abs(flywheelRPM), Math.abs(measuredVelocity), FLYWHEEL_TOLERANCE_RPM);
     }
 
     private static boolean pidChanged(

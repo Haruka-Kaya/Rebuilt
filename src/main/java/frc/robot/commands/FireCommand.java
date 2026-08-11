@@ -2,6 +2,7 @@ package frc.robot.commands;
 
 
 import edu.wpi.first.wpilibj2.command.Command;
+import frc.robot.Telemetry;
 import frc.robot.subsystems.ConveyorSubsystem;
 import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
@@ -43,8 +44,13 @@ public class FireCommand extends Command {
     }
 
     private void feedOnlyWhenShooterIsReady() {
-        boolean pathReady = m_feeder.isReady() && m_conveyer.isReady();
-        if (m_shooter.isReadyToFeed() && pathReady) {
+        boolean releaseAllowed = ShotReleaseInterlock.mayRelease(
+            m_shooter.isReadyToFeed(),
+            m_conveyer.isReady(),
+            m_feeder.isReady(),
+            Telemetry.isHubActive(),
+            true);
+        if (releaseAllowed) {
             boolean conveyorStarted = m_conveyer.runConveyor();
             boolean feederStarted = conveyorStarted && m_feeder.feed();
             if (conveyorStarted && feederStarted) {

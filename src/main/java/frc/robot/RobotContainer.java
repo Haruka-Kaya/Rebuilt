@@ -30,6 +30,7 @@ import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.subsystems.VisionSubsystem;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.utils.NeutralAfterEnableGate;
+import frc.robot.utils.AsyncDiagnosticSink;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.FunctionalCommand;
 import edu.wpi.first.wpilibj2.command.RunCommand;
@@ -53,6 +54,7 @@ public class RobotContainer {
 
   private final NeutralAfterEnableGate m_teleopInputGate = new NeutralAfterEnableGate();
   private final NeutralAfterEnableGate m_climberInputGate = new NeutralAfterEnableGate();
+  private long m_teleopSafetySourceSignature;
 
   // The driver's controller
   private final CommandPS5Controller m_driverController = new CommandPS5Controller(OIConstants.kDriverControllerPort);
@@ -196,13 +198,6 @@ public class RobotContainer {
   }
 
   private boolean teleopInputsAllowed() {
-    int driverButtonCount = DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort);
-    int operatorButtonCount = DriverStation.getStickButtonCount(OIConstants.kOperatorControllerPort);
-    int maintenanceButtonCount = DriverStation.getStickButtonCount(
-        OIConstants.kMaintenanceControllerPort);
-    int sourceSignature = (driverButtonCount & 0xff)
-        | ((operatorButtonCount & 0xff) << 8)
-        | ((maintenanceButtonCount & 0xff) << 16);
     int[] driverButtons = {1, 4, 5, 6, 7, 8, 9, 12, 14};
     boolean anyPressed = false;
     for (int button : driverButtons) {
@@ -213,7 +208,24 @@ public class RobotContainer {
     anyPressed |= rawButtonPressed(
         m_maintenanceController, OIConstants.kMaintenanceControllerPort, 5);
     return m_teleopInputGate.allow(
-        DriverStation.isTeleopEnabled(), sourceSignature, anyPressed);
+        DriverStation.isTeleopEnabled(), m_teleopSafetySourceSignature, anyPressed);
+  }
+
+  /** Samples controller topology and mechanism health once before each scheduler iteration. */
+  public void updateTeleopSafetyState() {
+    long signature = DriverStation.getStickButtonCount(OIConstants.kDriverControllerPort) & 0xffL;
+    signature |= (DriverStation.getStickButtonCount(OIConstants.kOperatorControllerPort) & 0xffL)
+        << 8;
+    signature |= (DriverStation.getStickButtonCount(OIConstants.kMaintenanceControllerPort) & 0xffL)
+        << 16;
+    signature |= m_intake.isActuatorReferenced() ? 1L << 24 : 0L;
+    signature |= m_shooter.isActuatorReferenced() ? 1L << 25 : 0L;
+    signature |= m_turret.isPositionControlReadyForAutonomousAim() ? 1L << 26 : 0L;
+    signature |= m_turret.isVisionReadyForAutonomousAim() ? 1L << 27 : 0L;
+    signature |= m_feeder.isReady() ? 1L << 28 : 0L;
+    signature |= m_conveyor.isReady() ? 1L << 29 : 0L;
+    signature |= SparkMAXContainer.getReadyCanIdMask();
+    m_teleopSafetySourceSignature = signature;
   }
 
   private boolean operatorOrDriverPressed(
@@ -325,13 +337,24 @@ public class RobotContainer {
   }
 
   public void stopAll() {
-    drivetrain.requestIdle();
-    m_intake.stopAll();
-    m_conveyor.stop();
-    m_feeder.stop();
-    m_shooter.stop();
-    m_turret.stop();
-    m_climber.stop();
-    SmartDashboard.putBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false);
+    stopSafely("swerve", drivetrain::requestIdle);
+    stopSafely("intake", m_intake::stopAll);
+    stopSafely("conveyor", m_conveyor::stop);
+    stopSafely("feeder", m_feeder::stop);
+    stopSafely("shooter", m_shooter::stop);
+    stopSafely("turret", m_turret::stop);
+    stopSafely("climber", m_climber::stop);
+    stopSafely(
+        "climber diagnostic arm",
+        () -> SmartDashboard.putBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false));
+  }
+
+  private static void stopSafely(String target, Runnable stopAction) {
+    try {
+      stopAction.run();
+    } catch (RuntimeException exception) {
+      AsyncDiagnosticSink.log(
+          "STOP FAILED target=" + target + " error=" + exception.getClass().getSimpleName());
+    }
   }
 }

@@ -64,6 +64,23 @@
             }
           },
           {
+            "title": "Hub Active",
+            "x": 0.0,
+            "y": 384.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/Hub Active",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
             "title": "Field",
             "x": 128.0,
             "y": 0.0,
@@ -140,6 +157,23 @@
             "type": "Boolean Box",
             "properties": {
               "topic": "/SmartDashboard/Flywheel reved up",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
+            "title": "Hub Active",
+            "x": 0.0,
+            "y": 384.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/Hub Active",
               "period": 0.06,
               "data_type": "boolean",
               "true_color": 4283215696,
@@ -491,6 +525,62 @@
             "type": "Large Text Display",
             "properties": {
               "topic": "/SmartDashboard/Hardware Self-Test/Coverage",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Autonomous Selected",
+            "x": 0.0,
+            "y": 768.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Autonomous/Selected",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Scheduler Healthy",
+            "x": 384.0,
+            "y": 768.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/Runtime/Scheduler Healthy",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
+            "title": "Runtime Fault",
+            "x": 512.0,
+            "y": 768.0,
+            "width": 640.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Runtime/Fault",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Autonomous Last Result",
+            "x": 0.0,
+            "y": 896.0,
+            "width": 1152.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Autonomous/Last Result",
               "period": 0.06,
               "data_type": "string"
             }

@@ -706,6 +706,16 @@ public class SparkMAXContainer implements MotorContainer {
           if (failure == null) {
             failure = validateFollowerStatusLocked(status1.isFollower, now);
           }
+          if (failure == null) {
+            failure = SparkTelemetryValidator.failureReason(
+                status0.appliedOutput,
+                status0.voltage,
+                status0.current,
+                status0.motorTemperature,
+                encoder != null,
+                status2 == null ? Double.NaN : status2.primaryEncoderPosition,
+                status2 == null ? Double.NaN : status2.primaryEncoderVelocity);
+          }
         }
 
         if (reset) {
@@ -1021,6 +1031,17 @@ public class SparkMAXContainer implements MotorContainer {
       summary.put(device.port, device.getHealthSummary());
     }
     return summary.toString();
+  }
+
+  /** Cached readiness bit for each configured CAN ID, used to require release after recovery. */
+  public static long getReadyCanIdMask() {
+    long mask = 0L;
+    for (SparkMAXContainer device : DEVICES) {
+      if (device.port >= 0 && device.port < Long.SIZE - 1 && device.isReady()) {
+        mask |= 1L << device.port;
+      }
+    }
+    return mask;
   }
 
   /**

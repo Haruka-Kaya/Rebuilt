@@ -11,17 +11,30 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 import frc.robot.constants.Constants.AutoConstants;
 import org.junit.jupiter.api.Test;
 
 class AutoDeployAssetTest {
+  private static final Path BUILD_GRADLE = Path.of("build.gradle");
   private static final Path PATHPLANNER_DIRECTORY =
       Path.of("src", "main", "deploy", "pathplanner");
   private static final double RUNTIME_MAX_TRANSLATION_METERS_PER_SECOND = 0.512;
   private static final double RUNTIME_MAX_ANGULAR_DEGREES_PER_SECOND = 18.0;
+  private static final Set<String> REGISTERED_UNBOUNDED_NAMED_COMMANDS =
+      Set.of("Advanced Fire", "Slurp");
 
   private final ObjectMapper objectMapper = new ObjectMapper();
+
+  @Test
+  void deployRemovesStaleRobotFilesSoDeletedAutosCannotReappear() throws IOException {
+    String buildScript = Files.readString(BUILD_GRADLE);
+    assertTrue(
+        buildScript.contains("deleteOldFiles = true"),
+        "roboRIO deploy must remove stale .auto/.path files");
+  }
 
   @Test
   void autonomousRemainsFailClosedWhilePhysicalConfigurationIsUnverified() {
@@ -51,6 +64,38 @@ class AutoDeployAssetTest {
       assertTrue(
           Files.isRegularFile(PATHPLANNER_DIRECTORY.resolve("paths/" + pathName + ".path")),
           () -> "Referenced PathPlanner path is missing: " + pathName);
+    }
+  }
+
+  @Test
+  void everyDeployedAutoHasABoundedCompletionPathAndValidReferences() throws IOException {
+    Path autosDirectory = PATHPLANNER_DIRECTORY.resolve("autos");
+    List<Path> autos;
+    try (Stream<Path> files = Files.list(autosDirectory)) {
+      autos = files
+          .filter(path -> path.getFileName().toString().endsWith(".auto"))
+          .sorted()
+          .toList();
+    }
+    assertFalse(autos.isEmpty(), "At least one reviewed autonomous routine must be deployed");
+
+    for (Path autoPath : autos) {
+      JsonNode command = readJson(autoPath).path("command");
+      Set<String> referencedPaths = new HashSet<>();
+      Set<String> namedCommands = new HashSet<>();
+      collectReferences(command, referencedPaths, namedCommands);
+
+      assertTrue(
+          REGISTERED_UNBOUNDED_NAMED_COMMANDS.containsAll(namedCommands),
+          () -> autoPath + " references an unreviewed NamedCommand: " + namedCommands);
+      assertTrue(
+          isGuaranteedToFinish(command),
+          () -> autoPath + " can run forever because an unbounded NamedCommand is not bounded");
+      for (String pathName : referencedPaths) {
+        assertTrue(
+            Files.isRegularFile(PATHPLANNER_DIRECTORY.resolve("paths/" + pathName + ".path")),
+            () -> autoPath + " references missing path " + pathName);
+      }
     }
   }
 
@@ -88,5 +133,30 @@ class AutoDeployAssetTest {
         }
       }
     }
+  }
+
+  private static boolean isGuaranteedToFinish(JsonNode command) {
+    String type = command.path("type").asText();
+    JsonNode children = command.at("/data/commands");
+    return switch (type) {
+      case "path", "wait", "none" -> true;
+      case "named" -> false;
+      case "sequential", "parallel" ->
+          children.isArray()
+              && !children.isEmpty()
+              && stream(children).allMatch(AutoDeployAssetTest::isGuaranteedToFinish);
+      case "deadline" ->
+          children.isArray()
+              && !children.isEmpty()
+              && isGuaranteedToFinish(children.get(0));
+      case "race" ->
+          children.isArray()
+              && stream(children).anyMatch(AutoDeployAssetTest::isGuaranteedToFinish);
+      default -> false;
+    };
+  }
+
+  private static Stream<JsonNode> stream(JsonNode array) {
+    return java.util.stream.StreamSupport.stream(array.spliterator(), false);
   }
 }

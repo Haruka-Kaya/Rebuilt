@@ -28,6 +28,7 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj.util.Color;
 import edu.wpi.first.wpilibj.util.Color8Bit;
 import frc.robot.utils.LatestValueMailbox;
+import frc.robot.utils.HubActivationPolicy;
 public class Telemetry {
     private static final double PUBLISH_PERIOD_SECONDS = 0.05;
     private static final long CAPTURE_PERIOD_NANOSECONDS = 50_000_000L;
@@ -169,67 +170,13 @@ public class Telemetry {
     }
 
     public static boolean isHubActive() {
-        if(!DriverStation.isFMSAttached()) {
-            // If we're not on the field, we have no way of knowing, assume hub is active for testing.
-            return true;
-        }
-
         Optional<Alliance> alliance = DriverStation.getAlliance();
-        // If we have no alliance, we cannot be enabled, therefore no hub.
-        if (alliance.isEmpty()) {
-            return false;
-        }
-        // Hub is always enabled in autonomous.
-        if (DriverStation.isAutonomousEnabled()) {
-            return true;
-        }
-        // At this point, if we're not teleop enabled, there is no hub.
-        if (!DriverStation.isTeleopEnabled()) {
-            return false;
-        }
-
-        // We're teleop enabled, compute.
-        double matchTime = DriverStation.getMatchTime();
-        String gameData = DriverStation.getGameSpecificMessage();
-        // If we have no game data, we cannot compute, assume hub is active, as its likely early in teleop.
-        if (gameData.isEmpty()) {
-            return true;
-        }
-        boolean redInactiveFirst = false;
-        switch (gameData.charAt(0)) {
-            case 'R' -> redInactiveFirst = true;
-            case 'B' -> redInactiveFirst = false;
-            default -> {
-            // If we have invalid game data, assume hub is active.
-            return true;
-            }
-        }
-
-        // Shift was is active for blue if red won auto, or red if blue won auto.
-        boolean shift1Active = switch (alliance.get()) {
-            case Red -> !redInactiveFirst;
-            case Blue -> redInactiveFirst;
-        };
-
-        if (matchTime > 130) {
-            // Transition shift, hub is active.
-            return true;
-        } else if (matchTime > 105) {
-            // Shift 1
-            return shift1Active;
-        } else if (matchTime > 80) {
-            // Shift 2
-            return !shift1Active;
-        } else if (matchTime > 55) {
-            // Shift 3
-            return shift1Active;
-        } else if (matchTime > 30) {
-            // Shift 4
-            return !shift1Active;
-        } else {
-            // End game, hub always active.
-            return true;
-        }
+        return HubActivationPolicy.isActive(
+            alliance.orElse(null),
+            DriverStation.isAutonomousEnabled(),
+            DriverStation.isTeleopEnabled(),
+            DriverStation.getMatchTime(),
+            DriverStation.getGameSpecificMessage());
     }
 
     public static boolean isRedAlliance() {

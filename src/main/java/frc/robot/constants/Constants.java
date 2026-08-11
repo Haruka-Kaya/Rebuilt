@@ -97,6 +97,12 @@ public final class Constants {
      */
     public static final boolean FEEDER_MOTION_BLOCKED_KNOWN_STALL = true;
 
+    /**
+     * Enable only after the physical jam/power branch is inspected. This permits the guarded 3%
+     * Hardware Self-Test stage while normal feed/reject remains blocked by the flag above.
+     */
+    public static final boolean FEEDER_CONTROLLED_RETEST_ENABLED = false;
+
     // Motor speeds from -1 to +1
     public static final double CONVEYOR_IN_SPEED = 0.75;
     public static final double CONVEYOR_OUT_SPEED = -0.75;
@@ -153,8 +159,8 @@ public final class Constants {
   }
 
   public static final class AprilTagConstants {
-    public static final int[] VALID_RED_HUB_TAG_IDS = {2, 5, 8, 9, 10, 11};
-    public static final int[] VALID_BLUE_HUB_TAG_IDS = {18, 19, 20, 21, 25, 26};
+    public static final int[] VALID_RED_HUB_TAG_IDS = {2, 3, 4, 5, 8, 9, 10, 11};
+    public static final int[] VALID_BLUE_HUB_TAG_IDS = {18, 19, 20, 21, 24, 25, 26, 27};
   }
 
   public static final class TurretConstants {

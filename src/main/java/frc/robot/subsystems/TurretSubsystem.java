@@ -1,21 +1,19 @@
 package frc.robot.subsystems;
 
 
-import java.util.Arrays;
 import java.util.OptionalDouble;
 
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj.DriverStation;
-import edu.wpi.first.wpilibj.DriverStation.Alliance;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.TurretConstants;
-import frc.robot.constants.Constants.AprilTagConstants;
 import frc.robot.subsystems.VisionSubsystem.TargetObservation;
 import frc.robot.utils.DashboardApplyGate;
 import frc.robot.utils.DashboardApplyGate.Decision;
 import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.HubTagFilter;
 
 public class TurretSubsystem extends SubsystemBase {
     private static final String TUNING_APPLY_KEY = "Tuning/Turret/Apply";
@@ -124,10 +122,7 @@ public class TurretSubsystem extends SubsystemBase {
         }
 
         TargetObservation target = observation.get();
-        int[] validTagIds = alliance.get() == Alliance.Red
-            ? AprilTagConstants.VALID_RED_HUB_TAG_IDS
-            : AprilTagConstants.VALID_BLUE_HUB_TAG_IDS;
-        if (Arrays.stream(validTagIds).noneMatch(id -> id == target.tagId())) {
+        if (!HubTagFilter.isHubTagForAlliance(alliance.get(), target.tagId())) {
             stop();
             return;
         }

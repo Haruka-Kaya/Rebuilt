@@ -35,6 +35,18 @@ class OperatorAssetTest {
           "/SmartDashboard/Autonomous/Status",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
+          "/SmartDashboard/Autonomous/Selected",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Autonomous/Last Result",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Runtime/Scheduler Healthy",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Runtime/Fault",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
           "/SmartDashboard/Hardware Self-Test/Armed",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
@@ -117,6 +129,15 @@ class OperatorAssetTest {
   }
 
   @Test
+  void bothAllianceLayoutsExposeTheHubReleaseInterlock() throws IOException {
+    JsonNode root = objectMapper.readTree(COMP_LAYOUT.toFile());
+
+    assertAll(
+        () -> assertTabContainsTopic(root, "Red Alliance", "/SmartDashboard/Hub Active"),
+        () -> assertTabContainsTopic(root, "Blue Alliance", "/SmartDashboard/Hub Active"));
+  }
+
+  @Test
   void simulatedControllersCoverEveryProductionButtonBinding() throws IOException {
     JsonNode joysticks = objectMapper.readTree(SIM_DRIVER_STATION.toFile())
         .path("keyboardJoysticks");
@@ -140,6 +161,16 @@ class OperatorAssetTest {
       }
     }
     return null;
+  }
+
+  private static void assertTabContainsTopic(JsonNode root, String tabName, String topic) {
+    JsonNode tab = findTab(root, tabName);
+    assertNotNull(tab, tabName + " tab is missing");
+    boolean found = false;
+    for (JsonNode widget : tab.at("/grid_layout/containers")) {
+      found |= topic.equals(widget.at("/properties/topic").asText());
+    }
+    assertTrue(found, () -> tabName + " is missing " + topic);
   }
 
   private static void assertControllerMapping(

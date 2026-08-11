@@ -32,11 +32,13 @@ public class AdvancedFireCommand extends Command {
         m_turret.autoAimWithLimelight();
         m_shooter.prepareToFire();
 
-        boolean pathReady = m_feeder.isReady() && m_conveyer.isReady();
-        if(m_shooter.isReadyToFeed()
-                && m_turret.isOnTarget()
-                && Telemetry.isHubActive()
-                && pathReady) {
+        boolean releaseAllowed = ShotReleaseInterlock.mayRelease(
+            m_shooter.isReadyToFeed(),
+            m_conveyer.isReady(),
+            m_feeder.isReady(),
+            Telemetry.isHubActive(),
+            m_turret.isOnTarget());
+        if (releaseAllowed) {
             boolean conveyorStarted = m_conveyer.runConveyor();
             boolean feederStarted = conveyorStarted && m_feeder.feed();
             if (conveyorStarted && feederStarted) {

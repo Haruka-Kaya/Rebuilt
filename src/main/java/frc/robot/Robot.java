@@ -14,6 +14,7 @@ import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.commands.HardwareSelfTestCommand;
 import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.OneShotTimedArmGate;
+import frc.robot.utils.RuntimeSafetyLatch;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.constants.Constants.HardwareTestConstants;
 
@@ -29,6 +30,8 @@ public class Robot extends TimedRobot {
 
   private RobotContainer m_robotContainer;
   private double m_nextDiagnosticTimestamp;
+  private double m_nextOperatorStatusTimestamp;
+  private final RuntimeSafetyLatch m_runtimeSafetyLatch = new RuntimeSafetyLatch();
   private final OneShotTimedArmGate m_selfTestArmGate = new OneShotTimedArmGate(
       HardwareTestConstants.ARM_LIFETIME_SECONDS);
 
@@ -44,6 +47,9 @@ public class Robot extends TimedRobot {
     m_robotContainer = new RobotContainer();
     SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
     SmartDashboard.putBoolean(HardwareSelfTestCommand.RUNNING_KEY, false);
+    SmartDashboard.putBoolean("Hub Active", false);
+    SmartDashboard.putBoolean("Runtime/Scheduler Healthy", true);
+    SmartDashboard.putString("Runtime/Fault", "HEALTHY");
   }
 
   /**
@@ -55,54 +61,73 @@ public class Robot extends TimedRobot {
    */
   @Override
   public void robotPeriodic() {
-    SparkMAXContainer.serviceAll();
+    if (!m_runtimeSafetyLatch.healthy()) {
+      enforceLatchedStop();
+      return;
+    }
 
-    // Runs the Scheduler.  This is responsible for polling buttons, adding newly-scheduled
-    // commands, running already-scheduled commands, removing finished or interrupted commands,
-    // and running subsystem periodic() methods.  This must be called from the robot's periodic
-    // block in order for anything in the Command-based framework to work.
-    CommandScheduler.getInstance().run();
-    m_robotContainer.refreshAutonomousStatus();
+    try {
+      SparkMAXContainer.serviceAll();
+      m_robotContainer.updateTeleopSafetyState();
 
-    boolean armRequested = SmartDashboard.getBoolean("Hardware Self-Test/Armed", false);
-    boolean armValid = m_selfTestArmGate.observe(
-        armRequested,
-        DriverStation.isDisabled()
-            && DriverStation.isTest()
-            && !DriverStation.isFMSAttached(),
-        Timer.getFPGATimestamp());
-    SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", armValid);
+      // Runs the Scheduler.  This is responsible for polling buttons, adding newly-scheduled
+      // commands, running already-scheduled commands, removing finished or interrupted commands,
+      // and running subsystem periodic() methods.  This must be called from the robot's periodic
+      // block in order for anything in the Command-based framework to work.
+      CommandScheduler.getInstance().run();
+      m_robotContainer.refreshAutonomousStatus();
 
-    if (!DriverStation.isFMSAttached() && Timer.getFPGATimestamp() >= m_nextDiagnosticTimestamp) {
-      var canStatus = RobotController.getCANStatus();
-      AsyncDiagnosticSink.log(String.format(
-          "DIAGNOSTICS ds=%s enabled=%s voltage=%.2fV canUtil=%.1f%% busOff=%d txFull=%d rxErr=%d txErr=%d "
-              + "sticks=[0:'%s' a%d b%d; 1:'%s' a%d b%d; 2:'%s' a%d b%d] "
-              + "spark=%s ctre=[%s]",
-          DriverStation.isDSAttached(), DriverStation.isEnabled(), RobotController.getBatteryVoltage(),
-          canStatus.percentBusUtilization * 100.0, canStatus.busOffCount, canStatus.txFullCount,
-          canStatus.receiveErrorCount, canStatus.transmitErrorCount,
-          DriverStation.getJoystickName(0), DriverStation.getStickAxisCount(0),
-          DriverStation.getStickButtonCount(0),
-          DriverStation.getJoystickName(1), DriverStation.getStickAxisCount(1),
-          DriverStation.getStickButtonCount(1),
-          DriverStation.getJoystickName(2), DriverStation.getStickAxisCount(2),
-          DriverStation.getStickButtonCount(2),
-          m_robotContainer.getSparkDeviceHealthSummary(),
-          m_robotContainer.getSwerveDeviceHealthSummary()));
-      m_nextDiagnosticTimestamp = Timer.getFPGATimestamp() + 5.0;
+      boolean armRequested = SmartDashboard.getBoolean("Hardware Self-Test/Armed", false);
+      boolean armValid = m_selfTestArmGate.observe(
+          armRequested,
+          DriverStation.isDisabled()
+              && DriverStation.isTest()
+              && !DriverStation.isFMSAttached(),
+          Timer.getFPGATimestamp());
+      SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", armValid);
+
+      double now = Timer.getFPGATimestamp();
+      if (now >= m_nextOperatorStatusTimestamp) {
+        SmartDashboard.putBoolean(
+            "Hub Active", DriverStation.isEnabled() && Telemetry.isHubActive());
+        m_nextOperatorStatusTimestamp = now + 0.10;
+      }
+
+      if (!DriverStation.isFMSAttached() && now >= m_nextDiagnosticTimestamp) {
+        var canStatus = RobotController.getCANStatus();
+        AsyncDiagnosticSink.log(String.format(
+            "DIAGNOSTICS ds=%s enabled=%s voltage=%.2fV canUtil=%.1f%% busOff=%d txFull=%d rxErr=%d txErr=%d "
+                + "sticks=[0:'%s' a%d b%d; 1:'%s' a%d b%d; 2:'%s' a%d b%d] "
+                + "spark=%s ctre=[%s]",
+            DriverStation.isDSAttached(), DriverStation.isEnabled(), RobotController.getBatteryVoltage(),
+            canStatus.percentBusUtilization * 100.0, canStatus.busOffCount, canStatus.txFullCount,
+            canStatus.receiveErrorCount, canStatus.transmitErrorCount,
+            DriverStation.getJoystickName(0), DriverStation.getStickAxisCount(0),
+            DriverStation.getStickButtonCount(0),
+            DriverStation.getJoystickName(1), DriverStation.getStickAxisCount(1),
+            DriverStation.getStickButtonCount(1),
+            DriverStation.getJoystickName(2), DriverStation.getStickAxisCount(2),
+            DriverStation.getStickButtonCount(2),
+            m_robotContainer.getSparkDeviceHealthSummary(),
+            m_robotContainer.getSwerveDeviceHealthSummary()));
+        m_nextDiagnosticTimestamp = now + 5.0;
+      }
+    } catch (RuntimeException exception) {
+      latchRuntimeFault(exception);
     }
   }
 
   /** This function is called once each time the robot enters Disabled mode. */
   @Override
   public void disabledInit() {
-    if (m_hardwareSelfTest != null) {
-      m_hardwareSelfTest.cancel();
-      m_hardwareSelfTest = null;
-    }
-    clearSelfTestArm();
-    m_robotContainer.stopAll();
+    runLifecycleSafely(() -> {
+      if (m_hardwareSelfTest != null) {
+        m_hardwareSelfTest.cancel();
+        m_hardwareSelfTest = null;
+      }
+      clearSelfTestArm();
+      m_robotContainer.stopAll();
+    });
   }
 
   @Override
@@ -111,9 +136,10 @@ public class Robot extends TimedRobot {
   /** This autonomous runs the autonomous command selected by your {@link RobotContainer} class. */
   @Override
   public void autonomousInit() {
-    clearSelfTestArm();
-    m_robotContainer.stopAll();
-    m_autonomousCommand = m_robotContainer.getAutonomousCommand();
+    runLifecycleSafely(() -> {
+      clearSelfTestArm();
+      m_robotContainer.stopAll();
+      m_autonomousCommand = m_robotContainer.getAutonomousCommand();
 
     /*
      * String autoSelected = SmartDashboard.getString("Auto Selector",
@@ -123,30 +149,40 @@ public class Robot extends TimedRobot {
      */
 
     // schedule the autonomous command (example)
-    if (m_autonomousCommand != null) {
-      CommandScheduler.getInstance().schedule(m_autonomousCommand);
-    }
+      if (m_autonomousCommand != null) {
+        CommandScheduler.getInstance().schedule(m_autonomousCommand);
+      }
+    });
   }
 
   /** This function is called periodically during autonomous. */
   @Override
   public void autonomousPeriodic() {
-    if (m_robotContainer.shouldAbortActiveAutonomous()) {
+    runLifecycleSafely(() -> {
+      if (m_autonomousCommand == null) {
+        return;
+      }
+      if (!CommandScheduler.getInstance().isScheduled(m_autonomousCommand)) {
+        m_autonomousCommand = null;
+        return;
+      }
+      if (m_robotContainer.shouldAbortActiveAutonomous()) {
+        m_autonomousCommand.cancel();
+        m_autonomousCommand = null;
+        m_robotContainer.stopAll();
+      }
+    });
+  }
+
+  @Override
+  public void autonomousExit() {
+    runLifecycleSafely(() -> {
       if (m_autonomousCommand != null) {
         m_autonomousCommand.cancel();
         m_autonomousCommand = null;
       }
       m_robotContainer.stopAll();
-    }
-  }
-
-  @Override
-  public void autonomousExit() {
-    if (m_autonomousCommand != null) {
-      m_autonomousCommand.cancel();
-      m_autonomousCommand = null;
-    }
-    m_robotContainer.stopAll();
+    });
   }
 
   @Override
@@ -155,12 +191,14 @@ public class Robot extends TimedRobot {
     // teleop starts running. If you want the autonomous to
     // continue until interrupted by another command, remove
     // this line or comment it out.
-    if (m_autonomousCommand != null) {
-      m_autonomousCommand.cancel();
-      m_autonomousCommand = null;
-    }
-    clearSelfTestArm();
-    m_robotContainer.stopAll();
+    runLifecycleSafely(() -> {
+      if (m_autonomousCommand != null) {
+        m_autonomousCommand.cancel();
+        m_autonomousCommand = null;
+      }
+      clearSelfTestArm();
+      m_robotContainer.stopAll();
+    });
   }
 
   /** This function is called periodically during operator control. */
@@ -169,17 +207,19 @@ public class Robot extends TimedRobot {
 
   @Override
   public void testInit() {
-    // Cancels all running commands at the start of test mode.
-    CommandScheduler.getInstance().cancelAll();
-    m_robotContainer.stopAll();
-    boolean armAccepted = !DriverStation.isFMSAttached()
-        && SmartDashboard.getBoolean("Hardware Self-Test/Armed", false)
-        && m_selfTestArmGate.consume(Timer.getFPGATimestamp());
-    clearSelfTestArm();
-    if (armAccepted) {
-      m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand();
-      CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
-    }
+    runLifecycleSafely(() -> {
+      // Cancels all running commands at the start of test mode.
+      CommandScheduler.getInstance().cancelAll();
+      m_robotContainer.stopAll();
+      boolean armAccepted = !DriverStation.isFMSAttached()
+          && SmartDashboard.getBoolean("Hardware Self-Test/Armed", false)
+          && m_selfTestArmGate.consume(Timer.getFPGATimestamp());
+      clearSelfTestArm();
+      if (armAccepted) {
+        m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand();
+        CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
+      }
+    });
   }
 
   /** This function is called periodically during test mode. */
@@ -188,17 +228,53 @@ public class Robot extends TimedRobot {
 
   @Override
   public void testExit() {
-    if (m_hardwareSelfTest != null) {
-      m_hardwareSelfTest.cancel();
-      m_hardwareSelfTest = null;
-    }
-    clearSelfTestArm();
-    m_robotContainer.stopAll();
+    runLifecycleSafely(() -> {
+      if (m_hardwareSelfTest != null) {
+        m_hardwareSelfTest.cancel();
+        m_hardwareSelfTest = null;
+      }
+      clearSelfTestArm();
+      m_robotContainer.stopAll();
+    });
   }
 
   private void clearSelfTestArm() {
     SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
     SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", false);
     m_selfTestArmGate.requireRelease();
+  }
+
+  private void runLifecycleSafely(Runnable action) {
+    if (!m_runtimeSafetyLatch.healthy()) {
+      enforceLatchedStop();
+      return;
+    }
+    try {
+      action.run();
+    } catch (RuntimeException exception) {
+      latchRuntimeFault(exception);
+    }
+  }
+
+  private void latchRuntimeFault(RuntimeException exception) {
+    RuntimeSafetyLatch.Snapshot fault = m_runtimeSafetyLatch.latch(exception);
+    enforceLatchedStop();
+    try {
+      SmartDashboard.putBoolean("Runtime/Scheduler Healthy", false);
+      SmartDashboard.putString("Runtime/Fault", fault.reason());
+    } catch (RuntimeException ignored) {
+      // The output stop remains authoritative if NetworkTables itself is the failed component.
+    }
+    AsyncDiagnosticSink.log("RUNTIME FAULT latched=" + fault.reason());
+  }
+
+  private void enforceLatchedStop() {
+    m_robotContainer.stopAll();
+    try {
+      // SPARK stops are queued so the dedicated worker can preserve zero/nonzero ordering.
+      SparkMAXContainer.serviceAll();
+    } catch (RuntimeException ignored) {
+      // Keep retrying the stop request on later robot periods without re-entering the scheduler.
+    }
   }
 }
