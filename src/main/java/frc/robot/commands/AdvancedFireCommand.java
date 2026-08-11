@@ -24,13 +24,13 @@ public class AdvancedFireCommand extends Command {
 
     @Override
     public void initialize() {
-        m_shooter.setShooterSpeed();
+        m_shooter.prepareToFire();
     }
 
     @Override
     public void execute() {
         m_turret.autoAimWithLimelight();
-        m_shooter.setShooterSpeed();    // remove in prod
+        m_shooter.prepareToFire();
 
         boolean pathReady = m_feeder.isReady() && m_conveyer.isReady();
         if(m_shooter.isReadyToFeed()

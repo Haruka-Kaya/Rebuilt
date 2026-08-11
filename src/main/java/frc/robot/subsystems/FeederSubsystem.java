@@ -28,13 +28,24 @@ public class FeederSubsystem extends SubsystemBase {
         SmartDashboard.putNumber("Set feeder reject percent", -0.15);
         SmartDashboard.putBoolean(TUNING_APPLY_KEY, false);
         SmartDashboard.putString(TUNING_STATUS_KEY, "ACTIVE_DEFAULTS");
+        SmartDashboard.putBoolean(
+            "Feeder/Known Fault Motion Blocked",
+            ManipulatorConstants.FEEDER_MOTION_BLOCKED_KNOWN_STALL);
     }
 
     public boolean feed() {
+        if (isMotionBlocked()) {
+            m_feeder.stop();
+            return false;
+        }
         return m_feeder.setDutyCycle(feedPercent);
     }
 
     public void reject() {
+        if (isMotionBlocked()) {
+            m_feeder.stop();
+            return;
+        }
         m_feeder.setDutyCycle(rejectPercent);
     }
 
@@ -43,11 +54,16 @@ public class FeederSubsystem extends SubsystemBase {
     }
 
     public boolean isReady() {
-        return m_feeder.isReady();
+        return !isMotionBlocked() && m_feeder.isReady();
     }
 
     public String getDiagnosticStatus() {
-        return m_feeder.getDiagnosticStatus();
+        String status = m_feeder.getDiagnosticStatus();
+        return isMotionBlocked() ? status + "/MOTION_BLOCKED_KNOWN_STALL" : status;
+    }
+
+    private static boolean isMotionBlocked() {
+        return ManipulatorConstants.FEEDER_MOTION_BLOCKED_KNOWN_STALL;
     }
 
     @Override

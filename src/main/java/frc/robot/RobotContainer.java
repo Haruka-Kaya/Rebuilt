@@ -166,6 +166,10 @@ public class RobotContainer {
           + (output ? 1 : 0)
           + (firePressed ? 1 : 0)
           + (retract ? 1 : 0);
+      if (pressedCount > 1) {
+        m_teleopInputGate.blockUntilNeutral();
+        return false;
+      }
       if (pressedCount != 1) {
         return false;
       }

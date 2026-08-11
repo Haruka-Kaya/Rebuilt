@@ -14,12 +14,12 @@ public class RevUpCommand extends Command {
 
     @Override
     public void initialize() {
-
+        m_shooter.prepareToFire();
     }
 
     @Override
     public void execute() {
-        m_shooter.setShooterSpeed();
+        m_shooter.prepareToFire();
     }
 
     @Override

@@ -154,8 +154,9 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   /**
-   * Enqueues at most one asynchronous SPARK operation. This method never performs blocking CAN
-   * reads or configuration on the robot main thread.
+   * Enqueues at most one asynchronous SPARK worker turn. A turn drains a device-count-bounded
+   * batch of immediately due zero writes before releasing the worker, while blocking CAN reads and
+   * configuration stay off the robot main thread.
    */
   public static void serviceAll() {
     double now = Timer.getFPGATimestamp();
@@ -174,7 +175,8 @@ public class SparkMAXContainer implements MotorContainer {
 
     ZeroWork zeroWork = selectZeroWork(now);
     if (zeroWork != null) {
-      if (!IO_WORKER.submit(() -> runZeroWork(zeroWork))) {
+      if (!IO_WORKER.submitDraining(
+          () -> runZeroWork(zeroWork), SparkMAXContainer::runNextZeroWork, DEVICES.size())) {
         zeroWork.device().zeroCancelled();
       }
       return;
@@ -193,7 +195,10 @@ public class SparkMAXContainer implements MotorContainer {
     if (selected.isPresent()) {
       ConfigurationWork work = DEVICES.get(selected.getAsInt()).beginConfigurationWork(now);
       if (work != null) {
-        if (!IO_WORKER.submit(() -> runConfigurationWork(work))) {
+        if (!IO_WORKER.submitDraining(
+            () -> runConfigurationWork(work),
+            SparkMAXContainer::runNextZeroWork,
+            DEVICES.size())) {
           work.device().configurationCancelled();
         }
         return;
@@ -202,7 +207,8 @@ public class SparkMAXContainer implements MotorContainer {
 
     SampleWork sample = selectSampleWork(now);
     if (sample != null) {
-      if (!IO_WORKER.submit(() -> runSampleWork(sample))) {
+      if (!IO_WORKER.submitDraining(
+          () -> runSampleWork(sample), SparkMAXContainer::runNextZeroWork, DEVICES.size())) {
         sample.device().sampleCancelled();
       }
     }
@@ -232,6 +238,16 @@ public class SparkMAXContainer implements MotorContainer {
       }
     }
     return null;
+  }
+
+  /** Drains one due zero on the existing single worker; false means backoff or no pending stop. */
+  private static boolean runNextZeroWork() {
+    ZeroWork work = selectZeroWork(Timer.getFPGATimestamp());
+    if (work == null) {
+      return false;
+    }
+    runZeroWork(work);
+    return true;
   }
 
   private ZeroWork beginZeroWork(double now) {
@@ -269,8 +285,20 @@ public class SparkMAXContainer implements MotorContainer {
     }
 
     // Vendor calls run with no application lock held. zeroInFlight blocks all nonzero commands.
-    REVLibError result = device.sendSetpointTracked(0.0, ControlType.kDutyCycle);
+    REVLibError result;
+    String zeroException = null;
+    try {
+      result = device.sendSetpointTracked(0.0, ControlType.kDutyCycle);
+      if (result == null) {
+        result = REVLibError.kError;
+        zeroException = "zero returned null";
+      }
+    } catch (RuntimeException exception) {
+      result = REVLibError.kError;
+      zeroException = "zero exception " + exception.getClass().getSimpleName();
+    }
     REVLibError resumeResult = null;
+    String resumeException = null;
     if (result == REVLibError.kOk) {
       boolean resumeAfterZero;
       synchronized (OUTPUT_ORDER_LOCK) {
@@ -280,9 +308,24 @@ public class SparkMAXContainer implements MotorContainer {
         }
       }
       if (resumeAfterZero) {
-        resumeResult = device.motor.resumeFollowerMode();
+        try {
+          resumeResult = device.motor.resumeFollowerMode();
+          if (resumeResult == null) {
+            resumeResult = REVLibError.kError;
+            resumeException = "follower resume returned null";
+          }
+        } catch (RuntimeException exception) {
+          resumeResult = REVLibError.kError;
+          resumeException = "follower resume exception "
+              + exception.getClass().getSimpleName();
+        }
       }
     }
+
+    String zeroFailure = result == REVLibError.kOk
+        ? null : (zeroException != null ? zeroException : "zero " + result);
+    String resumeFailure = resumeResult == null || resumeResult == REVLibError.kOk
+        ? null : (resumeException != null ? resumeException : "follower resume " + resumeResult);
 
     SparkMAXContainer leaderToRevoke = null;
     String dependentFailure = null;
@@ -298,20 +341,20 @@ public class SparkMAXContainer implements MotorContainer {
           // retry so an old completion can never certify a newer output epoch.
           device.zeroInFlight = false;
           device.outputGate.requireZero(now, true);
-          if (result != REVLibError.kOk) {
-            device.recordFailureLocked(now, "zero " + result, false);
-          } else if (resumeResult != null && resumeResult != REVLibError.kOk) {
-            device.recordFailureLocked(now, "follower resume " + resumeResult, false);
+          if (zeroFailure != null) {
+            device.recordFailureLocked(now, zeroFailure, false);
+          } else if (resumeFailure != null) {
+            device.recordFailureLocked(now, resumeFailure, false);
           }
         } else {
           device.completeZeroLocked(result, resumeResult, now);
         }
-        if (result != REVLibError.kOk) {
+        if (zeroFailure != null) {
           leaderToRevoke = device.desiredFollower ? device.followerLeader : null;
-          dependentFailure = "zero " + result;
-        } else if (resumeResult != null && resumeResult != REVLibError.kOk) {
+          dependentFailure = zeroFailure;
+        } else if (resumeFailure != null) {
           leaderToRevoke = device.desiredFollower ? device.followerLeader : null;
-          dependentFailure = "follower resume " + resumeResult;
+          dependentFailure = resumeFailure;
         }
       }
       leaderZeroWork = revokeLeaderForDependentLocked(
@@ -324,10 +367,10 @@ public class SparkMAXContainer implements MotorContainer {
     if (leaderZeroWork != null) {
       runZeroWork(leaderZeroWork);
     }
-    if (result != REVLibError.kOk) {
-      device.logState("zero " + result);
-    } else if (resumeResult != null && resumeResult != REVLibError.kOk) {
-      device.logState("follower resume " + resumeResult);
+    if (zeroFailure != null) {
+      device.logState(zeroFailure);
+    } else if (resumeFailure != null) {
+      device.logState(resumeFailure);
     }
   }
 
