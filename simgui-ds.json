@@ -1,4 +1,21 @@
 {
+  "robotJoysticks": [
+    {
+      "guid": "Keyboard0",
+      "useGamepad": false
+    },
+    {
+      "guid": "Keyboard1",
+      "useGamepad": false
+    },
+    {
+      "guid": "Keyboard2",
+      "useGamepad": false
+    },
+    {},
+    {},
+    {}
+  ],
   "keyboardJoysticks": [
     {
       "axisConfig": [

@@ -2,11 +2,13 @@ package frc.robot;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import frc.robot.commands.HardwareSelfTestCommand;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -69,6 +71,9 @@ class OperatorAssetTest {
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
           "/SmartDashboard/Hardware Self-Test/CAN Results",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Abort Reason",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
           "/SmartDashboard/Climber Diagnostic/Armed",
@@ -139,10 +144,15 @@ class OperatorAssetTest {
 
   @Test
   void simulatedControllersCoverEveryProductionButtonBinding() throws IOException {
-    JsonNode joysticks = objectMapper.readTree(SIM_DRIVER_STATION.toFile())
-        .path("keyboardJoysticks");
+    JsonNode root = objectMapper.readTree(SIM_DRIVER_STATION.toFile());
+    JsonNode joysticks = root.path("keyboardJoysticks");
+    JsonNode robotJoysticks = root.path("robotJoysticks");
 
     assertAll(
+        () -> assertEquals(6, robotJoysticks.size(), "HAL robot joystick assignment count"),
+        () -> assertRobotControllerAssignment(robotJoysticks, DRIVER_PORT, "Keyboard0"),
+        () -> assertRobotControllerAssignment(robotJoysticks, OPERATOR_PORT, "Keyboard1"),
+        () -> assertRobotControllerAssignment(robotJoysticks, MAINTENANCE_PORT, "Keyboard2"),
         () -> assertControllerMapping(
             joysticks.get(DRIVER_PORT), REQUIRED_DRIVER_BUTTONS, REQUIRED_DRIVER_AXES,
             "driver port 0"),
@@ -152,6 +162,20 @@ class OperatorAssetTest {
         () -> assertControllerMapping(
             joysticks.get(MAINTENANCE_PORT), REQUIRED_MAINTENANCE_BUTTONS, 0,
             "maintenance port 2"));
+  }
+
+  @Test
+  void hardwareSelfTestCoverageUsesTheExactCtreDeviceSet() throws ReflectiveOperationException {
+    var coverageField = HardwareSelfTestCommand.class.getDeclaredField("COVERAGE_MANIFEST");
+    coverageField.setAccessible(true);
+    String coverage = (String) coverageField.get(null);
+
+    assertAll(
+        () -> assertTrue(
+            coverage.contains("CTRE20,40-43,50-57 swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY"),
+            "Coverage must list only the configured Pigeon, CANcoder, steer, and drive IDs"),
+        () -> assertFalse(coverage.contains("CTRE20/40-57"),
+            "Coverage must not imply nonexistent CTRE IDs 44-49"));
   }
 
   private static JsonNode findTab(JsonNode root, String name) {
@@ -190,6 +214,19 @@ class OperatorAssetTest {
         () -> assertEquals(buttonCount, uniqueKeys.size(), description + " button keys must be distinct"),
         () -> buttonKeys.forEach(key -> assertTrue(
             isValidGlfwKey(key.asInt()), description + " contains invalid GLFW key " + key.asInt())));
+  }
+
+  private static void assertRobotControllerAssignment(
+      JsonNode robotJoysticks, int port, String expectedGuid) {
+    JsonNode assignment = robotJoysticks.get(port);
+    assertNotNull(assignment, "robot joystick port " + port + " is missing");
+    assertAll(
+        () -> assertEquals(expectedGuid, assignment.path("guid").asText(),
+            "robot joystick port " + port + " GUID"),
+        () -> assertTrue(assignment.has("useGamepad"),
+            "robot joystick port " + port + " must persist useGamepad"),
+        () -> assertFalse(assignment.path("useGamepad").asBoolean(),
+            "keyboard joystick port " + port + " must not use gamepad mapping"));
   }
 
   private static boolean isValidGlfwKey(int key) {

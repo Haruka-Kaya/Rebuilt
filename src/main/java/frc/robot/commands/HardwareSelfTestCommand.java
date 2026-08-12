@@ -54,7 +54,7 @@ public final class HardwareSelfTestCommand {
         "Spark37 follower=ISOLATED_STAGE",
         "Spark38 shooter actuator=SKIP_UNREFERENCED",
         "Spark39 turret=SKIP_UNREFERENCED",
-        "CTRE20/40-57 swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY");
+        "CTRE20,40-43,50-57 swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY");
 
     private static final List<String> RESULT_TARGETS = List.of(
         "SPARK_ID30_INTAKE_ACTUATOR",
@@ -97,6 +97,7 @@ public final class HardwareSelfTestCommand {
                 SmartDashboard.putNumber("Hardware Self-Test/Run ID", Timer.getFPGATimestamp());
                 SmartDashboard.putString("Hardware Self-Test/Coverage", COVERAGE_MANIFEST);
                 SmartDashboard.putString("Hardware Self-Test/Overall", "RUNNING");
+                SmartDashboard.putString("Hardware Self-Test/Abort Reason", "NONE");
                 log("BEGIN", "motion evidence is not direction/calibration certification");
                 log("COVERAGE", COVERAGE_MANIFEST);
                 log("SPARK_CAN_STATUS", SparkMAXContainer.getDeviceAvailabilitySummary());
@@ -289,6 +290,13 @@ public final class HardwareSelfTestCommand {
                     captureSparkCanResults(sparkCanResults);
                     SmartDashboard.putString(
                         "Hardware Self-Test/Overall", "INTERRUPTED_STOP_REQUESTED");
+                    String abortReason = runState.abortReason();
+                    if (abortReason.isBlank()) {
+                        abortReason = !testOutputsAllowed()
+                            ? "INTERRUPTED_TEST_OUTPUTS_NOT_ALLOWED"
+                            : "INTERRUPTED_COMMAND_CANCELED";
+                    }
+                    SmartDashboard.putString("Hardware Self-Test/Abort Reason", abortReason);
                 }
                 SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
                 log(
@@ -691,7 +699,9 @@ public final class HardwareSelfTestCommand {
             : incomplete ? "INCOMPLETE_DESIGN_OR_MOTION_EVIDENCE" : "MOTION_OBSERVED_ONLY";
         SmartDashboard.putString("Hardware Self-Test/Overall", overall);
         SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
-        SmartDashboard.putString("Hardware Self-Test/Abort Reason", runState.abortReason());
+        SmartDashboard.putString(
+            "Hardware Self-Test/Abort Reason",
+            runState.abortReason().isBlank() ? "NONE" : runState.abortReason());
         log(
             "SEQUENCE_COMPLETE",
             "overall=" + overall + " motion=" + results + " sparkCAN=" + sparkCanResults);

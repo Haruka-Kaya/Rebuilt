@@ -584,6 +584,19 @@
               "period": 0.06,
               "data_type": "string"
             }
+          },
+          {
+            "title": "Hardware Self-Test Abort Reason",
+            "x": 0.0,
+            "y": 1024.0,
+            "width": 1152.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware Self-Test/Abort Reason",
+              "period": 0.06,
+              "data_type": "string"
+            }
           }
         ]
       }
