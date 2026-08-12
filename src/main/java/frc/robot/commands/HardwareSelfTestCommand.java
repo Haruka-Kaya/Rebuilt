@@ -19,6 +19,7 @@ import frc.robot.constants.Constants.IntakeConstants;
 import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.constants.Constants.ShooterConstants;
 import frc.robot.constants.ConfiguredCanHardware;
+import frc.robot.constants.ConfiguredMotorCapabilities;
 import frc.robot.constants.TunerConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.MotionResult;
@@ -44,21 +45,8 @@ public final class HardwareSelfTestCommand {
         .mapToInt(Integer::intValue)
         .toArray();
 
-    private static final String COVERAGE_MANIFEST = String.join(
-        "; ",
-        "Spark30 intake actuator=MANUAL_ARMED_PULSE_ONLY",
-        "Spark31 intake roller=LOW_OUTPUT_STAGE",
-        "Spark32 feeder=" + (ManipulatorConstants.FEEDER_CONTROLLED_RETEST_ENABLED
-            ? "CONTROLLED_RETEST_STAGE"
-            : "SKIP_KNOWN_STALL_SUSPECTED"),
-        "Spark33 conveyor=LOW_OUTPUT_STAGE",
-        "Spark34/35 climber=MANUAL_ARMED_PULSE_ONLY",
-        "Spark36/37 flywheel=PAIR_STAGE",
-        "Spark37 follower=ISOLATED_STAGE",
-        "Spark38 shooter actuator=MANUAL_ARMED_PULSE_ONLY",
-        "Spark39 turret=MANUAL_ARMED_PULSE_ONLY",
-        ConfiguredCanHardware.ctreCoverageLabel()
-            + " swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY");
+    private static final String COVERAGE_MANIFEST =
+        ConfiguredMotorCapabilities.hardwareSelfTestCoverageSummary();
 
     private static final List<String> STOP_RESULT_NAMES = List.of(
         "GLOBAL_START",

@@ -21,6 +21,7 @@ import frc.robot.utils.RuntimeSafetyLatch;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.ConfiguredCanHardware;
+import frc.robot.constants.ConfiguredMotorCapabilities;
 
 /**
  * The VM is configured to automatically run this class, and to call the functions corresponding to
@@ -64,6 +65,11 @@ public class Robot extends TimedRobot {
     SmartDashboard.putString("Runtime/Fault", "HEALTHY");
     SmartDashboard.putString(
         "Hardware/CAN Configured", ConfiguredCanHardware.configuredSummary());
+    SmartDashboard.putString(
+        "Hardware/Motor Capability Summary",
+        ConfiguredMotorCapabilities.normalMotionSummary());
+    SmartDashboard.putString(
+        "Hardware/Motor Blockers", ConfiguredMotorCapabilities.blockedSummary());
     SmartDashboard.putString("Hardware/SPARK Health", "WAITING_FOR_SAMPLE");
     SmartDashboard.putString("Hardware/CTRE Health", "WAITING_FOR_SAMPLE");
   }

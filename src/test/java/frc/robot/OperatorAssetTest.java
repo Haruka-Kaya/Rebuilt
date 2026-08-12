@@ -84,6 +84,12 @@ class OperatorAssetTest {
           "/SmartDashboard/Hardware/CAN Configured",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
+          "/SmartDashboard/Hardware/Motor Capability Summary",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware/Motor Blockers",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
           "/SmartDashboard/Hardware/SPARK Health",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Arrays;
 import frc.robot.constants.Constants.ManipulatorConstants;
+import frc.robot.constants.Constants.AutoConstants;
 import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.constants.Constants.IntakeConstants;
 import frc.robot.constants.Constants.ShooterConstants;
@@ -13,6 +14,11 @@ import frc.robot.constants.Constants.TurretConstants;
 import org.junit.jupiter.api.Test;
 
 class HardwareSafetyConfigurationTest {
+  @Test
+  void autonomousCalibrationRemainsBlockedUntilGeometryIsVerified() {
+    assertFalse(AutoConstants.CALIBRATED_AUTONOMOUS_ENABLED);
+  }
+
   @Test
   void feederKnownStallRemainsBlockedUntilPhysicalRetest() {
     assertTrue(ManipulatorConstants.FEEDER_MOTION_BLOCKED_KNOWN_STALL);
