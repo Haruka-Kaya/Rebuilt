@@ -46,7 +46,7 @@ public final class HardwareSelfTestCommand {
 
     private static final String COVERAGE_MANIFEST = String.join(
         "; ",
-        "Spark30 intake actuator=SKIP_UNREFERENCED",
+        "Spark30 intake actuator=MANUAL_ARMED_PULSE_ONLY",
         "Spark31 intake roller=LOW_OUTPUT_STAGE",
         "Spark32 feeder=" + (ManipulatorConstants.FEEDER_CONTROLLED_RETEST_ENABLED
             ? "CONTROLLED_RETEST_STAGE"
@@ -55,8 +55,8 @@ public final class HardwareSelfTestCommand {
         "Spark34/35 climber=MANUAL_ARMED_PULSE_ONLY",
         "Spark36/37 flywheel=PAIR_STAGE",
         "Spark37 follower=ISOLATED_STAGE",
-        "Spark38 shooter actuator=SKIP_UNREFERENCED",
-        "Spark39 turret=SKIP_UNREFERENCED",
+        "Spark38 shooter actuator=MANUAL_ARMED_PULSE_ONLY",
+        "Spark39 turret=MANUAL_ARMED_PULSE_ONLY",
         ConfiguredCanHardware.ctreCoverageLabel()
             + " swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY");
 
@@ -123,7 +123,7 @@ public final class HardwareSelfTestCommand {
                 recordSkipped(
                     results,
                     "SPARK_ID30_INTAKE_ACTUATOR",
-                    "homing/reference sensor is not implemented");
+                    "automatic motion blocked; use separately armed manual polarity pulse only");
                 if (!feeder.isControlledRetestEnabled()) {
                     recordSkipped(
                         results,
@@ -140,11 +140,11 @@ public final class HardwareSelfTestCommand {
                 recordSkipped(
                     results,
                     "SPARK_ID38_SHOOTER_ACTUATOR",
-                    "homing/reference sensor is not implemented");
+                    "automatic motion blocked; use separately armed manual polarity pulse only");
                 recordSkipped(
                     results,
                     "SPARK_ID39_TURRET",
-                    "homing/absolute reference is not implemented");
+                    "automatic motion blocked; use separately armed manual polarity pulse only");
                 captureSparkCanResults(sparkCanResults);
                 SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
             }, drivetrain, intake, conveyor, feeder, shooter, turret, climber),

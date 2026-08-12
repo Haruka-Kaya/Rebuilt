@@ -29,6 +29,9 @@ public final class ConfiguredOperatorControls {
 
   public static final int OPERATOR_RETRACT = L1;
   public static final int MAINTENANCE_AUTO_AIM = L1;
+  public static final int UNHOMED_DIAGNOSTIC_NEGATIVE = L1;
+  public static final int UNHOMED_DIAGNOSTIC_POSITIVE = R1;
+  public static final int UNHOMED_DIAGNOSTIC_DEADMAN = CREATE;
   public static final int CLIMBER_DEADMAN = OPTIONS;
   public static final int CLIMBER_LEFT_POSITIVE = SQUARE;
   public static final int CLIMBER_LEFT_NEGATIVE = CROSS;
@@ -78,6 +81,7 @@ public final class ConfiguredOperatorControls {
     return "Driver L1=intake R1=output L2=rev R2=fire Create=seed R3=jump-bump "
         + "Touchpad=wheel-lock Square=retract-fallback Triangle=auto-aim-fallback; "
         + "Operator L1=retract; Maintenance L1=auto-aim; "
+        + "Test unhomed actuator=Maintenance Create+(L1-/R1+); "
         + "Test climber=Options+(Square/Cross/Circle/Triangle)";
   }
 }

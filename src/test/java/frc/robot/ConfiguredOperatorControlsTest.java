@@ -26,6 +26,7 @@ class ConfiguredOperatorControlsTest {
     assertEquals(5, ConfiguredOperatorControls.maximumOperatorButton());
     assertEquals(10, ConfiguredOperatorControls.maximumMaintenanceButton());
     assertTrue(ConfiguredOperatorControls.configuredSummary().contains("L1=intake"));
+    assertTrue(ConfiguredOperatorControls.configuredSummary().contains("Create+(L1-/R1+)"));
     assertTrue(ConfiguredOperatorControls.configuredSummary().contains("Options+"));
   }
 
@@ -43,6 +44,9 @@ class ConfiguredOperatorControlsTest {
         "DRIVER_AUTO_AIM_FALLBACK",
         "OPERATOR_RETRACT",
         "MAINTENANCE_AUTO_AIM",
+        "UNHOMED_DIAGNOSTIC_DEADMAN",
+        "UNHOMED_DIAGNOSTIC_NEGATIVE",
+        "UNHOMED_DIAGNOSTIC_POSITIVE",
         "CLIMBER_DEADMAN",
         "CLIMBER_LEFT_POSITIVE",
         "CLIMBER_LEFT_NEGATIVE",

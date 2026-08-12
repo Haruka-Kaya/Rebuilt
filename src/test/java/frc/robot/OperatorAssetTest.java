@@ -105,6 +105,39 @@ class OperatorAssetTest {
           "/SmartDashboard/Climber Diagnostic/Brushless Motor Type Verified",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Armed",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Arm Valid",
+          new WidgetExpectation("Boolean Box", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Physical Clearance Verified",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Brushless Motor Type Verified",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID30 Intake",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID38 Shooter",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID39 Turret",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Direction Negative",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Direction Positive",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Status",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Stop Evidence",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
           "/SmartDashboard/Climber/Controllers Ready",
           new WidgetExpectation("Boolean Box", "boolean")),
       Map.entry(
@@ -216,6 +249,9 @@ class OperatorAssetTest {
     assertAll(
         () -> assertTrue(coverage.contains(expectedCoverage),
             "Coverage must list only the configured Pigeon, CANcoder, steer, and drive IDs"),
+        () -> assertTrue(coverage.contains("Spark30 intake actuator=MANUAL_ARMED_PULSE_ONLY")),
+        () -> assertTrue(coverage.contains("Spark38 shooter actuator=MANUAL_ARMED_PULSE_ONLY")),
+        () -> assertTrue(coverage.contains("Spark39 turret=MANUAL_ARMED_PULSE_ONLY")),
         () -> assertFalse(coverage.contains("CTRE20/40-57"),
             "Coverage must not imply nonexistent CTRE IDs 44-49"));
   }

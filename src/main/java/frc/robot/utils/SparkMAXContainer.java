@@ -103,6 +103,7 @@ public class SparkMAXContainer implements MotorContainer {
   private int consecutiveSampleFailures;
   private double nextSampleAt;
   private double lastSampleAt = Double.NEGATIVE_INFINITY;
+  private long lastSampleOutputEpoch = -1;
   private double lastZeroConfirmedAt = Double.NEGATIVE_INFINITY;
   private long outputEpoch;
   private long lastZeroedOutputEpoch = -1;
@@ -475,7 +476,7 @@ public class SparkMAXContainer implements MotorContainer {
         return null;
       }
       sampleInFlight = true;
-      return new SampleWork(this);
+      return new SampleWork(this, outputEpoch);
     }
   }
 
@@ -624,7 +625,7 @@ public class SparkMAXContainer implements MotorContainer {
         device.sampleFailed("periodic status 2 timeout");
         return;
       }
-      device.sampleSucceeded(status0, status1, status2);
+      device.sampleSucceeded(status0, status1, status2, work.outputEpoch());
     } catch (Exception exception) {
       device.sampleFailed(exception.getClass().getSimpleName() + ": " + exception.getMessage());
     }
@@ -680,7 +681,8 @@ public class SparkMAXContainer implements MotorContainer {
   private void sampleSucceeded(
       PeriodicStatus0 status0,
       PeriodicStatus1 status1,
-      PeriodicStatus2 status2) {
+      PeriodicStatus2 status2,
+      long sampledOutputEpoch) {
     double now = Timer.getFPGATimestamp();
     String failure = null;
     boolean reset = false;
@@ -741,6 +743,10 @@ public class SparkMAXContainer implements MotorContainer {
             outputGate.observeNonzero();
           }
           lastSampleAt = now;
+          // The general health cache remains fresh even when commands are being refreshed at
+          // 50 Hz. A diagnostic that needs command-specific evidence separately compares this
+          // captured epoch and therefore cannot mistake the frame for a newer setpoint.
+          lastSampleOutputEpoch = sampledOutputEpoch;
         }
       }
       leaderZeroWork = revokeLeaderForDependentLocked(
@@ -857,6 +863,7 @@ public class SparkMAXContainer implements MotorContainer {
 
   private void invalidateSampleLocked(double now) {
     lastSampleAt = Double.NEGATIVE_INFINITY;
+    lastSampleOutputEpoch = -1;
     nextSampleAt = now;
   }
 
@@ -949,6 +956,7 @@ public class SparkMAXContainer implements MotorContainer {
         recoveryState.desiredRevisionChanged(desiredRevision, now);
         followerDiagnosticMode = FollowerDiagnosticMode.NONE;
         lastSampleAt = Double.NEGATIVE_INFINITY;
+        lastSampleOutputEpoch = -1;
         outputGate.requireZero(now, true);
         leader = desiredFollower ? followerLeader : null;
       }
@@ -1192,22 +1200,54 @@ public class SparkMAXContainer implements MotorContainer {
 
   /** Returns one immutable telemetry sample for an external, read-only diagnostic evaluator. */
   public Snapshot getDiagnosticSnapshot(boolean commandAccepted) {
+    return getTimedDiagnosticSnapshot(commandAccepted).snapshot();
+  }
+
+  /**
+   * Returns telemetry together with the worker sample time and active output epoch.
+   *
+   * <p>The timestamp lets a diagnostic reject the cached zero frame that existed before a new
+   * open-loop command was sent.
+   */
+  public TimedDiagnosticSnapshot getTimedDiagnosticSnapshot(boolean commandAccepted) {
     double now = Timer.getFPGATimestamp();
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
         boolean ready = followerDiagnosticMode == FollowerDiagnosticMode.NONE
             && isBaseReadyLocked(now)
             && requiredFollowersReadyLocked(now);
-        return new Snapshot(
-            port,
-            ready,
-            cachedAppliedOutput,
-            cachedCurrent,
-            cachedVelocity,
-            cachedBusVoltage,
-            commandAccepted);
+        return new TimedDiagnosticSnapshot(
+            new Snapshot(
+                port,
+                ready,
+                cachedAppliedOutput,
+                cachedCurrent,
+                cachedVelocity,
+                cachedBusVoltage,
+                commandAccepted),
+            lastSampleAt,
+            lastSampleOutputEpoch,
+            outputEpoch);
       }
     }
+  }
+
+  /** Atomic cached diagnostic observation; no vendor call is made by this record. */
+  public record TimedDiagnosticSnapshot(
+      Snapshot snapshot,
+      double sampledAtSeconds,
+      long sampleOutputEpoch,
+      long currentOutputEpoch) {}
+
+  /** Finds a configured SPARK and returns one timestamped cached diagnostic observation. */
+  public static Optional<TimedDiagnosticSnapshot> getTimedDiagnosticSnapshotForId(
+      int canId, boolean commandAccepted) {
+    for (SparkMAXContainer device : DEVICES) {
+      if (device.port == canId) {
+        return Optional.of(device.getTimedDiagnosticSnapshot(commandAccepted));
+      }
+    }
+    return Optional.empty();
   }
 
   /** Finds a configured SPARK by CAN ID without exposing the mutable controller instance. */
@@ -1962,7 +2002,7 @@ public class SparkMAXContainer implements MotorContainer {
       boolean expectedFollower,
       boolean persist) {}
 
-  private record SampleWork(SparkMAXContainer device) {}
+  private record SampleWork(SparkMAXContainer device, long outputEpoch) {}
 
   private record ZeroWork(SparkMAXContainer device, long generation) {}
 

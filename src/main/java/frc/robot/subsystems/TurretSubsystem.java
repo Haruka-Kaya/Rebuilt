@@ -8,6 +8,8 @@ import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.constants.Constants.TurretConstants;
+import frc.robot.constants.Constants.HardwareTestConstants;
+import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 import frc.robot.subsystems.VisionSubsystem.TargetObservation;
 import frc.robot.utils.DashboardApplyGate;
 import frc.robot.utils.DashboardApplyGate.Decision;
@@ -24,6 +26,7 @@ public class TurretSubsystem extends SubsystemBase {
     private final DashboardApplyGate tuningApplyGate = new DashboardApplyGate();
     // Assigned only after future, sensor-validated homing or absolute reference succeeds.
     private Token positionReference;
+    private boolean unhomedDiagnosticActive;
     private String lastBlockedPositionCommand = "startup: homing/absolute reference未実装";
 
     private final VisionSubsystem m_vision;
@@ -76,6 +79,7 @@ public class TurretSubsystem extends SubsystemBase {
     }
 
     public void stop() {
+        unhomedDiagnosticActive = false;
         stopMotorOutput();
         onTarget = false;
         alignedFrameCount = 0;
@@ -83,6 +87,31 @@ public class TurretSubsystem extends SubsystemBase {
 
     private void stopMotorOutput() {
         m_motor.stop();
+    }
+
+    /** Test-only low-output polarity evidence; this does not establish an angular reference. */
+    public boolean runUnhomedDiagnostic(double requestedDuty) {
+        if (!unhomedDiagnosticAllowed(requestedDuty)) {
+            stopUnhomedDiagnostic();
+            return false;
+        }
+        unhomedDiagnosticActive = true;
+        boolean accepted = m_motor.setDutyCycle(requestedDuty);
+        if (!accepted) {
+            stopUnhomedDiagnostic();
+        }
+        return accepted;
+    }
+
+    public Snapshot getUnhomedDiagnosticSnapshot(boolean commandAccepted) {
+        return m_motor.getDiagnosticSnapshot(commandAccepted);
+    }
+
+    public void stopUnhomedDiagnostic() {
+        unhomedDiagnosticActive = false;
+        m_motor.stop();
+        onTarget = false;
+        alignedFrameCount = 0;
     }
 
     private double degreesToMotorRotations(double degrees) {
@@ -178,7 +207,7 @@ public class TurretSubsystem extends SubsystemBase {
         boolean motorConnected = m_motor.isAvailable();
         SmartDashboard.putBoolean("Turret motor connected", motorConnected);
         boolean referenced = m_motor.isPositionReferenceValid(positionReference);
-        if (!motorConnected || !referenced) {
+        if (!motorConnected || (!referenced && !unhomedDiagnosticActive)) {
             m_motor.stop();
             onTarget = false;
         }
@@ -199,6 +228,14 @@ public class TurretSubsystem extends SubsystemBase {
             "Turret/Last Blocked Command", lastBlockedPositionCommand);
 
         SmartDashboard.putBoolean("On target", isOnTarget());
+    }
+
+    private static boolean unhomedDiagnosticAllowed(double requestedDuty) {
+        return DriverStation.isTestEnabled()
+            && !DriverStation.isFMSAttached()
+            && Double.isFinite(requestedDuty)
+            && Math.abs(requestedDuty)
+                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE;
     }
 
     private void processDashboardTuning() {

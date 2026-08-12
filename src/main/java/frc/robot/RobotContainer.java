@@ -7,11 +7,15 @@ package frc.robot;
 
 import edu.wpi.first.wpilibj.PS5Controller;
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import frc.robot.commands.FireCommand;
 import frc.robot.commands.IntakeCommand;
 import frc.robot.commands.HardwareSelfTestCommand;
 import frc.robot.commands.JumpBumpCommand;
+import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand;
+import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Direction;
+import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Target;
 import frc.robot.commands.RevUpCommand;
 import frc.robot.commands.OutputCommand;
 import frc.robot.commands.RetractIntakeCommand;
@@ -19,6 +23,7 @@ import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.constants.ConfiguredOperatorControls;
 import frc.robot.constants.Constants.ClimberConstants;
+import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.containers.DriveBaseContainer;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
 import frc.robot.subsystems.ClimberDiagnosticLatch.MotorSide;
@@ -55,7 +60,12 @@ public class RobotContainer {
 
   private final NeutralAfterEnableGate m_teleopInputGate = new NeutralAfterEnableGate();
   private final NeutralAfterEnableGate m_climberInputGate = new NeutralAfterEnableGate();
+  private final NeutralAfterEnableGate m_unhomedDiagnosticInputGate =
+      new NeutralAfterEnableGate();
   private long m_teleopSafetySourceSignature;
+  private Target m_unhomedDiagnosticTarget;
+  private Direction m_unhomedDiagnosticDirection;
+  private double m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
 
   // The driver's controller
   private final CommandPS5Controller m_driverController = new CommandPS5Controller(OIConstants.kDriverControllerPort);
@@ -159,6 +169,7 @@ public class RobotContainer {
             .finallyDo(interrupted -> m_turret.stop()));
 
     configureClimberDiagnosticBindings();
+    configureUnhomedDiagnosticBindings();
   }
 
   private Trigger availableButton(CommandPS5Controller controller, int port, int button) {
@@ -337,6 +348,158 @@ public class RobotContainer {
         && rawButtonPressed(controller, port, selectedFaceButton);
   }
 
+  private void configureUnhomedDiagnosticBindings() {
+    for (Target target : Target.values()) {
+      bindUnhomedDiagnostic(
+          target,
+          Direction.NEGATIVE,
+          ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_NEGATIVE,
+          ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE);
+      bindUnhomedDiagnostic(
+          target,
+          Direction.POSITIVE,
+          ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE,
+          ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_NEGATIVE);
+    }
+  }
+
+  private void bindUnhomedDiagnostic(
+      Target target,
+      Direction direction,
+      int selectedDirectionButton,
+      int oppositeDirectionButton) {
+    new Trigger(() -> unhomedDiagnosticPressed(target, direction, selectedDirectionButton))
+        // The command owns the requirements until post-stop evidence is confirmed (or times out).
+        // Releasing the gesture is observed through interlocksHeld and starts POST_STOP; it must
+        // not cancel the command before that evidence can be collected.
+        .onTrue(new ManualUnhomedActuatorDiagnosticCommand(
+            target,
+            direction.duty(),
+            () -> unhomedDiagnosticInterlocksHeld(
+                target, direction, selectedDirectionButton, oppositeDirectionButton),
+            m_intake,
+            m_shooter,
+            m_turret,
+            drivetrain,
+            m_intake,
+            m_conveyor,
+            m_feeder,
+            m_shooter,
+            m_turret,
+            m_climber)
+            // One consumed dashboard arm authorizes at most one scheduled pulse. A second pulse
+            // requires returning to Disabled Test and creating a new target snapshot.
+            .finallyDo(interrupted -> disarmUnhomedDiagnosticSession())
+            .withInterruptBehavior(Command.InterruptionBehavior.kCancelIncoming));
+  }
+
+  private boolean unhomedDiagnosticPressed(
+      Target target, Direction direction, int selectedDirectionButton) {
+    if (target != m_unhomedDiagnosticTarget || direction != m_unhomedDiagnosticDirection) {
+      return false;
+    }
+    boolean deadman = maintenanceButtonPressed(
+        ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN);
+    boolean negative = maintenanceButtonPressed(
+        ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_NEGATIVE);
+    boolean positive = maintenanceButtonPressed(
+        ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE);
+    int directionsPressed = (negative ? 1 : 0) + (positive ? 1 : 0);
+    if (directionsPressed > 1) {
+      m_unhomedDiagnosticInputGate.blockUntilNeutral();
+    }
+    boolean anyPressed = deadman || negative || positive;
+    long sourceSignature = DriverStation.getStickButtonCount(
+        OIConstants.kMaintenanceControllerPort)
+        | ((long) target.ordinal() << 16)
+        | ((long) direction.ordinal() << 20);
+    if (!m_unhomedDiagnosticInputGate.allow(
+        unhomedDiagnosticSessionAllowed(target), sourceSignature, anyPressed)) {
+      return false;
+    }
+    return deadman
+        && directionsPressed == 1
+        && maintenanceButtonPressed(selectedDirectionButton);
+  }
+
+  private boolean unhomedDiagnosticInterlocksHeld(
+      Target target,
+      Direction direction,
+      int selectedDirectionButton,
+      int oppositeDirectionButton) {
+    return unhomedDiagnosticSessionAllowed(target, direction)
+        && maintenanceButtonPressed(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN)
+        && maintenanceButtonPressed(selectedDirectionButton)
+        && !maintenanceButtonPressed(oppositeDirectionButton);
+  }
+
+  private boolean unhomedDiagnosticSessionAllowed(Target target) {
+    return unhomedDiagnosticSessionAllowed(target, m_unhomedDiagnosticDirection);
+  }
+
+  private boolean unhomedDiagnosticSessionAllowed(Target target, Direction direction) {
+    boolean unexpired = Double.isFinite(m_unhomedDiagnosticExpiresAt)
+        && Timer.getFPGATimestamp() <= m_unhomedDiagnosticExpiresAt;
+    if (!unexpired && m_unhomedDiagnosticTarget != null) {
+      disarmUnhomedDiagnosticSession();
+      SmartDashboard.putString(
+          ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+          "SESSION_EXPIRED_REARM_DISABLED");
+    }
+    boolean selectionAndVerificationMatch = target == m_unhomedDiagnosticTarget
+        && direction == m_unhomedDiagnosticDirection
+        && SmartDashboard.getBoolean(
+            ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false)
+        && SmartDashboard.getBoolean(
+            ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false)
+        && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneTarget()
+            .filter(selected -> selected == target)
+            .isPresent()
+        && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneDirection()
+            .filter(selected -> selected == direction)
+            .isPresent();
+    if (!selectionAndVerificationMatch && m_unhomedDiagnosticTarget != null) {
+      disarmUnhomedDiagnosticSession();
+      SmartDashboard.putString(
+          ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+          "SESSION_INVALIDATED_REARM_DISABLED");
+      return false;
+    }
+    return unexpired
+        && selectionAndVerificationMatch
+        && DriverStation.isTestEnabled()
+        && !DriverStation.isFMSAttached()
+        && !SmartDashboard.getBoolean(HardwareSelfTestCommand.RUNNING_KEY, false)
+        && !SmartDashboard.getBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false);
+  }
+
+  private boolean maintenanceButtonPressed(int button) {
+    return rawButtonPressed(
+        m_maintenanceController, OIConstants.kMaintenanceControllerPort, button);
+  }
+
+  /** Starts the already consumed, disabled-mode target snapshot for this Test session. */
+  public void armUnhomedDiagnosticSession(Target target, Direction direction) {
+    m_unhomedDiagnosticTarget = target;
+    m_unhomedDiagnosticDirection = direction;
+    m_unhomedDiagnosticExpiresAt = Timer.getFPGATimestamp()
+        + HardwareTestConstants.ARM_LIFETIME_SECONDS;
+    SmartDashboard.putBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false);
+    SmartDashboard.putString(
+        ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+        "ARMED_" + target.label() + "_" + direction.name() + "_RELEASE_CONTROLS");
+    SmartDashboard.putString(
+        ManualUnhomedActuatorDiagnosticCommand.STOP_EVIDENCE_KEY, "NOT_RUN");
+    m_unhomedDiagnosticInputGate.blockUntilNeutral();
+  }
+
+  public void disarmUnhomedDiagnosticSession() {
+    m_unhomedDiagnosticTarget = null;
+    m_unhomedDiagnosticDirection = null;
+    m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
+    m_unhomedDiagnosticInputGate.blockUntilNeutral();
+  }
+
   /**
    * Use this to pass the autonomous command to the main {@link Robot} class.
    *
@@ -368,6 +531,7 @@ public class RobotContainer {
   }
 
   public void stopAll() {
+    disarmUnhomedDiagnosticSession();
     stopSafely("swerve", drivetrain::requestIdle);
     stopSafely("intake", m_intake::stopAll);
     stopSafely("conveyor", m_conveyor::stop);

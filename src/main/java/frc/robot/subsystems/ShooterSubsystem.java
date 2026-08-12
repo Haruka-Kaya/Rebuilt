@@ -29,6 +29,7 @@ public class ShooterSubsystem extends SubsystemBase {
     private final DashboardApplyGate tuningApplyGate = new DashboardApplyGate();
     // Assigned only after future, sensor-validated homing succeeds.
     private Token actuatorReference;
+    private boolean actuatorDiagnosticActive;
     private String lastBlockedActuatorCommand = "startup: homing未実装";
 
     private double flywheelRPM = 500.0;
@@ -137,6 +138,7 @@ public class ShooterSubsystem extends SubsystemBase {
     }
 
     public void stop() {
+        actuatorDiagnosticActive = false;
         flywheelRequested = false;
         flywheelIsSet = false;
         actuatorMotor.stop();
@@ -146,7 +148,7 @@ public class ShooterSubsystem extends SubsystemBase {
 
     @Override
     public void periodic() {
-        if (!isActuatorReferenced()) {
+        if (!isActuatorReferenced() && !actuatorDiagnosticActive) {
             actuatorMotor.stop();
         }
         processDashboardTuning();
@@ -214,6 +216,29 @@ public class ShooterSubsystem extends SubsystemBase {
         return flywheelMotor_1.getDiagnosticSnapshot(commandAccepted);
     }
 
+    /** Test-only low-output polarity evidence; this does not establish a hood reference. */
+    public boolean runUnhomedActuatorDiagnostic(double requestedDuty) {
+        if (!unhomedDiagnosticAllowed(requestedDuty)) {
+            stopActuatorDiagnostic();
+            return false;
+        }
+        actuatorDiagnosticActive = true;
+        boolean accepted = actuatorMotor.setDutyCycle(requestedDuty);
+        if (!accepted) {
+            stopActuatorDiagnostic();
+        }
+        return accepted;
+    }
+
+    public Snapshot getActuatorDiagnosticSnapshot(boolean commandAccepted) {
+        return actuatorMotor.getDiagnosticSnapshot(commandAccepted);
+    }
+
+    public void stopActuatorDiagnostic() {
+        actuatorDiagnosticActive = false;
+        actuatorMotor.stop();
+    }
+
     public Snapshot getFlywheelFollowerDiagnosticSnapshot(boolean commandAccepted) {
         return flywheelMotor_2.getDiagnosticSnapshot(commandAccepted);
     }
@@ -270,6 +295,14 @@ public class ShooterSubsystem extends SubsystemBase {
 
     private boolean flywheelPairReady() {
         return flywheelMotor_1.isReady() && flywheelMotor_2.isReady();
+    }
+
+    private static boolean unhomedDiagnosticAllowed(double requestedDuty) {
+        return DriverStation.isTestEnabled()
+            && !DriverStation.isFMSAttached()
+            && Double.isFinite(requestedDuty)
+            && Math.abs(requestedDuty)
+                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE;
     }
 
     private static boolean pidChanged(

@@ -26,6 +26,7 @@ public class IntakeSubsystem extends SubsystemBase {
     private final DashboardApplyGate tuningApplyGate = new DashboardApplyGate();
     // Assigned only after future, sensor-validated homing succeeds.
     private Token actuatorReference;
+    private boolean actuatorDiagnosticActive;
     private String lastBlockedActuatorCommand = "startup: homing未実装";
 
     private double actuator_kP = 0.1;
@@ -127,13 +128,37 @@ public class IntakeSubsystem extends SubsystemBase {
         return m_intakeRoller.getDiagnosticSnapshot(commandAccepted);
     }
 
+    /** Test-only low-output polarity evidence; this does not establish a position reference. */
+    public boolean runUnhomedActuatorDiagnostic(double requestedDuty) {
+        if (!unhomedDiagnosticAllowed(requestedDuty)) {
+            stopActuatorDiagnostic();
+            return false;
+        }
+        actuatorDiagnosticActive = true;
+        boolean accepted = m_actuatorMotor.setDutyCycle(requestedDuty);
+        if (!accepted) {
+            stopActuatorDiagnostic();
+        }
+        return accepted;
+    }
+
+    public Snapshot getActuatorDiagnosticSnapshot(boolean commandAccepted) {
+        return m_actuatorMotor.getDiagnosticSnapshot(commandAccepted);
+    }
+
+    public void stopActuatorDiagnostic() {
+        actuatorDiagnosticActive = false;
+        m_actuatorMotor.stop();
+    }
+
     public void stopAll() {
+        actuatorDiagnosticActive = false;
         m_intakeRoller.stop();
         m_actuatorMotor.stop();
     }
     @Override
     public void periodic() {
-        if (!isActuatorReferenced()) {
+        if (!isActuatorReferenced() && !actuatorDiagnosticActive) {
             m_actuatorMotor.stop();
         }
         OptionalDouble positionDegrees = getReferencedActuatorDegrees();
@@ -152,6 +177,14 @@ public class IntakeSubsystem extends SubsystemBase {
         SmartDashboard.putString("Intake Actuator/Last Blocked Command", lastBlockedActuatorCommand);
 
         processDashboardTuning();
+    }
+
+    private static boolean unhomedDiagnosticAllowed(double requestedDuty) {
+        return DriverStation.isTestEnabled()
+            && !DriverStation.isFMSAttached()
+            && Double.isFinite(requestedDuty)
+            && Math.abs(requestedDuty)
+                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE;
     }
 
     private void processDashboardTuning() {

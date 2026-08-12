@@ -675,6 +675,153 @@
               "period": 0.25,
               "data_type": "string"
             }
+          },
+          {
+            "title": "Arm Unhomed Actuator Diagnostic",
+            "x": 0.0,
+            "y": 1536.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Armed",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Unhomed Arm Valid",
+            "x": 128.0,
+            "y": 1536.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Boolean Box",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Arm Valid",
+              "period": 0.06,
+              "data_type": "boolean",
+              "true_color": 4283215696,
+              "false_color": 4294198070,
+              "true_icon": "None",
+              "false_icon": "None"
+            }
+          },
+          {
+            "title": "Verify Physical Clearance",
+            "x": 256.0,
+            "y": 1536.0,
+            "width": 192.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Physical Clearance Verified",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Verify Brushless Motor Type",
+            "x": 448.0,
+            "y": 1536.0,
+            "width": 192.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Brushless Motor Type Verified",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Target ID30 Intake",
+            "x": 640.0,
+            "y": 1536.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID30 Intake",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Target ID38 Shooter",
+            "x": 768.0,
+            "y": 1536.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID38 Shooter",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Target ID39 Turret",
+            "x": 896.0,
+            "y": 1536.0,
+            "width": 128.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID39 Turret",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Direction Negative",
+            "x": 1024.0,
+            "y": 1536.0,
+            "width": 128.0,
+            "height": 64.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Direction Negative",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Direction Positive",
+            "x": 1024.0,
+            "y": 1600.0,
+            "width": 128.0,
+            "height": 64.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Direction Positive",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Unhomed Actuator Diagnostic Status",
+            "x": 0.0,
+            "y": 1664.0,
+            "width": 768.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Status",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Unhomed Actuator Stop Evidence",
+            "x": 768.0,
+            "y": 1664.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Stop Evidence",
+              "period": 0.06,
+              "data_type": "string"
+            }
           }
         ]
       }

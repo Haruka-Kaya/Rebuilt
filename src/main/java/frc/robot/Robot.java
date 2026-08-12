@@ -12,6 +12,9 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.commands.HardwareSelfTestCommand;
+import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand;
+import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Direction;
+import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Target;
 import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.OneShotTimedArmGate;
 import frc.robot.utils.RuntimeSafetyLatch;
@@ -36,6 +39,12 @@ public class Robot extends TimedRobot {
   private final RuntimeSafetyLatch m_runtimeSafetyLatch = new RuntimeSafetyLatch();
   private final OneShotTimedArmGate m_selfTestArmGate = new OneShotTimedArmGate(
       HardwareTestConstants.ARM_LIFETIME_SECONDS);
+  private final OneShotTimedArmGate m_unhomedDiagnosticArmGate = new OneShotTimedArmGate(
+      HardwareTestConstants.ARM_LIFETIME_SECONDS);
+  private Target m_unhomedDiagnosticTargetSnapshot;
+  private Direction m_unhomedDiagnosticDirectionSnapshot;
+  private Target m_lastUnhomedDiagnosticTargetSelection;
+  private Direction m_lastUnhomedDiagnosticDirectionSelection;
 
   /**
    * This function is run when the robot is first started up and should be used for any
@@ -48,6 +57,7 @@ public class Robot extends TimedRobot {
     // autonomous chooser on the dashboard.
     m_robotContainer = new RobotContainer();
     SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
+    ManualUnhomedActuatorDiagnosticCommand.initializeDashboard();
     SmartDashboard.putBoolean(HardwareSelfTestCommand.RUNNING_KEY, false);
     SmartDashboard.putBoolean("Hub Active", false);
     SmartDashboard.putBoolean("Runtime/Scheduler Healthy", true);
@@ -83,14 +93,7 @@ public class Robot extends TimedRobot {
       CommandScheduler.getInstance().run();
       m_robotContainer.refreshAutonomousStatus();
 
-      boolean armRequested = SmartDashboard.getBoolean("Hardware Self-Test/Armed", false);
-      boolean armValid = m_selfTestArmGate.observe(
-          armRequested,
-          DriverStation.isDisabled()
-              && DriverStation.isTest()
-              && !DriverStation.isFMSAttached(),
-          Timer.getFPGATimestamp());
-      SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", armValid);
+      updateDiagnosticArmGates();
 
       double now = Timer.getFPGATimestamp();
       if (now >= m_nextOperatorStatusTimestamp) {
@@ -141,6 +144,8 @@ public class Robot extends TimedRobot {
         m_hardwareSelfTest = null;
       }
       clearSelfTestArm();
+      clearUnhomedDiagnosticArm();
+      clearUnhomedDiagnosticVerifications();
       m_robotContainer.stopAll();
     });
   }
@@ -153,6 +158,8 @@ public class Robot extends TimedRobot {
   public void autonomousInit() {
     runLifecycleSafely(() -> {
       clearSelfTestArm();
+      clearUnhomedDiagnosticArm();
+      clearUnhomedDiagnosticVerifications();
       m_robotContainer.stopAll();
       m_autonomousCommand = m_robotContainer.getAutonomousCommand();
 
@@ -212,6 +219,8 @@ public class Robot extends TimedRobot {
         m_autonomousCommand = null;
       }
       clearSelfTestArm();
+      clearUnhomedDiagnosticArm();
+      clearUnhomedDiagnosticVerifications();
       m_robotContainer.stopAll();
     });
   }
@@ -225,14 +234,51 @@ public class Robot extends TimedRobot {
     runLifecycleSafely(() -> {
       // Cancels all running commands at the start of test mode.
       CommandScheduler.getInstance().cancelAll();
-      m_robotContainer.stopAll();
-      boolean armAccepted = !DriverStation.isFMSAttached()
-          && SmartDashboard.getBoolean("Hardware Self-Test/Armed", false)
-          && m_selfTestArmGate.consume(Timer.getFPGATimestamp());
+      boolean selfTestRequested = SmartDashboard.getBoolean(
+          "Hardware Self-Test/Armed", false);
+      boolean unhomedDiagnosticRequested = SmartDashboard.getBoolean(
+          ManualUnhomedActuatorDiagnosticCommand.ARM_KEY, false);
+      boolean conflictingArms = selfTestRequested && unhomedDiagnosticRequested;
+      double now = Timer.getFPGATimestamp();
+      boolean armAccepted = !conflictingArms
+          && !DriverStation.isFMSAttached()
+          && selfTestRequested
+          && m_selfTestArmGate.consume(now);
+      Target diagnosticTarget = m_unhomedDiagnosticTargetSnapshot;
+      Direction diagnosticDirection = m_unhomedDiagnosticDirectionSnapshot;
+      boolean unhomedDiagnosticAccepted = !conflictingArms
+          && !DriverStation.isFMSAttached()
+          && unhomedDiagnosticRequested
+          && diagnosticTarget != null
+          && diagnosticDirection != null
+          && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneTarget()
+              .filter(target -> target == diagnosticTarget)
+              .isPresent()
+          && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneDirection()
+              .filter(direction -> direction == diagnosticDirection)
+              .isPresent()
+          && SmartDashboard.getBoolean(
+              ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false)
+          && SmartDashboard.getBoolean(
+              ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false)
+          && m_unhomedDiagnosticArmGate.consume(now);
       clearSelfTestArm();
+      clearUnhomedDiagnosticArm();
+      m_robotContainer.stopAll();
+      if (conflictingArms) {
+        SmartDashboard.putString(
+            ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+            "ARM_CONFLICT_REJECTED");
+      } else if (unhomedDiagnosticRequested && !unhomedDiagnosticAccepted) {
+        SmartDashboard.putString(
+            ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+            "ARM_REJECTED_RELEASE_AND_RETRY_DISABLED");
+      }
       if (armAccepted) {
         m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand();
         CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
+      } else if (unhomedDiagnosticAccepted) {
+        m_robotContainer.armUnhomedDiagnosticSession(diagnosticTarget, diagnosticDirection);
       }
     });
   }
@@ -249,6 +295,8 @@ public class Robot extends TimedRobot {
         m_hardwareSelfTest = null;
       }
       clearSelfTestArm();
+      clearUnhomedDiagnosticArm();
+      clearUnhomedDiagnosticVerifications();
       m_robotContainer.stopAll();
     });
   }
@@ -257,6 +305,124 @@ public class Robot extends TimedRobot {
     SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
     SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", false);
     m_selfTestArmGate.requireRelease();
+  }
+
+  private void clearUnhomedDiagnosticArm() {
+    SmartDashboard.putBoolean(ManualUnhomedActuatorDiagnosticCommand.ARM_KEY, false);
+    SmartDashboard.putBoolean(ManualUnhomedActuatorDiagnosticCommand.ARM_VALID_KEY, false);
+    SmartDashboard.putString(
+        ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY, "DISARMED");
+    m_unhomedDiagnosticArmGate.requireRelease();
+    m_unhomedDiagnosticTargetSnapshot = null;
+    m_unhomedDiagnosticDirectionSnapshot = null;
+  }
+
+  private void clearUnhomedDiagnosticVerifications() {
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false);
+  }
+
+  private void updateDiagnosticArmGates() {
+    boolean selfTestRequested = SmartDashboard.getBoolean(
+        "Hardware Self-Test/Armed", false);
+    boolean unhomedRequested = SmartDashboard.getBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.ARM_KEY, false);
+    boolean conflictingArms = selfTestRequested && unhomedRequested;
+    boolean disabledTestWithoutFms = DriverStation.isDisabled()
+        && DriverStation.isTest()
+        && !DriverStation.isFMSAttached();
+    double now = Timer.getFPGATimestamp();
+
+    boolean selfTestArmValid;
+    boolean unhomedArmValid = false;
+    var selectedTarget = ManualUnhomedActuatorDiagnosticCommand.readExactlyOneTarget();
+    var selectedDirection = ManualUnhomedActuatorDiagnosticCommand.readExactlyOneDirection();
+    Target currentTargetSelection = selectedTarget.orElse(null);
+    Direction currentDirectionSelection = selectedDirection.orElse(null);
+    boolean selectionChanged = currentTargetSelection != m_lastUnhomedDiagnosticTargetSelection
+        || currentDirectionSelection != m_lastUnhomedDiagnosticDirectionSelection;
+    if (selectionChanged) {
+      // Clearance and motor-type evidence applies to one exact mechanism and direction only.
+      clearUnhomedDiagnosticVerifications();
+      m_lastUnhomedDiagnosticTargetSelection = currentTargetSelection;
+      m_lastUnhomedDiagnosticDirectionSelection = currentDirectionSelection;
+    }
+    boolean unhomedVerifications = SmartDashboard.getBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false)
+        && SmartDashboard.getBoolean(
+            ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false);
+
+    if (conflictingArms) {
+      m_selfTestArmGate.invalidate(true);
+      m_unhomedDiagnosticArmGate.invalidate(true);
+      selfTestArmValid = false;
+      if (DriverStation.isDisabled() && DriverStation.isTest()) {
+        SmartDashboard.putString(
+            ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+            "ARM_CONFLICT_RELEASE_BOTH");
+      }
+    } else {
+      selfTestArmValid = m_selfTestArmGate.observe(
+          selfTestRequested,
+          disabledTestWithoutFms && !unhomedRequested,
+          now);
+
+      if (!unhomedRequested) {
+        m_unhomedDiagnosticTargetSnapshot = null;
+        m_unhomedDiagnosticDirectionSnapshot = null;
+      }
+      boolean selectionChangedWhileArmed = unhomedRequested
+          && (m_unhomedDiagnosticTargetSnapshot != null
+              || m_unhomedDiagnosticDirectionSnapshot != null)
+          && (selectedTarget.isEmpty()
+              || selectedDirection.isEmpty()
+              || selectedTarget.get() != m_unhomedDiagnosticTargetSnapshot
+              || selectedDirection.get() != m_unhomedDiagnosticDirectionSnapshot);
+      if (selectionChangedWhileArmed) {
+        m_unhomedDiagnosticArmGate.invalidate(true);
+      } else {
+        unhomedArmValid = m_unhomedDiagnosticArmGate.observe(
+            unhomedRequested,
+            disabledTestWithoutFms
+                && !selfTestRequested
+                && unhomedVerifications
+                && selectedTarget.isPresent()
+                && selectedDirection.isPresent(),
+            now);
+        if (unhomedArmValid && m_unhomedDiagnosticTargetSnapshot == null) {
+          m_unhomedDiagnosticTargetSnapshot = selectedTarget.orElseThrow();
+          m_unhomedDiagnosticDirectionSnapshot = selectedDirection.orElseThrow();
+        }
+      }
+
+      if (DriverStation.isDisabled() && DriverStation.isTest()) {
+        if (selectionChangedWhileArmed) {
+          SmartDashboard.putString(
+              ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+              "TARGET_OR_DIRECTION_CHANGED_RELEASE_ARM");
+        } else if (unhomedArmValid) {
+          SmartDashboard.putString(
+              ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+              "ARM_VALID_" + m_unhomedDiagnosticTargetSnapshot.label() + "_"
+                  + m_unhomedDiagnosticDirectionSnapshot.name());
+        } else if (unhomedRequested
+            && (selectedTarget.isEmpty() || selectedDirection.isEmpty())) {
+          SmartDashboard.putString(
+              ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+              "SELECT_EXACTLY_ONE_TARGET_AND_DIRECTION");
+        } else if (unhomedRequested && !unhomedVerifications) {
+          SmartDashboard.putString(
+              ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+              "VERIFY_CLEARANCE_AND_MOTOR_TYPE");
+        }
+      }
+    }
+
+    SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", selfTestArmValid);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.ARM_VALID_KEY, unhomedArmValid);
   }
 
   private void runLifecycleSafely(Runnable action) {
