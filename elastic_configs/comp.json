@@ -662,6 +662,19 @@
               "period": 0.06,
               "data_type": "string"
             }
+          },
+          {
+            "title": "Configured Operator Controls",
+            "x": 0.0,
+            "y": 1408.0,
+            "width": 1152.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Controls/Configured",
+              "period": 0.25,
+              "data_type": "string"
+            }
           }
         ]
       }

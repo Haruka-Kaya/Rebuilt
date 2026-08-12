@@ -24,6 +24,22 @@ The programmer knows what it is doing at all times. It knows this because it kno
 
 `SPARK_HEALTH`の`SETPOINT_US=<last>/<max>`はREV setpoint JNIの直近・最大実行時間（microseconds）です。実機再接続時にDriver Stationのloop overrunとあわせて確認してください。
 
+## 操作map
+
+Teleopへ入った直後、controllerの再接続後、または機構healthの変化後は、全入力を一度neutral/releaseにしてから新しく操作します。同時に複数のintake-pathボタンを押した場合も、全releaseまで再始動しません。
+
+| Controller | 操作 | 動作 |
+| --- | --- | --- |
+| Driver | sticks | swerve drive |
+| Driver | L1 / R1 | intake / output |
+| Driver | L2 / R2 | shooter rev / fire |
+| Driver | Create / R3 / Touchpad | field seed / jump-bump / wheel lock |
+| Operator | L1 | intake retract（controllerが無い場合Driver Square） |
+| Maintenance | L1 | turret auto-aim（controllerが無い場合Driver Triangle） |
+| Maintenance（未接続時のみDriverへfallback、Testのみ） | Options + Square/Cross/Circle/Triangle | climber left+/left-/right+/right- 0.35秒診断pulse |
+
+Climber診断はTest Enabled、FMS未接続、DashboardのArmとBrushless Motor Type Verifiedが必要です。Hardware Self-TestはDisabledでTest modeを選んだ状態でArmし、その有効時間内にTest Enableします。
+
 ## 実機commissioning
 
 現在コードが前提にしているCAN mapは、SPARK `30..39`、Pigeon `20`、CANcoder `40..43`、swerve steer/drive `50..57`です。これはソフトウェア設定値であり、実機配線の証明ではありません。設計図またはlive inventoryと一致するまでcalibrated autonomousと未homing位置機構は有効にしません。

@@ -17,6 +17,7 @@ import frc.robot.Telemetry;
 import frc.robot.constants.TunerConstants;
 import frc.robot.constants.Constants.DebugConstants;
 import frc.robot.constants.Constants.OIConstants;
+import frc.robot.constants.ConfiguredOperatorControls;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
 import frc.robot.subsystems.ClimberSubsystem;
 import frc.robot.subsystems.ConveyorSubsystem;
@@ -143,13 +144,13 @@ public class DriveBaseContainer {
         final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
 
         // Touchpad is reserved for wheel-lock so it does not conflict with R1/intake output.
-        Trigger brakeButton = availableButton(14);
+        Trigger brakeButton = availableButton(ConfiguredOperatorControls.DRIVER_WHEEL_LOCK);
         brakeButton.whileTrue(drivetrain.applyRequest(() -> brake));
 
         // Create resets the field-centric heading without colliding with mechanism controls.
-        availableButton(9)
+        availableButton(ConfiguredOperatorControls.DRIVER_SEED_FIELD)
             .and(brakeButton.negate())
-            .and(availableButton(12).negate())
+            .and(availableButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP).negate())
             .onTrue(drivetrain.runOnce(drivetrain::seedFieldCentric));
 
         drivetrain.registerTelemetry(logger::captureState);
@@ -175,9 +176,9 @@ public class DriveBaseContainer {
         boolean anyAxisActive = Math.abs(axis0) > OIConstants.kDriveDeadband
             || Math.abs(axis1) > OIConstants.kDriveDeadband
             || Math.abs(axis2) > OIConstants.kDriveDeadband;
-        boolean anyControlButton = rawButtonPressed(9)
-            || rawButtonPressed(12)
-            || rawButtonPressed(14);
+        boolean anyControlButton = rawButtonPressed(ConfiguredOperatorControls.DRIVER_SEED_FIELD)
+            || rawButtonPressed(ConfiguredOperatorControls.DRIVER_JUMP_BUMP)
+            || rawButtonPressed(ConfiguredOperatorControls.DRIVER_WHEEL_LOCK);
         int sourceSignature = DriverStation.getStickButtonCount(
             OIConstants.kDriverControllerPort)
             | (DriverStation.getStickAxisCount(OIConstants.kDriverControllerPort) << 8)

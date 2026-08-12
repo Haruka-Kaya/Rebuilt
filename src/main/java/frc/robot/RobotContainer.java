@@ -17,6 +17,7 @@ import frc.robot.commands.OutputCommand;
 import frc.robot.commands.RetractIntakeCommand;
 import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.Constants.OIConstants;
+import frc.robot.constants.ConfiguredOperatorControls;
 import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.containers.DriveBaseContainer;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
@@ -103,6 +104,9 @@ public class RobotContainer {
         m_driverController,
         m_DriveBaseContainer::driverInputsAllowed);
 
+    SmartDashboard.putString(
+        "Controls/Configured", ConfiguredOperatorControls.configuredSummary());
+
     // Configure the button bindings (put this last)
     configureButtonBindings();
   }
@@ -128,11 +132,20 @@ public class RobotContainer {
     exclusiveIntakePathButton(IntakePathAction.INTAKE).whileTrue(slurp);
     exclusiveIntakePathButton(IntakePathAction.OUTPUT).whileTrue(spit);
 
-    availableButton(m_driverController, OIConstants.kDriverControllerPort, 12)
-        .and(availableButton(m_driverController, OIConstants.kDriverControllerPort, 14).negate())
+    availableButton(
+        m_driverController,
+        OIConstants.kDriverControllerPort,
+        ConfiguredOperatorControls.DRIVER_JUMP_BUMP)
+        .and(availableButton(
+            m_driverController,
+            OIConstants.kDriverControllerPort,
+            ConfiguredOperatorControls.DRIVER_WHEEL_LOCK).negate())
         .whileTrue(jumpBump);
 
-    availableButton(m_driverController, OIConstants.kDriverControllerPort, 7).whileTrue(revWheel);
+    availableButton(
+        m_driverController,
+        OIConstants.kDriverControllerPort,
+        ConfiguredOperatorControls.DRIVER_REV).whileTrue(revWheel);
     exclusiveIntakePathButton(IntakePathAction.FIRE).whileTrue(fire);
 
     exclusiveIntakePathButton(IntakePathAction.RETRACT).whileTrue(back_in_shell);
@@ -140,8 +153,8 @@ public class RobotContainer {
     operatorOrDriverButton(
         m_maintenanceController,
         OIConstants.kMaintenanceControllerPort,
-        5,
-        4)
+        ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM,
+        ConfiguredOperatorControls.DRIVER_AUTO_AIM_FALLBACK)
         .whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret)
             .finallyDo(interrupted -> m_turret.stop()));
 
@@ -159,14 +172,23 @@ public class RobotContainer {
       if (!teleopInputsAllowed()) {
         return false;
       }
-      boolean intake = rawButtonPressed(m_driverController, OIConstants.kDriverControllerPort, 5);
-      boolean output = rawButtonPressed(m_driverController, OIConstants.kDriverControllerPort, 6);
-      boolean firePressed = rawButtonPressed(m_driverController, OIConstants.kDriverControllerPort, 8);
+      boolean intake = rawButtonPressed(
+          m_driverController,
+          OIConstants.kDriverControllerPort,
+          ConfiguredOperatorControls.DRIVER_INTAKE);
+      boolean output = rawButtonPressed(
+          m_driverController,
+          OIConstants.kDriverControllerPort,
+          ConfiguredOperatorControls.DRIVER_OUTPUT);
+      boolean firePressed = rawButtonPressed(
+          m_driverController,
+          OIConstants.kDriverControllerPort,
+          ConfiguredOperatorControls.DRIVER_FIRE);
       boolean retract = operatorOrDriverPressed(
           m_operatorController,
           OIConstants.kOperatorControllerPort,
-          5,
-          1);
+          ConfiguredOperatorControls.OPERATOR_RETRACT,
+          ConfiguredOperatorControls.DRIVER_RETRACT_FALLBACK);
       int pressedCount = (intake ? 1 : 0)
           + (output ? 1 : 0)
           + (firePressed ? 1 : 0)
@@ -198,15 +220,19 @@ public class RobotContainer {
   }
 
   private boolean teleopInputsAllowed() {
-    int[] driverButtons = {1, 4, 5, 6, 7, 8, 9, 12, 14};
     boolean anyPressed = false;
-    for (int button : driverButtons) {
+    for (int button : ConfiguredOperatorControls.driverSafetyButtons()) {
       anyPressed |= rawButtonPressed(
           m_driverController, OIConstants.kDriverControllerPort, button);
     }
-    anyPressed |= rawButtonPressed(m_operatorController, OIConstants.kOperatorControllerPort, 5);
     anyPressed |= rawButtonPressed(
-        m_maintenanceController, OIConstants.kMaintenanceControllerPort, 5);
+        m_operatorController,
+        OIConstants.kOperatorControllerPort,
+        ConfiguredOperatorControls.OPERATOR_RETRACT);
+    anyPressed |= rawButtonPressed(
+        m_maintenanceController,
+        OIConstants.kMaintenanceControllerPort,
+        ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM);
     return m_teleopInputGate.allow(
         DriverStation.isTeleopEnabled(), m_teleopSafetySourceSignature, anyPressed);
   }
@@ -247,10 +273,14 @@ public class RobotContainer {
   }
 
   private void configureClimberDiagnosticBindings() {
-    bindClimberDiagnostic(1, MotorSide.LEFT, 1.0);
-    bindClimberDiagnostic(2, MotorSide.LEFT, -1.0);
-    bindClimberDiagnostic(3, MotorSide.RIGHT, 1.0);
-    bindClimberDiagnostic(4, MotorSide.RIGHT, -1.0);
+    bindClimberDiagnostic(
+        ConfiguredOperatorControls.CLIMBER_LEFT_POSITIVE, MotorSide.LEFT, 1.0);
+    bindClimberDiagnostic(
+        ConfiguredOperatorControls.CLIMBER_LEFT_NEGATIVE, MotorSide.LEFT, -1.0);
+    bindClimberDiagnostic(
+        ConfiguredOperatorControls.CLIMBER_RIGHT_POSITIVE, MotorSide.RIGHT, 1.0);
+    bindClimberDiagnostic(
+        ConfiguredOperatorControls.CLIMBER_RIGHT_NEGATIVE, MotorSide.RIGHT, -1.0);
   }
 
   private void bindClimberDiagnostic(int faceButton, MotorSide side, double sign) {
@@ -276,15 +306,16 @@ public class RobotContainer {
 
   private boolean climberDiagnosticPressed(int selectedFaceButton) {
     CommandPS5Controller controller = DriverStation.getStickButtonCount(
-        OIConstants.kMaintenanceControllerPort) >= 10
+        OIConstants.kMaintenanceControllerPort) >= ConfiguredOperatorControls.CLIMBER_DEADMAN
             ? m_maintenanceController
             : m_driverController;
     int port = controller == m_maintenanceController
         ? OIConstants.kMaintenanceControllerPort
         : OIConstants.kDriverControllerPort;
-    boolean deadmanPressed = rawButtonPressed(controller, port, 10);
+    boolean deadmanPressed = rawButtonPressed(
+        controller, port, ConfiguredOperatorControls.CLIMBER_DEADMAN);
     int pressedFaces = 0;
-    for (int button = 1; button <= 4; button++) {
+    for (int button : ConfiguredOperatorControls.climberFaceButtons()) {
       if (rawButtonPressed(controller, port, button)) {
         pressedFaces++;
       }

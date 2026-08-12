@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import frc.robot.commands.HardwareSelfTestCommand;
 import frc.robot.constants.ConfiguredCanHardware;
+import frc.robot.constants.ConfiguredOperatorControls;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -25,10 +26,13 @@ class OperatorAssetTest {
   private static final int OPERATOR_PORT = 1;
   private static final int MAINTENANCE_PORT = 2;
   // RobotContainer binds driver raw button 14 and maintenance deadman raw button 10.
-  private static final int REQUIRED_DRIVER_BUTTONS = 14;
+  private static final int REQUIRED_DRIVER_BUTTONS =
+      ConfiguredOperatorControls.maximumDriverButton();
   private static final int REQUIRED_DRIVER_AXES = 3;
-  private static final int REQUIRED_OPERATOR_BUTTONS = 5;
-  private static final int REQUIRED_MAINTENANCE_BUTTONS = 10;
+  private static final int REQUIRED_OPERATOR_BUTTONS =
+      ConfiguredOperatorControls.maximumOperatorButton();
+  private static final int REQUIRED_MAINTENANCE_BUTTONS =
+      ConfiguredOperatorControls.maximumMaintenanceButton();
 
   private static final Map<String, WidgetExpectation> REQUIRED_DIAGNOSTIC_WIDGETS = Map.ofEntries(
       Map.entry("/SmartDashboard/Auto Chooser", new WidgetExpectation("ComboBox Chooser", null)),
@@ -90,6 +94,9 @@ class OperatorAssetTest {
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
           "/SmartDashboard/Hardware Self-Test/GLOBAL_END/Stop Result",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Controls/Configured",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
           "/SmartDashboard/Climber Diagnostic/Armed",
