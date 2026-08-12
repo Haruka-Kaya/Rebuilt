@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import frc.robot.commands.HardwareSelfTestCommand;
+import frc.robot.constants.ConfiguredCanHardware;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -76,6 +77,21 @@ class OperatorAssetTest {
           "/SmartDashboard/Hardware Self-Test/Abort Reason",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
+          "/SmartDashboard/Hardware/CAN Configured",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware/SPARK Health",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware/CTRE Health",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/GLOBAL_START/Stop Result",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/GLOBAL_END/Stop Result",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
           "/SmartDashboard/Climber Diagnostic/Armed",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
@@ -134,6 +150,26 @@ class OperatorAssetTest {
   }
 
   @Test
+  void diagnosticsWidgetsHavePositiveNonoverlappingRectangles() throws IOException {
+    JsonNode root = objectMapper.readTree(COMP_LAYOUT.toFile());
+    JsonNode diagnosticsTab = findTab(root, "Diagnostics / Setup");
+    assertNotNull(diagnosticsTab, "Diagnostics / Setup tab is missing");
+    JsonNode widgets = diagnosticsTab.at("/grid_layout/containers");
+
+    for (int first = 0; first < widgets.size(); first++) {
+      JsonNode firstWidget = widgets.get(first);
+      assertPositiveRectangle(firstWidget);
+      for (int second = first + 1; second < widgets.size(); second++) {
+        JsonNode secondWidget = widgets.get(second);
+        assertFalse(
+            rectanglesOverlap(firstWidget, secondWidget),
+            () -> firstWidget.path("title").asText()
+                + " overlaps " + secondWidget.path("title").asText());
+      }
+    }
+  }
+
+  @Test
   void bothAllianceLayoutsExposeTheHubReleaseInterlock() throws IOException {
     JsonNode root = objectMapper.readTree(COMP_LAYOUT.toFile());
 
@@ -165,17 +201,33 @@ class OperatorAssetTest {
   }
 
   @Test
-  void hardwareSelfTestCoverageUsesTheExactCtreDeviceSet() throws ReflectiveOperationException {
-    var coverageField = HardwareSelfTestCommand.class.getDeclaredField("COVERAGE_MANIFEST");
-    coverageField.setAccessible(true);
-    String coverage = (String) coverageField.get(null);
+  void hardwareSelfTestCoverageUsesTheExactCtreDeviceSet() {
+    String coverage = HardwareSelfTestCommand.getCoverageManifest();
+    String expectedCoverage = ConfiguredCanHardware.ctreCoverageLabel()
+        + " swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY";
 
     assertAll(
-        () -> assertTrue(
-            coverage.contains("CTRE20,40-43,50-57 swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY"),
+        () -> assertTrue(coverage.contains(expectedCoverage),
             "Coverage must list only the configured Pigeon, CANcoder, steer, and drive IDs"),
         () -> assertFalse(coverage.contains("CTRE20/40-57"),
             "Coverage must not imply nonexistent CTRE IDs 44-49"));
+  }
+
+  @Test
+  void hardwareSelfTestResetsEveryConfiguredStopBarrierResult() {
+    assertEquals(
+        Set.of(
+            "GLOBAL_START",
+            "SPARK_ID31_INTAKE_ROLLER_SPARK_STOP",
+            "SPARK_ID32_FEEDER_CONTROLLED_RETEST_SPARK_STOP",
+            "SPARK_ID33_CONVEYOR_SPARK_STOP",
+            "SPARK_ID36_37_FLYWHEEL_PAIR_SPARK_STOP",
+            "SPARK_ID37_FOLLOWER_ISOLATED_SPARK_STOP",
+            "SWERVE_FORWARD_SWERVE_STOP",
+            "SWERVE_STRAFE_SWERVE_STOP",
+            "SWERVE_ROTATE_SWERVE_STOP",
+            "GLOBAL_END"),
+        Set.copyOf(HardwareSelfTestCommand.getStopResultNames()));
   }
 
   private static JsonNode findTab(JsonNode root, String name) {
@@ -237,6 +289,22 @@ class OperatorAssetTest {
         || (key >= 290 && key <= 314)
         || (key >= 320 && key <= 336)
         || (key >= 340 && key <= 348);
+  }
+
+  private static void assertPositiveRectangle(JsonNode widget) {
+    assertTrue(widget.path("width").asDouble() > 0.0, widget.path("title").asText());
+    assertTrue(widget.path("height").asDouble() > 0.0, widget.path("title").asText());
+  }
+
+  private static boolean rectanglesOverlap(JsonNode first, JsonNode second) {
+    double firstX = first.path("x").asDouble();
+    double firstY = first.path("y").asDouble();
+    double secondX = second.path("x").asDouble();
+    double secondY = second.path("y").asDouble();
+    return firstX < secondX + second.path("width").asDouble()
+        && firstX + first.path("width").asDouble() > secondX
+        && firstY < secondY + second.path("height").asDouble()
+        && firstY + first.path("height").asDouble() > secondY;
   }
 
   private record WidgetExpectation(String type, String dataType) {}

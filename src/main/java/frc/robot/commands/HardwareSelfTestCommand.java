@@ -18,6 +18,7 @@ import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.Constants.IntakeConstants;
 import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.constants.Constants.ShooterConstants;
+import frc.robot.constants.ConfiguredCanHardware;
 import frc.robot.constants.TunerConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.MotionResult;
@@ -39,7 +40,9 @@ public final class HardwareSelfTestCommand {
 
     private static final double FOLLOWER_DIAGNOSTIC_DUTY = 0.08;
     private static final double FOLLOWER_DIAGNOSTIC_SECONDS = 1.20;
-    private static final int[] ALL_SPARK_IDS = {30, 31, 32, 33, 34, 35, 36, 37, 38, 39};
+    private static final int[] ALL_SPARK_IDS = ConfiguredCanHardware.sparkDeviceIds().stream()
+        .mapToInt(Integer::intValue)
+        .toArray();
 
     private static final String COVERAGE_MANIFEST = String.join(
         "; ",
@@ -54,7 +57,20 @@ public final class HardwareSelfTestCommand {
         "Spark37 follower=ISOLATED_STAGE",
         "Spark38 shooter actuator=SKIP_UNREFERENCED",
         "Spark39 turret=SKIP_UNREFERENCED",
-        "CTRE20,40-43,50-57 swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY");
+        ConfiguredCanHardware.ctreCoverageLabel()
+            + " swerve=LOW_OUTPUT_MOTION_OBSERVED_ONLY");
+
+    private static final List<String> STOP_RESULT_NAMES = List.of(
+        "GLOBAL_START",
+        "SPARK_ID31_INTAKE_ROLLER_SPARK_STOP",
+        "SPARK_ID32_FEEDER_CONTROLLED_RETEST_SPARK_STOP",
+        "SPARK_ID33_CONVEYOR_SPARK_STOP",
+        "SPARK_ID36_37_FLYWHEEL_PAIR_SPARK_STOP",
+        "SPARK_ID37_FOLLOWER_ISOLATED_SPARK_STOP",
+        "SWERVE_FORWARD_SWERVE_STOP",
+        "SWERVE_STRAFE_SWERVE_STOP",
+        "SWERVE_ROTATE_SWERVE_STOP",
+        "GLOBAL_END");
 
     private static final List<String> RESULT_TARGETS = List.of(
         "SPARK_ID30_INTAKE_ACTUATOR",
@@ -92,6 +108,9 @@ public final class HardwareSelfTestCommand {
                 sparkCanResults.clear();
                 for (String target : RESULT_TARGETS) {
                     publishResult(results, target, MotionResult.NOT_RUN);
+                }
+                for (String stopResultName : STOP_RESULT_NAMES) {
+                    SmartDashboard.putString(stopResultKey(stopResultName), "NOT_RUN");
                 }
                 SmartDashboard.putBoolean(RUNNING_KEY, true);
                 SmartDashboard.putNumber("Hardware Self-Test/Run ID", Timer.getFPGATimestamp());
@@ -579,7 +598,7 @@ public final class HardwareSelfTestCommand {
             Subsystem... requirements) {
         StopMonitor[] monitor = {null};
         StopPoll[] latest = {new StopPoll(false, "NOT_REQUESTED")};
-        String dashboardKey = "Hardware Self-Test/" + name + "/Stop Result";
+        String dashboardKey = stopResultKey(name);
 
         return Commands.sequence(
             Commands.runOnce(() -> {
@@ -604,6 +623,18 @@ public final class HardwareSelfTestCommand {
                     log(name + "_TIMEOUT", latest[0].summary());
                 }
             }));
+    }
+
+    public static String getCoverageManifest() {
+        return COVERAGE_MANIFEST;
+    }
+
+    public static List<String> getStopResultNames() {
+        return STOP_RESULT_NAMES;
+    }
+
+    private static String stopResultKey(String name) {
+        return "Hardware Self-Test/" + name + "/Stop Result";
     }
 
     private static CommandSwerveDrivetrain.SwerveDiagnosticEvidence getSwerveEvidence(
@@ -664,7 +695,7 @@ public final class HardwareSelfTestCommand {
     }
 
     private static void captureSparkCanResults(Map<Integer, Boolean> canResults) {
-        for (int canId = 30; canId <= 39; canId++) {
+        for (int canId : ALL_SPARK_IDS) {
             boolean ready = SparkMAXContainer.getDiagnosticSnapshotForId(canId)
                 .map(Snapshot::ready)
                 .orElse(false);
@@ -687,7 +718,7 @@ public final class HardwareSelfTestCommand {
                 || result == MotionResult.FAIL_DIRECTION_MISMATCH
                 || result == MotionResult.STALL_SUSPECTED
                 || result == MotionResult.BLOCKED_KNOWN_FAULT);
-        attentionRequired |= sparkCanResults.size() != 10
+        attentionRequired |= sparkCanResults.size() != ALL_SPARK_IDS.length
             || sparkCanResults.values().stream().anyMatch(ready -> !ready);
         attentionRequired |= !runState.mayContinue();
         boolean incomplete = results.values().stream().anyMatch(result ->

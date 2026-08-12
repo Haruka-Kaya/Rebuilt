@@ -23,3 +23,16 @@ The programmer knows what it is doing at all times. It knows this because it kno
 結果は対応する`Tuning/<name>/Status`に表示されます。PIDを変更するとcontroller configurationとposition continuityが失効するため、将来homingを実装した後は再homingが必要です。
 
 `SPARK_HEALTH`の`SETPOINT_US=<last>/<max>`はREV setpoint JNIの直近・最大実行時間（microseconds）です。実機再接続時にDriver Stationのloop overrunとあわせて確認してください。
+
+## 実機commissioning
+
+現在コードが前提にしているCAN mapは、SPARK `30..39`、Pigeon `20`、CANcoder `40..43`、swerve steer/drive `50..57`です。これはソフトウェア設定値であり、実機配線の証明ではありません。設計図またはlive inventoryと一致するまでcalibrated autonomousと未homing位置機構は有効にしません。
+
+再接続後はDisabledのまま次の順で確認します。
+
+1. Driver StationとDiagnostics / Setupで全23 CAN IDが一意かつfreshであることを確認する。
+2. Pigeonが現在値`20`か、旧生成値`49`かを実機inventoryで確定する。
+3. Hardware Self-Testの`GLOBAL_START` stop barrierがCONFIRMEDになってから低出力motion evidenceを採る。
+4. Feeder ID32は物理詰まり・電源枝を解消してから、compile-time controlled retestを明示的に有効化して3%だけ再試験する。
+5. ID30/38/39はlimit switchまたはabsolute referenceを実装してからhomingし、位置方向・soft limitを確認する。
+6. Swerveのwheel radius、module位置、gear ratio、maximum speedをCAD/実測と一致させた後にautonomous calibration blockを解除する。

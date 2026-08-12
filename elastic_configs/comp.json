@@ -597,6 +597,71 @@
               "period": 0.06,
               "data_type": "string"
             }
+          },
+          {
+            "title": "Configured CAN Map",
+            "x": 0.0,
+            "y": 1152.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware/CAN Configured",
+              "period": 0.25,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "SPARK Health",
+            "x": 384.0,
+            "y": 1152.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware/SPARK Health",
+              "period": 0.25,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "CTRE Health",
+            "x": 768.0,
+            "y": 1152.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware/CTRE Health",
+              "period": 0.25,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Self-Test Initial Stop",
+            "x": 0.0,
+            "y": 1280.0,
+            "width": 576.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware Self-Test/GLOBAL_START/Stop Result",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Self-Test Final Stop",
+            "x": 576.0,
+            "y": 1280.0,
+            "width": 576.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware Self-Test/GLOBAL_END/Stop Result",
+              "period": 0.06,
+              "data_type": "string"
+            }
           }
         ]
       }

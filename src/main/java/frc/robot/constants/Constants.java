@@ -74,8 +74,8 @@ public final class Constants {
   }
 
   public static final class IntakeConstants {
-    public static final int INTAKE_ACTUATOR_CAN_ID = 30;
-    public static final int INTAKE_ROLLER_CAN_ID = 31;
+    public static final int INTAKE_ACTUATOR_CAN_ID = ConfiguredCanHardware.INTAKE_ACTUATOR_ID;
+    public static final int INTAKE_ROLLER_CAN_ID = ConfiguredCanHardware.INTAKE_ROLLER_ID;
     public static final int ROLLER_CURRENT_LIMIT_AMPS = 20;
 
     public static final double EXTENDED_ANGLE_DEGREES = 75;
@@ -86,8 +86,8 @@ public final class Constants {
   }
 
   public static final class ManipulatorConstants {
-    public static final int FEEDER_CAN_ID = 32;
-    public static final int CONVEYOR_CAN_ID = 33;
+    public static final int FEEDER_CAN_ID = ConfiguredCanHardware.FEEDER_ID;
+    public static final int CONVEYOR_CAN_ID = ConfiguredCanHardware.CONVEYOR_ID;
     public static final int FEEDER_CURRENT_LIMIT_AMPS = 10;
     public static final int CONVEYOR_CURRENT_LIMIT_AMPS = 15;
 
@@ -112,8 +112,8 @@ public final class Constants {
   }
 
   public static final class ClimberConstants {
-    public static final int LEFT_MOTOR_CAN_ID = 34;
-    public static final int RIGHT_MOTOR_CAN_ID = 35;
+    public static final int LEFT_MOTOR_CAN_ID = ConfiguredCanHardware.CLIMBER_LEFT_ID;
+    public static final int RIGHT_MOTOR_CAN_ID = ConfiguredCanHardware.CLIMBER_RIGHT_ID;
 
     /** Conservative limits until the motor type, gearing, and load are verified from the design. */
     public static final int DIAGNOSTIC_CURRENT_LIMIT_AMPS = 10;
@@ -122,9 +122,9 @@ public final class Constants {
   }
 
   public static final class ShooterConstants {
-    public static final int SHOOTER_1_CAN_ID = 36;
-    public static final int SHOOTER_2_CAN_ID = 37;
-    public static final int ACTUATOR_CAN_ID = 38;
+    public static final int SHOOTER_1_CAN_ID = ConfiguredCanHardware.SHOOTER_LEADER_ID;
+    public static final int SHOOTER_2_CAN_ID = ConfiguredCanHardware.SHOOTER_FOLLOWER_ID;
+    public static final int ACTUATOR_CAN_ID = ConfiguredCanHardware.SHOOTER_ACTUATOR_ID;
     public static final int FLYWHEEL_CURRENT_LIMIT_AMPS = 30;
   }
 
@@ -164,7 +164,7 @@ public final class Constants {
   }
 
   public static final class TurretConstants {
-    public static final int TURRET_CAN_ID = 39;
+    public static final int TURRET_CAN_ID = ConfiguredCanHardware.TURRET_ID;
 
     // Gear ratio motor : turret
     public static final double GEAR_RATIO = 36.0;

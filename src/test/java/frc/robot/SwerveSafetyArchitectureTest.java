@@ -14,6 +14,8 @@ class SwerveSafetyArchitectureTest {
       "src", "main", "java", "frc", "robot", "subsystems", "CommandSwerveDrivetrain.java");
   private static final Path DRIVE_CONTAINER_SOURCE = Path.of(
       "src", "main", "java", "frc", "robot", "containers", "DriveBaseContainer.java");
+  private static final Path ALIGNMENT_COMMAND_SOURCE = Path.of(
+      "src", "main", "java", "frc", "robot", "commands", "AlignmentCommand.java");
 
   @Test
   void failClosedPathsNeverUseCtreIdleBecauseItLeavesThePreviousRequestLatched()
@@ -27,6 +29,16 @@ class SwerveSafetyArchitectureTest {
     assertTrue(drivetrain.contains("appliedGeneration.get() == generation"));
     assertTrue(drivetrain.contains("kNeutralRetryPeriodSeconds"));
     assertTrue(container.contains("drivetrain.safeIdleCommand()"));
+  }
+
+  @Test
+  void everyReusableDriveCommandRequestsRealNeutralWhenItEnds() throws IOException {
+    String drivetrain = Files.readString(DRIVETRAIN_SOURCE);
+    String alignment = Files.readString(ALIGNMENT_COMMAND_SOURCE);
+
+    assertTrue(drivetrain.contains("}).finallyDo(interrupted -> requestIdle());"));
+    assertTrue(alignment.contains("drive.requestIdle();"));
+    assertFalse(alignment.contains("drive.drive(0, 0, 0"));
   }
 
   @Test

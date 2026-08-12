@@ -17,6 +17,7 @@ import frc.robot.utils.OneShotTimedArmGate;
 import frc.robot.utils.RuntimeSafetyLatch;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.constants.Constants.HardwareTestConstants;
+import frc.robot.constants.ConfiguredCanHardware;
 
 /**
  * The VM is configured to automatically run this class, and to call the functions corresponding to
@@ -31,6 +32,7 @@ public class Robot extends TimedRobot {
   private RobotContainer m_robotContainer;
   private double m_nextDiagnosticTimestamp;
   private double m_nextOperatorStatusTimestamp;
+  private boolean m_hardwareHealthSuppressedForFms;
   private final RuntimeSafetyLatch m_runtimeSafetyLatch = new RuntimeSafetyLatch();
   private final OneShotTimedArmGate m_selfTestArmGate = new OneShotTimedArmGate(
       HardwareTestConstants.ARM_LIFETIME_SECONDS);
@@ -50,6 +52,10 @@ public class Robot extends TimedRobot {
     SmartDashboard.putBoolean("Hub Active", false);
     SmartDashboard.putBoolean("Runtime/Scheduler Healthy", true);
     SmartDashboard.putString("Runtime/Fault", "HEALTHY");
+    SmartDashboard.putString(
+        "Hardware/CAN Configured", ConfiguredCanHardware.configuredSummary());
+    SmartDashboard.putString("Hardware/SPARK Health", "WAITING_FOR_SAMPLE");
+    SmartDashboard.putString("Hardware/CTRE Health", "WAITING_FOR_SAMPLE");
   }
 
   /**
@@ -95,6 +101,10 @@ public class Robot extends TimedRobot {
 
       if (!DriverStation.isFMSAttached() && now >= m_nextDiagnosticTimestamp) {
         var canStatus = RobotController.getCANStatus();
+        String sparkHealth = m_robotContainer.getSparkDeviceHealthSummary();
+        String ctreHealth = m_robotContainer.getSwerveDeviceHealthSummary();
+        SmartDashboard.putString("Hardware/SPARK Health", sparkHealth);
+        SmartDashboard.putString("Hardware/CTRE Health", ctreHealth);
         AsyncDiagnosticSink.log(String.format(
             "DIAGNOSTICS ds=%s enabled=%s voltage=%.2fV canUtil=%.1f%% busOff=%d txFull=%d rxErr=%d txErr=%d "
                 + "sticks=[0:'%s' a%d b%d; 1:'%s' a%d b%d; 2:'%s' a%d b%d] "
@@ -108,9 +118,14 @@ public class Robot extends TimedRobot {
             DriverStation.getStickButtonCount(1),
             DriverStation.getJoystickName(2), DriverStation.getStickAxisCount(2),
             DriverStation.getStickButtonCount(2),
-            m_robotContainer.getSparkDeviceHealthSummary(),
-            m_robotContainer.getSwerveDeviceHealthSummary()));
+            sparkHealth,
+            ctreHealth));
+        m_hardwareHealthSuppressedForFms = false;
         m_nextDiagnosticTimestamp = now + 5.0;
+      } else if (DriverStation.isFMSAttached() && !m_hardwareHealthSuppressedForFms) {
+        SmartDashboard.putString("Hardware/SPARK Health", "SUPPRESSED_FMS");
+        SmartDashboard.putString("Hardware/CTRE Health", "SUPPRESSED_FMS");
+        m_hardwareHealthSuppressedForFms = true;
       }
     } catch (RuntimeException exception) {
       latchRuntimeFault(exception);

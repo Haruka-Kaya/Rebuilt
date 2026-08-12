@@ -60,7 +60,7 @@ public class AlignmentCommand extends Command {
 
     @Override
     public void end(boolean interrupted) {
-        drive.drive(0, 0, 0, fieldRelative);
+        drive.requestIdle();
     }
 
     

@@ -87,7 +87,7 @@ public class TunerConstants {
     private static final boolean kInvertLeftSide = false;
     private static final boolean kInvertRightSide = true;
 
-    private static final int kPigeonId = 20;
+    private static final int kPigeonId = ConfiguredCanHardware.PIGEON_ID;
 
     // These are only used for simulation
     private static final MomentOfInertia kSteerInertia = KilogramSquareMeters.of(0.01);
@@ -126,9 +126,9 @@ public class TunerConstants {
 
 
     // Front Left
-    private static final int kFrontLeftDriveMotorId = 51;
-    private static final int kFrontLeftSteerMotorId = 50;
-    private static final int kFrontLeftEncoderId = 40;
+    private static final int kFrontLeftDriveMotorId = ConfiguredCanHardware.FRONT_LEFT_DRIVE_ID;
+    private static final int kFrontLeftSteerMotorId = ConfiguredCanHardware.FRONT_LEFT_STEER_ID;
+    private static final int kFrontLeftEncoderId = ConfiguredCanHardware.FRONT_LEFT_ENCODER_ID;
     private static final Angle kFrontLeftEncoderOffset = Rotations.of(0.176025390625);
     private static final boolean kFrontLeftSteerMotorInverted = false;
     private static final boolean kFrontLeftEncoderInverted = false;
@@ -137,9 +137,9 @@ public class TunerConstants {
     private static final Distance kFrontLeftYPos = Inches.of(13.563);
 
     // Front Right
-    private static final int kFrontRightDriveMotorId = 53;
-    private static final int kFrontRightSteerMotorId = 52;
-    private static final int kFrontRightEncoderId = 41;
+    private static final int kFrontRightDriveMotorId = ConfiguredCanHardware.FRONT_RIGHT_DRIVE_ID;
+    private static final int kFrontRightSteerMotorId = ConfiguredCanHardware.FRONT_RIGHT_STEER_ID;
+    private static final int kFrontRightEncoderId = ConfiguredCanHardware.FRONT_RIGHT_ENCODER_ID;
     private static final Angle kFrontRightEncoderOffset = Rotations.of(-0.287841796875);
     private static final boolean kFrontRightSteerMotorInverted = false;
     private static final boolean kFrontRightEncoderInverted = false;
@@ -148,9 +148,9 @@ public class TunerConstants {
     private static final Distance kFrontRightYPos = Inches.of(-13.563);
 
     // Back Left
-    private static final int kBackLeftDriveMotorId = 55;
-    private static final int kBackLeftSteerMotorId = 54;
-    private static final int kBackLeftEncoderId = 42;
+    private static final int kBackLeftDriveMotorId = ConfiguredCanHardware.BACK_LEFT_DRIVE_ID;
+    private static final int kBackLeftSteerMotorId = ConfiguredCanHardware.BACK_LEFT_STEER_ID;
+    private static final int kBackLeftEncoderId = ConfiguredCanHardware.BACK_LEFT_ENCODER_ID;
     private static final Angle kBackLeftEncoderOffset = Rotations.of(-0.4248046875);
     private static final boolean kBackLeftSteerMotorInverted = false;
     private static final boolean kBackLeftEncoderInverted = false;
@@ -159,9 +159,9 @@ public class TunerConstants {
     private static final Distance kBackLeftYPos = Inches.of(13.563);
 
     // Back Right
-    private static final int kBackRightDriveMotorId = 57;
-    private static final int kBackRightSteerMotorId = 56;
-    private static final int kBackRightEncoderId = 43;
+    private static final int kBackRightDriveMotorId = ConfiguredCanHardware.BACK_RIGHT_DRIVE_ID;
+    private static final int kBackRightSteerMotorId = ConfiguredCanHardware.BACK_RIGHT_STEER_ID;
+    private static final int kBackRightEncoderId = ConfiguredCanHardware.BACK_RIGHT_ENCODER_ID;
     private static final Angle kBackRightEncoderOffset = Rotations.of(0.080810546875);
     private static final boolean kBackRightSteerMotorInverted = false;
     private static final boolean kBackRightEncoderInverted = false;
