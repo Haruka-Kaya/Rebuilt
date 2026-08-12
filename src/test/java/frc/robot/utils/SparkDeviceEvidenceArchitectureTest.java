@@ -127,6 +127,29 @@ class SparkDeviceEvidenceArchitectureTest {
         "sendSetpointTracked(0.0, ControlType.kDutyCycle)"));
   }
 
+  @Test
+  void desktopFollowerDiagnosticNeverCallsUnsupportedNativePauseOrResume() throws IOException {
+    String source = Files.readString(CONTAINER_SOURCE);
+    String beginDiagnostic = between(
+        source,
+        "public boolean beginFollowerDiagnostic(double output)",
+        "/** Called only while OUTPUT_ORDER_LOCK is held. */");
+    String zeroWorker = between(
+        source, "private static void runZeroWork(", "private void completeZeroLocked(");
+
+    int simulationPauseBranch = beginDiagnostic.indexOf("if (simulationHandle != null)");
+    int nativePause = beginDiagnostic.indexOf("motor::pauseFollowerModeAsync");
+    int simulationResumeBranch = zeroWorker.indexOf("if (device.simulationHandle != null)");
+    int nativeResume = zeroWorker.indexOf("device.motor::resumeFollowerMode");
+
+    assertTrue(simulationPauseBranch >= 0 && simulationPauseBranch < nativePause);
+    assertTrue(beginDiagnostic.substring(simulationPauseBranch, nativePause)
+        .contains("FollowerDiagnosticMode.PAUSE_PENDING"));
+    assertTrue(simulationResumeBranch >= 0 && simulationResumeBranch < nativeResume);
+    assertTrue(zeroWorker.substring(simulationResumeBranch, nativeResume)
+        .contains("resumeResult = REVLibError.kOk"));
+  }
+
   private static String between(String source, String start, String end) {
     int startIndex = source.indexOf(start);
     int endIndex = source.indexOf(end, startIndex + start.length());

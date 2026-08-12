@@ -78,7 +78,10 @@ class OperatorAssetTest {
           "/SmartDashboard/Hardware Self-Test/Coverage",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
-          "/SmartDashboard/Hardware Self-Test/CAN Results",
+          "/SmartDashboard/Hardware Self-Test/All CAN Results",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware Self-Test/Evidence Source",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
           "/SmartDashboard/Hardware Self-Test/Abort Reason",

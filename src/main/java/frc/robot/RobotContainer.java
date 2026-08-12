@@ -42,6 +42,7 @@ import frc.robot.utils.OperatorActionEvidence;
 import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.RobotOutputSafetySupervisor;
 import frc.robot.utils.RobotOutputSafetySupervisor.StopSession;
+import frc.robot.utils.RobotOutputSafetySupervisor.Snapshot;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.RunCommand;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
@@ -726,8 +727,8 @@ public class RobotContainer implements AutoCloseable {
     return this.m_DriveBaseContainer.GetAutonCommand();
   }
 
-  public boolean shouldAbortActiveAutonomous() {
-    return m_DriveBaseContainer.shouldAbortActiveAutonomous();
+  public boolean shouldAbortActiveAutonomous(Snapshot outputSafetySnapshot) {
+    return m_DriveBaseContainer.shouldAbortActiveAutonomous(outputSafetySnapshot);
   }
 
   public void refreshAutonomousStatus() {

@@ -338,16 +338,22 @@ public class SparkMAXContainer implements MotorContainer {
       }
       resumeDeferredForLeader = resumeAfterZero && !leaderStoppedForResume;
       if (resumeAfterZero && leaderStoppedForResume) {
-        try {
-          resumeResult = device.callVendorIo(device.motor::resumeFollowerMode);
-          if (resumeResult == null) {
+        if (device.simulationHandle != null) {
+          // The desktop follower transition is modeled in Java; the configured native follower
+          // remains intact and is observed again on the next periodic status sample.
+          resumeResult = REVLibError.kOk;
+        } else {
+          try {
+            resumeResult = device.callVendorIo(device.motor::resumeFollowerMode);
+            if (resumeResult == null) {
+              resumeResult = REVLibError.kError;
+              resumeException = "follower resume returned null";
+            }
+          } catch (RuntimeException exception) {
             resumeResult = REVLibError.kError;
-            resumeException = "follower resume returned null";
+            resumeException = "follower resume exception "
+                + exception.getClass().getSimpleName();
           }
-        } catch (RuntimeException exception) {
-          resumeResult = REVLibError.kError;
-          resumeException = "follower resume exception "
-              + exception.getClass().getSimpleName();
         }
       }
     }
@@ -772,7 +778,8 @@ public class SparkMAXContainer implements MotorContainer {
         } else {
           failure = fatalFaultSummary(status1);
           if (failure == null) {
-            failure = validateFollowerStatusLocked(status1.isFollower, now);
+            failure = validateFollowerStatusLocked(
+                effectiveFollowerStatusLocked(status1.isFollower), now);
           }
           if (failure == null) {
             failure = SparkTelemetryValidator.failureReason(
@@ -800,7 +807,7 @@ public class SparkMAXContainer implements MotorContainer {
           cachedBusVoltage = status0.voltage;
           cachedCurrent = status0.current;
           cachedTemperatureCelsius = status0.motorTemperature;
-          cachedFollower = status1.isFollower;
+          cachedFollower = effectiveFollowerStatusLocked(status1.isFollower);
           if (status2 != null) {
             cachedPosition = status2.primaryEncoderPosition;
             cachedVelocity = status2.primaryEncoderVelocity;
@@ -862,6 +869,16 @@ public class SparkMAXContainer implements MotorContainer {
       return now > followerTransitionDeadline ? "follower resume timeout" : null;
     }
     return actualFollower ? null : "follower mode lost";
+  }
+
+  /** Called only with stateLock held; REV's desktop backend has no follower-transition Sim API. */
+  private boolean effectiveFollowerStatusLocked(boolean vendorFollower) {
+    if (simulationHandle != null
+        && (followerDiagnosticMode == FollowerDiagnosticMode.PAUSE_PENDING
+            || followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE)) {
+      return false;
+    }
+    return vendorFollower;
   }
 
   private static String fatalFaultSummary(PeriodicStatus1 status) {
@@ -1535,6 +1552,9 @@ public class SparkMAXContainer implements MotorContainer {
       }
       for (SparkMAXContainer device : DEVICES) {
         synchronized (device.simulationIoLock) {
+          if (device.simulationHandle != null) {
+            device.simulationHandle.closeSimulationResourcesForTesting();
+          }
           device.motor.close();
         }
       }
@@ -2171,16 +2191,28 @@ public class SparkMAXContainer implements MotorContainer {
           // that the controller ignored the request, so every attempted pause must have a matching
           // ordered resume path.
           followerDiagnosticMode = FollowerDiagnosticMode.RESUME_ZERO_PENDING;
-          SparkVendorCall.Result pauseResult = SparkVendorCall.execute(
-              "follower pause", () -> callVendorIo(motor::pauseFollowerModeAsync));
-          if (pauseResult.succeeded()) {
+          if (simulationHandle != null) {
+            // REVLib 2026.0.3 does not expose follower-mode state through SparkMaxSim. Its native
+            // async transition is not a documented simulation seam and caused an access violation
+            // in this full desktop sequence, so model only the controller state transition here.
+            // Raw echo still supplies no velocity/current physics and cannot become motion proof.
+            cachedFollower = false;
             followerDiagnosticMode = FollowerDiagnosticMode.PAUSE_PENDING;
             followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
             nextSampleAt = now;
             accepted = true;
           } else {
-            failure = pauseResult.failure();
-            recordFailureLocked(now, failure, false);
+            SparkVendorCall.Result pauseResult = SparkVendorCall.execute(
+                "follower pause", () -> callVendorIo(motor::pauseFollowerModeAsync));
+            if (pauseResult.succeeded()) {
+              followerDiagnosticMode = FollowerDiagnosticMode.PAUSE_PENDING;
+              followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
+              nextSampleAt = now;
+              accepted = true;
+            } else {
+              failure = pauseResult.failure();
+              recordFailureLocked(now, failure, false);
+            }
           }
         }
       }

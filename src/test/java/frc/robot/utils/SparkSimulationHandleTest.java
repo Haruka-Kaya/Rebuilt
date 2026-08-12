@@ -9,6 +9,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.revrobotics.spark.SparkLowLevel.MotorType;
 import com.revrobotics.spark.SparkMax;
 import edu.wpi.first.hal.HAL;
+import edu.wpi.first.hal.SimDevice;
+import edu.wpi.first.hal.SimDevice.Direction;
 import edu.wpi.first.hal.SimBoolean;
 import edu.wpi.first.wpilibj.simulation.SimDeviceSim;
 import edu.wpi.first.wpilibj.simulation.DriverStationSim;
@@ -93,6 +95,7 @@ class SparkSimulationHandleTest {
           () -> assertFalse(resetWarning.get()),
           () -> assertTrue(sensorStickyWarning.get()),
           () -> assertFalse(resetStickyWarning.get()));
+      handle.closeSimulationResourcesForTesting();
     }
   }
 
@@ -156,6 +159,46 @@ class SparkSimulationHandleTest {
       DriverStationSim.resetData();
       DriverStationSim.notifyNewData();
     }
+  }
+
+  @Test
+  void simulationFaultInjectionSurvivesSameCanIdReconstruction() throws InterruptedException {
+    DriverStationSim.resetData();
+    DriverStationSim.setDsAttached(true);
+    DriverStationSim.setEnabled(false);
+    DriverStationSim.notifyNewData();
+
+    try (SimDevice unrelatedOwner = SimDevice.create("Unrelated Lifecycle Sentinel")) {
+      assertNotNull(unrelatedOwner);
+      SimBoolean unrelatedValue =
+          unrelatedOwner.createBoolean("Alive", Direction.kBidir, false);
+      assertNotNull(unrelatedValue);
+
+      for (int cycle = 1; cycle <= 2; cycle++) {
+        new SparkMAXContainer(62);
+        SparkSimulationHandle handle =
+            SparkMAXContainer.getSimulationHandleForId(62).orElseThrow();
+        try {
+          handle.setCanFault(true, false);
+          assertTrue(
+              (handle.observe().activeFaultBits() & (1 << 3)) != 0,
+              "CAN fault injection must work after reconstruction cycle " + cycle);
+        } finally {
+          handle.setCanFault(false, false);
+          assertTrue(
+              await(2.0, SparkMAXContainer::cleanupSimulationDevicesForTesting),
+              "simulation registry must be reusable after cycle " + cycle);
+        }
+        unrelatedValue.set(cycle % 2 == 1);
+        assertEquals(
+            cycle % 2 == 1,
+            unrelatedValue.get(),
+            "SPARK cleanup must not invalidate unrelated HAL SimDevice owners");
+      }
+    }
+
+    DriverStationSim.resetData();
+    DriverStationSim.notifyNewData();
   }
 
   private static boolean await(double timeoutSeconds, BooleanSupplier condition)

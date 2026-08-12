@@ -212,6 +212,7 @@ class SparkRawCommandEchoSimulationTest {
           () -> assertEquals(0.0, faultedSnapshot.velocity()),
           () -> assertEquals(42.5, faultedSnapshot.position()));
       handle.setCanFault(false, false);
+      handle.closeSimulationResourcesForTesting();
     }
   }
 
@@ -244,6 +245,7 @@ class SparkRawCommandEchoSimulationTest {
           () -> assertEquals(0.0, handle.observe().velocity()),
           () -> assertEquals(8.25, handle.observe().position()));
       handle.setResetWarning(false, false);
+      handle.closeSimulationResourcesForTesting();
     }
   }
 

@@ -30,6 +30,7 @@ import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.utils.NeutralAfterEnableGate;
 import frc.robot.utils.OperatorActionEvidence;
+import frc.robot.utils.RobotOutputSafetySupervisor;
 
 public class DriveBaseContainer implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -420,8 +421,9 @@ public class DriveBaseContainer implements AutoCloseable {
         return this.autoContainer.getAutonomousCommand();
     }
 
-    public boolean shouldAbortActiveAutonomous() {
-        return autoContainer.shouldAbortActiveAutonomous();
+    public boolean shouldAbortActiveAutonomous(
+            RobotOutputSafetySupervisor.Snapshot outputSafetySnapshot) {
+        return autoContainer.shouldAbortActiveAutonomous(outputSafetySnapshot);
     }
 
     public void refreshAutonomousStatus() {

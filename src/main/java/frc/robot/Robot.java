@@ -110,6 +110,11 @@ public class Robot extends TimedRobot {
       // retrying a globally confirmed stop without re-entering CommandScheduler.
       m_robotContainer.serviceOutputSafetyHeartbeat();
 
+      // TimedRobot calls autonomousPeriodic() before this common periodic block. Evaluate the
+      // active-auto interlock only after this cycle's heartbeat has converted READY_DISABLED into
+      // a live ARMED grant, and before any autonomous command executes in the scheduler.
+      abortActiveAutonomousIfUnsafe();
+
       // Runs the Scheduler.  This is responsible for polling buttons, adding newly-scheduled
       // commands, running already-scheduled commands, removing finished or interrupted commands,
       // and running subsystem periodic() methods.  This must be called from the robot's periodic
@@ -289,14 +294,24 @@ public class Robot extends TimedRobot {
       }
       if (!CommandScheduler.getInstance().isScheduled(m_autonomousCommand)) {
         m_autonomousCommand = null;
-        return;
-      }
-      if (m_robotContainer.shouldAbortActiveAutonomous()) {
-        m_autonomousCommand.cancel();
-        m_autonomousCommand = null;
-        m_robotContainer.stopAll();
       }
     });
+  }
+
+  private void abortActiveAutonomousIfUnsafe() {
+    if (!DriverStation.isAutonomousEnabled() || m_autonomousCommand == null) {
+      return;
+    }
+    if (!CommandScheduler.getInstance().isScheduled(m_autonomousCommand)) {
+      m_autonomousCommand = null;
+      return;
+    }
+    var outputSafetySnapshot = m_robotContainer.getOutputSafetySnapshot();
+    if (m_robotContainer.shouldAbortActiveAutonomous(outputSafetySnapshot)) {
+      m_autonomousCommand.cancel();
+      m_autonomousCommand = null;
+      m_robotContainer.stopAll();
+    }
   }
 
   @Override

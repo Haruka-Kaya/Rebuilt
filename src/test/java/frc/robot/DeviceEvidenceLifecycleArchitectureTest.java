@@ -1,5 +1,6 @@
 package frc.robot;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -12,6 +13,10 @@ class DeviceEvidenceLifecycleArchitectureTest {
       "src", "main", "java", "frc", "robot", "Robot.java");
   private static final Path ROBOT_CONTAINER_SOURCE = Path.of(
       "src", "main", "java", "frc", "robot", "RobotContainer.java");
+  private static final Path DRIVE_CONTAINER_SOURCE = Path.of(
+      "src", "main", "java", "frc", "robot", "containers", "DriveBaseContainer.java");
+  private static final Path AUTO_CONTAINER_SOURCE = Path.of(
+      "src", "main", "java", "frc", "robot", "containers", "AutoContainer.java");
 
   @Test
   void fmsSuppressionRunsBeforeTheIrreversibleRuntimeFaultEarlyReturn() throws IOException {
@@ -82,6 +87,64 @@ class DeviceEvidenceLifecycleArchitectureTest {
     assertTrue(globalStop.contains("SparkMAXContainer.serviceAll()"));
     assertTrue(globalStop.contains("drivetrain.getStopEvidence("));
     assertTrue(robot.contains("m_robotContainer.isOutputSafetyReadyForEnable()"));
+  }
+
+  @Test
+  void activeAutonomousRequiresLiveOutputAuthorizationBeforeDependencyReadiness()
+      throws IOException {
+    String robot = Files.readString(ROBOT_SOURCE);
+    String container = Files.readString(ROBOT_CONTAINER_SOURCE);
+    String driveContainer = Files.readString(DRIVE_CONTAINER_SOURCE);
+    String autoContainer = Files.readString(AUTO_CONTAINER_SOURCE);
+
+    String autonomousPeriodic = between(
+        robot, "public void autonomousPeriodic()", "private void abortActiveAutonomousIfUnsafe()");
+    assertFalse(autonomousPeriodic.contains("getOutputSafetySnapshot()"));
+
+    String robotPeriodic = between(
+        robot, "public void robotPeriodic()", "public void disabledInit()");
+    int heartbeat = robotPeriodic.indexOf("serviceOutputSafetyHeartbeat()");
+    int abort = robotPeriodic.indexOf("abortActiveAutonomousIfUnsafe()");
+    int scheduler = robotPeriodic.indexOf("CommandScheduler.getInstance().run()");
+    assertTrue(heartbeat >= 0 && heartbeat < abort && abort < scheduler);
+
+    String activeAutoGate = between(
+        robot, "private void abortActiveAutonomousIfUnsafe()", "public void autonomousExit()");
+    int snapshot = activeAutoGate.indexOf("getOutputSafetySnapshot()");
+    int policy = activeAutoGate.indexOf(
+        "shouldAbortActiveAutonomous(outputSafetySnapshot)");
+    int cancel = activeAutoGate.indexOf("m_autonomousCommand.cancel()");
+    int stop = activeAutoGate.indexOf("m_robotContainer.stopAll()");
+    assertTrue(snapshot >= 0 && snapshot < policy && policy < cancel && cancel < stop);
+
+    String containerForwarder = between(
+        container,
+        "public boolean shouldAbortActiveAutonomous(",
+        "public void refreshAutonomousStatus()");
+    assertTrue(containerForwarder.contains(
+        "m_DriveBaseContainer.shouldAbortActiveAutonomous(outputSafetySnapshot)"));
+    assertTrue(driveContainer.contains(
+        "autoContainer.shouldAbortActiveAutonomous(outputSafetySnapshot)"));
+
+    String runtimeGate = between(
+        autoContainer,
+        "public boolean shouldAbortActiveAutonomous(",
+        "/** Keeps preflight state visible");
+    assertTrue(
+        runtimeGate.indexOf("evaluateActiveOutputSafety(outputSafetySnapshot)")
+            < runtimeGate.indexOf("currentReadiness()"));
+    assertTrue(runtimeGate.contains("abortActiveAutonomous(outputSafety.reason())"));
+
+    String managedAuto = between(
+        autoContainer, "return freshSelectedAuto", ".withName(\"Managed Auto:");
+    int finishClassification = managedAuto.indexOf("runState.finished(interrupted)");
+    int abortedGuard = managedAuto.indexOf("AutonomousRunState.Phase.ABORTED");
+    int completedPublication = managedAuto.indexOf("COMPLETED: ");
+    assertTrue(
+        finishClassification >= 0
+            && finishClassification < abortedGuard
+            && abortedGuard < completedPublication,
+        "finallyDo must preserve ABORTED before considering COMPLETED");
   }
 
   private static String between(String source, String start, String end) {

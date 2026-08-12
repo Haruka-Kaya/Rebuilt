@@ -8,6 +8,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.RobotBase;
 import edu.wpi.first.wpilibj.RobotController;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
@@ -33,11 +34,14 @@ import frc.robot.subsystems.IntakeSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.utils.AsyncDiagnosticSink;
+import frc.robot.utils.CtreDeviceEvidence;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.SparkMAXContainer.DeviceEvidenceSnapshot;
 
 /** One-shot, low-output hardware test that only runs after the DS enters enabled Test mode. */
 public final class HardwareSelfTestCommand {
     public static final String RUNNING_KEY = "Hardware Self-Test/Running";
+    public static final String EVIDENCE_SOURCE_KEY = "Hardware Self-Test/Evidence Source";
 
     private static final double FOLLOWER_DIAGNOSTIC_DUTY = 0.08;
     private static final double FOLLOWER_DIAGNOSTIC_SECONDS = 1.20;
@@ -87,6 +91,7 @@ public final class HardwareSelfTestCommand {
             ClimberSubsystem climber) {
         Map<String, MotionResult> results = new LinkedHashMap<>();
         Map<Integer, Boolean> sparkCanResults = new LinkedHashMap<>();
+        Map<Integer, CanEvidenceResult> allCanResults = new LinkedHashMap<>();
         SelfTestRunState runState = new SelfTestRunState();
         double duty = HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE;
 
@@ -94,6 +99,7 @@ public final class HardwareSelfTestCommand {
             Commands.runOnce(() -> {
                 results.clear();
                 sparkCanResults.clear();
+                allCanResults.clear();
                 for (String target : RESULT_TARGETS) {
                     publishResult(results, target, MotionResult.NOT_RUN);
                 }
@@ -103,6 +109,8 @@ public final class HardwareSelfTestCommand {
                 SmartDashboard.putBoolean(RUNNING_KEY, true);
                 SmartDashboard.putNumber("Hardware Self-Test/Run ID", Timer.getFPGATimestamp());
                 SmartDashboard.putString("Hardware Self-Test/Coverage", COVERAGE_MANIFEST);
+                SmartDashboard.putString(
+                    EVIDENCE_SOURCE_KEY, evidenceSource(RobotBase.isSimulation()));
                 SmartDashboard.putString("Hardware Self-Test/Overall", "RUNNING");
                 SmartDashboard.putString("Hardware Self-Test/Abort Reason", "NONE");
                 log("BEGIN", "motion evidence is not direction/calibration certification");
@@ -133,7 +141,7 @@ public final class HardwareSelfTestCommand {
                     results,
                     "SPARK_ID39_TURRET",
                     "automatic motion blocked; use separately armed manual polarity pulse only");
-                captureSparkCanResults(sparkCanResults);
+                captureCanResults(sparkCanResults, allCanResults, drivetrain);
                 SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
             }, drivetrain, intake, conveyor, feeder, shooter, turret, climber),
             globalStopBarrier(
@@ -283,8 +291,8 @@ public final class HardwareSelfTestCommand {
                 climber,
                 runState),
             Commands.runOnce(() -> {
-                captureSparkCanResults(sparkCanResults);
-                publishOverall(results, sparkCanResults, runState);
+                captureCanResults(sparkCanResults, allCanResults, drivetrain);
+                publishOverall(results, allCanResults, runState);
             }));
 
         return sequence
@@ -299,7 +307,7 @@ public final class HardwareSelfTestCommand {
                 climber.stop();
                 SmartDashboard.putBoolean(RUNNING_KEY, false);
                 if (interrupted || !testOutputsAllowed()) {
-                    captureSparkCanResults(sparkCanResults);
+                    captureCanResults(sparkCanResults, allCanResults, drivetrain);
                     SmartDashboard.putString(
                         "Hardware Self-Test/Overall", "INTERRUPTED_STOP_REQUESTED");
                     String abortReason = runState.abortReason();
@@ -450,6 +458,7 @@ public final class HardwareSelfTestCommand {
         boolean[] eligible = {false};
         boolean[] connectionLost = {false};
         boolean[] motionObserved = {false};
+        boolean[] simulationCurrentIgnored = {false};
         MotionResult[] terminalResult = {null};
         CommandSwerveDrivetrain.SwerveDiagnosticEvidence[] latestEvidence = {null};
         CommandSwerveDrivetrain.SwerveDiagnosticBaseline[] baseline = {null};
@@ -460,6 +469,7 @@ public final class HardwareSelfTestCommand {
                 eligible[0] = testOutputsAllowed() && drivetrain.areAllDevicesConnected();
                 connectionLost[0] = false;
                 motionObserved[0] = false;
+                simulationCurrentIgnored[0] = false;
                 terminalResult[0] = null;
                 baseline[0] = drivetrain.captureSwerveDiagnosticBaseline();
                 token[0] = null;
@@ -505,10 +515,22 @@ public final class HardwareSelfTestCommand {
                         return;
                     }
                     if (latestEvidence[0].overCurrent()) {
-                        terminalResult[0] = MotionResult.STALL_SUSPECTED;
-                        drivetrain.requestIdle();
-                        log(name + "_ABORT", "swerve overcurrent " + latestEvidence[0]);
-                        return;
+                        if (RobotBase.isSimulation()) {
+                            // Phoenix desktop current is not backed by the verified robot load.
+                            // Keep the stage running so command/output routing can be observed,
+                            // while never promoting this value to physical stall evidence.
+                            if (!simulationCurrentIgnored[0]) {
+                                simulationCurrentIgnored[0] = true;
+                                log(
+                                    name + "_SIM_CURRENT_IGNORED",
+                                    "not physical stall evidence " + latestEvidence[0]);
+                            }
+                        } else {
+                            terminalResult[0] = MotionResult.STALL_SUSPECTED;
+                            drivetrain.requestIdle();
+                            log(name + "_ABORT", "swerve overcurrent " + latestEvidence[0]);
+                            return;
+                        }
                     }
                     if (motionObserved[0]
                             && latestEvidence[0].motionObserved()
@@ -852,23 +874,101 @@ public final class HardwareSelfTestCommand {
         SmartDashboard.putString("Hardware Self-Test/" + name + "/Motion Result", result.name());
     }
 
-    private static void captureSparkCanResults(Map<Integer, Boolean> canResults) {
-        for (int canId : ALL_SPARK_IDS) {
-            boolean ready = SparkMAXContainer.getDiagnosticSnapshotForId(canId)
-                .map(Snapshot::ready)
-                .orElse(false);
-            canResults.put(canId, ready);
+    private static void captureCanResults(
+            Map<Integer, Boolean> sparkCanResults,
+            Map<Integer, CanEvidenceResult> allCanResults,
+            CommandSwerveDrivetrain drivetrain) {
+        Map<Integer, CanEvidenceResult> captured = evaluateCanEvidence(
+            SparkMAXContainer.getDeviceEvidenceSnapshots(),
+            drivetrain.getDeviceEvidenceSnapshots());
+        sparkCanResults.clear();
+        allCanResults.clear();
+        allCanResults.putAll(captured);
+
+        for (var device : ConfiguredCanHardware.devices()) {
+            CanEvidenceResult result = captured.get(device.canId());
+            String vendorPrefix = device.vendor() == ConfiguredCanHardware.Vendor.REV
+                ? "SPARK_ID" : "CTRE_ID";
+            String topicPrefix = "Hardware Self-Test/" + vendorPrefix + device.canId() + "/";
             SmartDashboard.putString(
-                "Hardware Self-Test/SPARK_ID" + canId + "/CAN Result",
-                ready ? "PASS_READY" : "FAIL_NOT_READY");
+                topicPrefix + "CAN Result", result.ready() ? "PASS_READY" : "FAIL_NOT_READY");
+            SmartDashboard.putString(topicPrefix + "CAN Reason", result.reason());
+            if (device.vendor() == ConfiguredCanHardware.Vendor.REV) {
+                sparkCanResults.put(device.canId(), result.ready());
+            }
         }
-        SmartDashboard.putString("Hardware Self-Test/CAN Results", canResults.toString());
-        log("SPARK_CAN_RESULT", canResults.toString());
+        // Compatibility: this topic intentionally remains the original SPARK-only boolean map.
+        SmartDashboard.putString("Hardware Self-Test/CAN Results", sparkCanResults.toString());
+        SmartDashboard.putString("Hardware Self-Test/All CAN Results", allCanResults.toString());
+        log("SPARK_CAN_RESULT", sparkCanResults.toString());
+        log("ALL_CAN_RESULT", allCanResults.toString());
+    }
+
+    static Map<Integer, CanEvidenceResult> evaluateCanEvidence(
+            List<DeviceEvidenceSnapshot> sparkSnapshots,
+            List<CtreDeviceEvidence.Snapshot> ctreSnapshots) {
+        List<DeviceEvidenceSnapshot> safeSparkSnapshots = sparkSnapshots == null
+            ? List.of() : sparkSnapshots;
+        List<CtreDeviceEvidence.Snapshot> safeCtreSnapshots = ctreSnapshots == null
+            ? List.of() : ctreSnapshots;
+        Map<Integer, CanEvidenceResult> results = new LinkedHashMap<>();
+
+        for (var device : ConfiguredCanHardware.devices()) {
+            if (device.vendor() == ConfiguredCanHardware.Vendor.REV) {
+                List<DeviceEvidenceSnapshot> matches = safeSparkSnapshots.stream()
+                    .filter(snapshot -> snapshot != null && snapshot.canId() == device.canId())
+                    .toList();
+                if (matches.isEmpty()) {
+                    results.put(device.canId(), new CanEvidenceResult(false, "DEVICE_NOT_REGISTERED"));
+                } else if (matches.size() != 1) {
+                    results.put(
+                        device.canId(),
+                        new CanEvidenceResult(false, "DUPLICATE_REGISTERED_CAN_ID"));
+                } else {
+                    DeviceEvidenceSnapshot snapshot = matches.get(0);
+                    results.put(
+                        device.canId(),
+                        observedCanEvidence(snapshot.ready(), snapshot.reason()));
+                }
+            } else {
+                List<CtreDeviceEvidence.Snapshot> matches = safeCtreSnapshots.stream()
+                    .filter(snapshot -> snapshot != null && snapshot.canId() == device.canId())
+                    .toList();
+                if (matches.isEmpty()) {
+                    results.put(
+                        device.canId(),
+                        new CanEvidenceResult(false, "DEVICE_EVIDENCE_NOT_CAPTURED"));
+                } else if (matches.size() != 1) {
+                    results.put(
+                        device.canId(),
+                        new CanEvidenceResult(false, "DUPLICATE_DEVICE_EVIDENCE"));
+                } else {
+                    CtreDeviceEvidence.Snapshot snapshot = matches.get(0);
+                    results.put(
+                        device.canId(),
+                        observedCanEvidence(snapshot.ready(), snapshot.reason()));
+                }
+            }
+        }
+        return java.util.Collections.unmodifiableMap(results);
+    }
+
+    private static CanEvidenceResult observedCanEvidence(boolean ready, String reason) {
+        if (reason == null || reason.isBlank()) {
+            return new CanEvidenceResult(false, "INVALID_DEVICE_EVIDENCE_REASON");
+        }
+        return new CanEvidenceResult(ready, reason);
+    }
+
+    static String evidenceSource(boolean simulation) {
+        return simulation
+            ? "DESKTOP_SIMULATION_RAW_COMMAND_ECHO_NO_MECHANISM_PHYSICS"
+            : "LIVE_HARDWARE";
     }
 
     private static void publishOverall(
             Map<String, MotionResult> results,
-            Map<Integer, Boolean> sparkCanResults,
+            Map<Integer, CanEvidenceResult> allCanResults,
             SelfTestRunState runState) {
         boolean attentionRequired = results.values().stream().anyMatch(result ->
             result == MotionResult.FAIL_NOT_READY
@@ -876,8 +976,8 @@ public final class HardwareSelfTestCommand {
                 || result == MotionResult.FAIL_DIRECTION_MISMATCH
                 || result == MotionResult.STALL_SUSPECTED
                 || result == MotionResult.BLOCKED_KNOWN_FAULT);
-        attentionRequired |= sparkCanResults.size() != ALL_SPARK_IDS.length
-            || sparkCanResults.values().stream().anyMatch(ready -> !ready);
+        attentionRequired |= allCanResults.size() != ConfiguredCanHardware.devices().size()
+            || allCanResults.values().stream().anyMatch(result -> !result.ready());
         attentionRequired |= !runState.mayContinue();
         boolean incomplete = results.values().stream().anyMatch(result ->
             result == MotionResult.INCONCLUSIVE_NO_MOTION
@@ -893,7 +993,7 @@ public final class HardwareSelfTestCommand {
             runState.abortReason().isBlank() ? "NONE" : runState.abortReason());
         log(
             "SEQUENCE_COMPLETE",
-            "overall=" + overall + " motion=" + results + " sparkCAN=" + sparkCanResults);
+            "overall=" + overall + " motion=" + results + " allCAN=" + allCanResults);
     }
 
     private static boolean testOutputsAllowed() {
@@ -915,6 +1015,19 @@ public final class HardwareSelfTestCommand {
         double requestedDuty,
         double currentLimitAmps,
         Function<Boolean, Snapshot> snapshot) {}
+
+    record CanEvidenceResult(boolean ready, String reason) {
+        CanEvidenceResult {
+            if (reason == null || reason.isBlank()) {
+                throw new IllegalArgumentException("CAN evidence reason must not be blank");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return ready ? "PASS_READY(" + reason + ")" : "FAIL_NOT_READY(" + reason + ")";
+        }
+    }
 
     private static final class TimedTargetState {
         final int canId;

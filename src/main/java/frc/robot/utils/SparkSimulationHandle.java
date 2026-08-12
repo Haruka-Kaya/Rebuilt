@@ -5,7 +5,9 @@ import com.revrobotics.spark.SparkBase.Warnings;
 import com.revrobotics.spark.SparkMax;
 import com.revrobotics.sim.SparkMaxSim;
 import com.revrobotics.sim.SparkSimFaultManager;
+import edu.wpi.first.hal.SimDeviceJNI;
 import edu.wpi.first.hal.SimInt;
+import edu.wpi.first.hal.simulation.SimDeviceDataJNI;
 import edu.wpi.first.math.system.plant.DCMotor;
 import edu.wpi.first.wpilibj.simulation.SimDeviceSim;
 import java.util.Objects;
@@ -149,6 +151,17 @@ public final class SparkSimulationHandle {
           new Warnings(updateBit(activeWarnings.rawBits, RESET_WARNING_MASK, active)));
       faultManager.setStickyWarnings(
           new Warnings(updateBit(stickyWarnings.rawBits, RESET_WARNING_MASK, sticky)));
+    }
+  }
+
+  /** Releases the REV fault-manager SimDevice that SparkMax.close() leaves allocated. */
+  void closeSimulationResourcesForTesting() {
+    synchronized (ioLock) {
+      int faultManagerHandle = SimDeviceDataJNI.getSimDeviceHandle(
+          "SPARK MAX [" + canId() + "] FAULT MANAGER");
+      if (faultManagerHandle > 0) {
+        SimDeviceJNI.freeSimDevice(faultManagerHandle);
+      }
     }
   }
 

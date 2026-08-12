@@ -11,6 +11,7 @@ import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.simulation.DriverStationSim;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.RobotContainer;
 import frc.robot.commands.HardwareSelfTestCommand;
@@ -23,8 +24,13 @@ import frc.robot.constants.ConfiguredOperatorActions.Action;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.Constants.ManipulatorConstants;
+import frc.robot.utils.CtreDeviceEvidence.Metric;
 import frc.robot.utils.SparkMAXContainer.OutputStopBatch;
 import frc.robot.utils.SparkSimulationHandle.SimulationSnapshot;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -511,6 +517,337 @@ class RobotContainerSimulationIntegrationTest {
     }
   }
 
+  @Test
+  void hardwareSelfTestRunsEveryAutomaticStageAndConfirmsEveryRequiredStop()
+      throws InterruptedException {
+    CommandScheduler scheduler = CommandScheduler.getInstance();
+    RobotContainer container = null;
+    configureDisabledDriverStation();
+    try {
+      SparkMAXContainer.configureProcessDefaults();
+      container = new RobotContainer();
+      RobotContainer activeContainer = container;
+
+      assertTrue(
+          await(12.0, activeContainer, () -> ConfiguredCanHardware.sparkDeviceIds().stream()
+              .allMatch(id -> SparkMAXContainer.getDiagnosticSnapshotForId(id)
+                  .map(snapshot -> snapshot.ready())
+                  .orElse(false))),
+          SparkMAXContainer::getDeviceAvailabilitySummary);
+      assertOutputSafetyReadyDisabled(activeContainer);
+
+      enableTest();
+      assertOutputSafetyArmed(activeContainer);
+      Command selfTest = activeContainer.getHardwareSelfTestCommand();
+      scheduler.schedule(selfTest);
+
+      assertTrue(
+          await(
+              3.0,
+              activeContainer,
+              () -> SmartDashboard.getBoolean(HardwareSelfTestCommand.RUNNING_KEY, false)),
+          "Hardware Self-Test did not start");
+      HardwareSelfTestSwerveObservation swerveObservation =
+          new HardwareSelfTestSwerveObservation();
+      assertTrue(
+          await(
+              30.0,
+              activeContainer,
+              () -> {
+                swerveObservation.observe(activeContainer);
+                return !selfTest.isScheduled()
+                    && !SmartDashboard.getBoolean(HardwareSelfTestCommand.RUNNING_KEY, true);
+              }),
+          () -> hardwareSelfTestSummary("Hardware Self-Test did not finish"));
+
+      assertEquals(
+          "ATTENTION_REQUIRED",
+          SmartDashboard.getString("Hardware Self-Test/Overall", "MISSING"),
+          () -> hardwareSelfTestSummary("unexpected overall result"));
+      assertEquals(
+          "NONE",
+          SmartDashboard.getString("Hardware Self-Test/Abort Reason", "MISSING"),
+          () -> hardwareSelfTestSummary("automatic sequence aborted"));
+      assertEquals(
+          "DESKTOP_SIMULATION_RAW_COMMAND_ECHO_NO_MECHANISM_PHYSICS",
+          SmartDashboard.getString(HardwareSelfTestCommand.EVIDENCE_SOURCE_KEY, "MISSING"));
+      assertEveryConfiguredCanResultReady();
+
+      assertHardwareSelfTestResult("SPARK_ID30_INTAKE_ACTUATOR", "SKIPPED");
+      assertHardwareSelfTestResult("SPARK_ID32_FEEDER", "BLOCKED_KNOWN_FAULT");
+      assertHardwareSelfTestResult("SPARK_ID34_35_CLIMBER", "SKIPPED");
+      assertHardwareSelfTestResult("SPARK_ID38_SHOOTER_ACTUATOR", "SKIPPED");
+      assertHardwareSelfTestResult("SPARK_ID39_TURRET", "SKIPPED");
+
+      assertHardwareSelfTestResult("SPARK_ID31_INTAKE_ROLLER", "INCONCLUSIVE_NO_MOTION");
+      assertHardwareSelfTestResult("SPARK_ID33_CONVEYOR", "INCONCLUSIVE_NO_MOTION");
+      assertHardwareSelfTestResult("SPARK_ID36_FLYWHEEL_LEADER", "INCONCLUSIVE_NO_MOTION");
+      assertHardwareSelfTestResult(
+          "SPARK_ID37_FLYWHEEL_FOLLOWER_PAIR", "INCONCLUSIVE_NO_MOTION");
+      assertHardwareSelfTestResult("SPARK_ID37_FOLLOWER_ISOLATED", "INCONCLUSIVE_NO_MOTION");
+
+      assertHardwareSelfTestReachedTerminalAssessment("SWERVE_FORWARD");
+      assertHardwareSelfTestReachedTerminalAssessment("SWERVE_STRAFE");
+      assertHardwareSelfTestReachedTerminalAssessment("SWERVE_ROTATE");
+      swerveObservation.assertEveryDriveMotorReceivedEachStage();
+
+      assertHardwareSelfTestStopConfirmed("GLOBAL_START");
+      assertHardwareSelfTestStopConfirmed("SPARK_ID31_INTAKE_ROLLER_SPARK_STOP");
+      assertEquals(
+          "NOT_RUN",
+          SmartDashboard.getString(
+              "Hardware Self-Test/SPARK_ID32_FEEDER_CONTROLLED_RETEST_SPARK_STOP/Stop Result",
+              "MISSING"),
+          "the compile-time-disabled automatic feeder retest must remain skipped");
+      assertHardwareSelfTestStopConfirmed("SPARK_ID33_CONVEYOR_SPARK_STOP");
+      assertHardwareSelfTestStopConfirmed("SPARK_ID36_37_FLYWHEEL_PAIR_SPARK_STOP");
+      assertHardwareSelfTestStopConfirmed("SPARK_ID37_FOLLOWER_ISOLATED_SPARK_STOP");
+      assertHardwareSelfTestStopConfirmed("SWERVE_FORWARD_SWERVE_STOP");
+      assertHardwareSelfTestStopConfirmed("SWERVE_STRAFE_SWERVE_STOP");
+      assertHardwareSelfTestStopConfirmed("SWERVE_ROTATE_SWERVE_STOP");
+      assertHardwareSelfTestStopConfirmed("GLOBAL_END");
+
+      int[] allSparkIds = ConfiguredCanHardware.sparkDeviceIds().stream()
+          .mapToInt(Integer::intValue)
+          .toArray();
+      assertRawControllersStopped(allSparkIds);
+      OutputStopBatch verifiedEndStop = SparkMAXContainer.requestOutputStops(allSparkIds);
+      assertTrue(
+          await(5.0, activeContainer, () -> verifiedEndStop.snapshot().confirmed()),
+          () -> verifiedEndStop.snapshot().summary());
+    } finally {
+      try {
+        enableDisabled();
+        if (container != null) {
+          scheduler.cancelAll();
+          container.stopAll();
+          int[] ids = ConfiguredCanHardware.sparkDeviceIds().stream().mapToInt(Integer::intValue)
+              .toArray();
+          OutputStopBatch finalStop = SparkMAXContainer.requestOutputStops(ids);
+          RobotContainer closingContainer = container;
+          assertTrue(await(5.0, closingContainer, () -> finalStop.snapshot().confirmed()),
+              () -> finalStop.snapshot().summary());
+        }
+      } finally {
+        if (container != null) {
+          container.close();
+          container.close();
+        }
+        scheduler.cancelAll();
+        scheduler.getDefaultButtonLoop().clear();
+        scheduler.setActiveButtonLoop(scheduler.getDefaultButtonLoop());
+        scheduler.unregisterAllSubsystems();
+        scheduler.clearComposedCommands();
+        AutoBuilder.resetForTesting();
+        NamedCommands.clearAll();
+        try {
+          assertTrue(awaitCleanup(5.0), "SPARK simulation registry did not quiesce");
+        } finally {
+          DriverStationSim.resetData();
+          DriverStationSim.notifyNewData();
+        }
+      }
+    }
+  }
+
+  private static void assertHardwareSelfTestResult(String target, String expected) {
+    assertEquals(
+        expected,
+        SmartDashboard.getString(
+            "Hardware Self-Test/" + target + "/Motion Result", "MISSING"),
+        () -> hardwareSelfTestSummary("unexpected result for " + target));
+  }
+
+  private static void assertHardwareSelfTestReachedTerminalAssessment(String target) {
+    String result = SmartDashboard.getString(
+        "Hardware Self-Test/" + target + "/Motion Result", "MISSING");
+    assertTrue(
+        result.equals("PASS_OBSERVED")
+            || result.equals("INCONCLUSIVE_NO_MOTION"),
+        () -> hardwareSelfTestSummary(target + " did not produce valid terminal evidence"));
+  }
+
+  private static void assertHardwareSelfTestStopConfirmed(String stopName) {
+    assertEquals(
+        "CONFIRMED",
+        SmartDashboard.getString(
+            "Hardware Self-Test/" + stopName + "/Stop Result", "MISSING"),
+        () -> hardwareSelfTestSummary("stop was not confirmed for " + stopName));
+  }
+
+  private static void assertEveryConfiguredCanResultReady() {
+    for (var device : ConfiguredCanHardware.devices()) {
+      String vendorPrefix = device.vendor() == ConfiguredCanHardware.Vendor.REV
+          ? "SPARK_ID" : "CTRE_ID";
+      String topicPrefix = "Hardware Self-Test/" + vendorPrefix + device.canId() + "/";
+      assertEquals(
+          "PASS_READY",
+          SmartDashboard.getString(topicPrefix + "CAN Result", "MISSING"),
+          () -> "CAN " + device.canId() + " result/reason="
+              + SmartDashboard.getString(topicPrefix + "CAN Result", "MISSING") + "/"
+              + SmartDashboard.getString(topicPrefix + "CAN Reason", "MISSING"));
+      assertFalse(
+          SmartDashboard.getString(topicPrefix + "CAN Reason", "").isBlank(),
+          "CAN " + device.canId() + " must retain its per-device evidence reason");
+    }
+    String allCan = SmartDashboard.getString("Hardware Self-Test/All CAN Results", "MISSING");
+    for (int canId : ConfiguredCanHardware.allDeviceIds()) {
+      assertTrue(allCan.contains(canId + "=PASS_READY("),
+          () -> "all-CAN summary omitted ID" + canId + ": " + allCan);
+    }
+  }
+
+  private static String hardwareSelfTestSummary(String prefix) {
+    return prefix
+        + " overall=" + SmartDashboard.getString("Hardware Self-Test/Overall", "MISSING")
+        + " abort=" + SmartDashboard.getString("Hardware Self-Test/Abort Reason", "MISSING")
+        + " results=" + SmartDashboard.getString("Hardware Self-Test/Results", "MISSING");
+  }
+
+  private static final class HardwareSelfTestSwerveObservation {
+    private static final Set<Integer> DRIVE_IDS = Set.copyOf(
+        ConfiguredCanHardware.swerveDriveIds());
+    private static final Set<Integer> STEER_IDS = Set.copyOf(
+        ConfiguredCanHardware.swerveSteerIds());
+    private static final Set<Integer> MOTOR_IDS = configuredSwerveMotorIds();
+    private static final java.util.List<String> STAGES = java.util.List.of(
+        "SWERVE_FORWARD", "SWERVE_STRAFE", "SWERVE_ROTATE");
+    private final Map<String, Set<Integer>> nonzeroDriveIdsByStage = new LinkedHashMap<>();
+    private final Map<String, Set<Integer>> nonzeroSteerIdsByStage = new LinkedHashMap<>();
+    private final Map<String, Set<Integer>> freshOutputIdsByStage = new LinkedHashMap<>();
+    private final Map<String, Map<Integer, Map<Metric, Double>>> baselines =
+        new LinkedHashMap<>();
+
+    HardwareSelfTestSwerveObservation() {
+      STAGES.forEach(stage -> {
+        nonzeroDriveIdsByStage.put(stage, new LinkedHashSet<>());
+        nonzeroSteerIdsByStage.put(stage, new LinkedHashSet<>());
+        freshOutputIdsByStage.put(stage, new LinkedHashSet<>());
+      });
+    }
+
+    void observe(RobotContainer container) {
+      String stage = activeStage();
+      if (stage == null) {
+        return;
+      }
+      var snapshots = container.getSwerveDeviceEvidenceSnapshots();
+      if (!baselines.containsKey(stage)) {
+        Map<Integer, Map<Metric, Double>> stageBaseline = new LinkedHashMap<>();
+        for (var snapshot : snapshots) {
+          if (MOTOR_IDS.contains(snapshot.canId())) {
+            stageBaseline.put(
+                snapshot.canId(),
+                Map.of(
+                    Metric.DUTY_CYCLE,
+                    progressTimestamp(snapshot, Metric.DUTY_CYCLE),
+                    Metric.MOTOR_VOLTAGE_VOLTS,
+                    progressTimestamp(snapshot, Metric.MOTOR_VOLTAGE_VOLTS)));
+          }
+        }
+        baselines.put(stage, stageBaseline);
+        return;
+      }
+
+      Map<Integer, Map<Metric, Double>> stageBaseline = baselines.get(stage);
+      for (var snapshot : snapshots) {
+        if (!MOTOR_IDS.contains(snapshot.canId())) {
+          continue;
+        }
+        Map<Metric, Double> motorBaseline = stageBaseline.get(snapshot.canId());
+        if (motorBaseline == null
+            || !advancedAfterBaseline(snapshot, Metric.DUTY_CYCLE, motorBaseline)
+            || !advancedAfterBaseline(snapshot, Metric.MOTOR_VOLTAGE_VOLTS, motorBaseline)) {
+          continue;
+        }
+        freshOutputIdsByStage.get(stage).add(snapshot.canId());
+        double duty = snapshot.value(Metric.DUTY_CYCLE).orElse(0.0);
+        double voltage = snapshot.value(Metric.MOTOR_VOLTAGE_VOLTS).orElse(0.0);
+        if (DRIVE_IDS.contains(snapshot.canId())
+            && (Math.abs(duty) > 1e-4 || Math.abs(voltage) > 1e-3)) {
+          nonzeroDriveIdsByStage.get(stage).add(snapshot.canId());
+        }
+        if (STEER_IDS.contains(snapshot.canId())
+            && (Math.abs(duty) > 1e-4 || Math.abs(voltage) > 1e-3)) {
+          nonzeroSteerIdsByStage.get(stage).add(snapshot.canId());
+        }
+      }
+    }
+
+    void assertEveryDriveMotorReceivedEachStage() {
+      for (String stage : STAGES) {
+        assertEquals(
+            MOTOR_IDS,
+            freshOutputIdsByStage.get(stage),
+            () -> stage + " did not produce post-stage output frames for all eight Talons: "
+                + freshOutputIdsByStage);
+        assertEquals(
+            DRIVE_IDS,
+            nonzeroDriveIdsByStage.get(stage),
+            () -> stage + " did not reach every drive Talon with post-stage nonzero evidence: "
+                + nonzeroDriveIdsByStage);
+      }
+      for (String stage : java.util.List.of("SWERVE_STRAFE", "SWERVE_ROTATE")) {
+        assertEquals(
+            STEER_IDS,
+            nonzeroSteerIdsByStage.get(stage),
+            () -> stage + " did not reach every steer Talon with post-stage nonzero evidence: "
+                + nonzeroSteerIdsByStage);
+      }
+    }
+
+    private static boolean advancedAfterBaseline(
+        CtreDeviceEvidence.Snapshot snapshot,
+        Metric metric,
+        Map<Metric, Double> baseline) {
+      double before = baseline.getOrDefault(metric, Double.NaN);
+      double after = progressTimestamp(snapshot, metric);
+      return Double.isFinite(before) && Double.isFinite(after) && after > before;
+    }
+
+    private static double progressTimestamp(
+        CtreDeviceEvidence.Snapshot snapshot, Metric metric) {
+      return snapshot.observations().stream()
+          .filter(observation -> observation.metric() == metric)
+          .filter(CtreDeviceEvidence.SignalObservation::fresh)
+          .mapToDouble(CtreDeviceEvidence.SignalObservation::progressTimestampSeconds)
+          .findFirst()
+          .orElse(Double.NaN);
+    }
+
+    private static Set<Integer> configuredSwerveMotorIds() {
+      Set<Integer> ids = new LinkedHashSet<>(ConfiguredCanHardware.swerveDriveIds());
+      ids.addAll(ConfiguredCanHardware.swerveSteerIds());
+      return Set.copyOf(ids);
+    }
+
+    private static String activeStage() {
+      if (stopResult("SPARK_ID37_FOLLOWER_ISOLATED_SPARK_STOP").equals("CONFIRMED")
+          && motionResult("SWERVE_FORWARD").equals("NOT_RUN")) {
+        return "SWERVE_FORWARD";
+      }
+      if (stopResult("SWERVE_FORWARD_SWERVE_STOP").equals("CONFIRMED")
+          && motionResult("SWERVE_STRAFE").equals("NOT_RUN")) {
+        return "SWERVE_STRAFE";
+      }
+      if (stopResult("SWERVE_STRAFE_SWERVE_STOP").equals("CONFIRMED")
+          && motionResult("SWERVE_ROTATE").equals("NOT_RUN")) {
+        return "SWERVE_ROTATE";
+      }
+      return null;
+    }
+
+    private static String stopResult(String name) {
+      return SmartDashboard.getString(
+          "Hardware Self-Test/" + name + "/Stop Result", "MISSING");
+    }
+
+    private static String motionResult(String name) {
+      return SmartDashboard.getString(
+          "Hardware Self-Test/" + name + "/Motion Result", "MISSING");
+    }
+  }
+
   private static boolean pairEchoesRequestedVelocity(double expected) {
     SimulationSnapshot leader = simulationHandle(SHOOTER_LEADER_ID).observe();
     SimulationSnapshot follower = simulationHandle(SHOOTER_FOLLOWER_ID).observe();
@@ -540,6 +877,14 @@ class RobotContainerSimulationIntegrationTest {
           0.0,
           simulationHandle(canId).observe().setpoint(),
           "CAN " + canId + " retained a nonzero setpoint");
+    }
+  }
+
+  private static void assertRawControllersStopped(int... canIds) {
+    for (int canId : canIds) {
+      assertTrue(
+          rawControllerStopped(canId),
+          () -> "CAN " + canId + " retained raw output " + simulationHandle(canId).observe());
     }
   }
 

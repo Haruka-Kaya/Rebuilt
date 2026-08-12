@@ -23,6 +23,7 @@ import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
+import frc.robot.utils.RobotOutputSafetySupervisor;
 
 public class AutoContainer {
     private static final String SAFE_STOP_OPTION = "SAFE STOP / NO AUTO SELECTED";
@@ -199,31 +200,65 @@ public class AutoContainer {
     }
 
     /** Runtime interlock for a calibrated path that was already scheduled. */
-    public boolean shouldAbortActiveAutonomous() {
+    public boolean shouldAbortActiveAutonomous(
+            RobotOutputSafetySupervisor.Snapshot outputSafetySnapshot) {
         if (!runState.running()) {
             return false;
         }
         if (!AutoConstants.CALIBRATED_AUTONOMOUS_ENABLED) {
             return false;
         }
+
+        AutonomousReadiness.Result outputSafety =
+            evaluateActiveOutputSafety(outputSafetySnapshot);
+        if (!outputSafety.ready()) {
+            return abortActiveAutonomous(outputSafety.reason());
+        }
         if (permanentBlockReason != null) {
-            runState.abort();
-            readinessStatus = "ABORTED: " + withoutBlockedPrefix(permanentBlockReason);
-            lastAutonomousResult = readinessStatus;
-            publishStatus(false);
-            publishLastResult();
-            return true;
+            return abortActiveAutonomous(permanentBlockReason);
         }
         AutonomousReadiness.Result readiness = currentReadiness();
         boolean abort = !readiness.ready();
         if (abort) {
-            runState.abort();
-            readinessStatus = "ABORTED: " + readiness.reason();
-            lastAutonomousResult = readinessStatus;
-            publishStatus(false);
-            publishLastResult();
+            return abortActiveAutonomous(readiness.reason());
         }
-        return abort;
+        return false;
+    }
+
+    /** Runtime-only policy: an active auto may continue only under the live process grant. */
+    static AutonomousReadiness.Result evaluateActiveOutputSafety(
+            RobotOutputSafetySupervisor.Snapshot snapshot) {
+        if (snapshot == null) {
+            return new AutonomousReadiness.Result(
+                false, "output safety snapshot is unavailable");
+        }
+        if (snapshot.phase() != RobotOutputSafetySupervisor.Phase.ARMED) {
+            return new AutonomousReadiness.Result(
+                false,
+                "output safety phase is " + snapshot.phase()
+                    + " (" + evidenceReason(snapshot.reason()) + ")");
+        }
+        if (snapshot.processOutputSafety() == null) {
+            return new AutonomousReadiness.Result(
+                false, "process output authorization snapshot is unavailable");
+        }
+        if (!snapshot.processOutputSafety().outputAuthorized()) {
+            return new AutonomousReadiness.Result(
+                false,
+                "process output authorization is revoked ("
+                    + evidenceReason(snapshot.processOutputSafety().reason()) + ")");
+        }
+        return new AutonomousReadiness.Result(
+            true, "output safety is ARMED and process output is authorized");
+    }
+
+    private boolean abortActiveAutonomous(String reason) {
+        runState.abort();
+        readinessStatus = "ABORTED: " + withoutBlockedPrefix(evidenceReason(reason));
+        lastAutonomousResult = readinessStatus;
+        publishStatus(false);
+        publishLastResult();
+        return true;
     }
 
     /** Keeps preflight state visible while disabled without waiting for autonomousInit(). */
@@ -298,5 +333,9 @@ public class AutoContainer {
         return reason != null && reason.startsWith("BLOCKED: ")
             ? reason.substring("BLOCKED: ".length())
             : reason;
+    }
+
+    private static String evidenceReason(String reason) {
+        return reason == null || reason.isBlank() ? "reason unavailable" : reason.trim();
     }
 }

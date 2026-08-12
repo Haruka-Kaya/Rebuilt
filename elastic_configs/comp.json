@@ -405,14 +405,27 @@
             }
           },
           {
-            "title": "SPARK CAN Health",
+            "title": "Hardware Self-Test Evidence Source",
+            "x": 0.0,
+            "y": 256.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware Self-Test/Evidence Source",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "All 23 CAN Health",
             "x": 384.0,
             "y": 256.0,
             "width": 384.0,
             "height": 128.0,
             "type": "Large Text Display",
             "properties": {
-              "topic": "/SmartDashboard/Hardware Self-Test/CAN Results",
+              "topic": "/SmartDashboard/Hardware Self-Test/All CAN Results",
               "period": 0.06,
               "data_type": "string"
             }
