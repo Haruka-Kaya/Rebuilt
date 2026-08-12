@@ -12,6 +12,7 @@ import frc.robot.utils.DashboardApplyGate;
 import frc.robot.utils.DashboardApplyGate.Decision;
 import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.SparkMAXContainer.PositionCommandStatus;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 
 public class ShooterSubsystem extends SubsystemBase {
@@ -81,49 +82,77 @@ public class ShooterSubsystem extends SubsystemBase {
      * Set shooter speed based off network table values
      * 
      */
-    public void setShooterSpeed() {
+    public boolean setShooterSpeed() {
         if (!flywheelPairReady()) {
             flywheelMotor_1.stop();
             flywheelRequested = false;
             flywheelIsSet = false;
-            return;
+            return false;
         }
         flywheelRequested = true;
         if (!flywheelMotor_1.setVelocity(flywheelRPM)) {
             flywheelRequested = false;
             flywheelIsSet = false;
             flywheelMotor_1.stop();
+            return false;
         }
+        return true;
     }
 
     /** Commands both shot mechanisms; the existing feed interlock still requires both at target. */
-    public void prepareToFire() {
-        setActuatorAngle();
-        setShooterSpeed();
+    public PreparationStatus prepareToFire() {
+        boolean actuatorReferenced = isActuatorReferenced();
+        PositionCommandStatus actuatorPositionStatus = commandActuatorAngle();
+        boolean flywheelAccepted = setShooterSpeed();
+        return new PreparationStatus(
+            actuatorReferenced,
+            actuatorPositionStatus,
+            flywheelAccepted,
+            isFlywheelReady());
+    }
+
+    /** One-loop result used by operator evidence without weakening any shot interlock. */
+    public record PreparationStatus(
+        boolean actuatorReferenced,
+        PositionCommandStatus actuatorPositionStatus,
+        boolean flywheelAccepted,
+        boolean flywheelReady) {
+        /** Compatibility accessor for callers that only need the reached/not-reached result. */
+        public boolean actuatorAtTarget() {
+            return actuatorPositionStatus == PositionCommandStatus.AT_TARGET;
+        }
     }
 
     public boolean setActuatorAngle() {
-        return setActuatorAngle(actuatorPos);
+        return commandActuatorAngle() == PositionCommandStatus.AT_TARGET;
     }
 
     public boolean setActuatorAngle(double degrees) {
+        return commandActuatorAngle(degrees) == PositionCommandStatus.AT_TARGET;
+    }
+
+    public PositionCommandStatus commandActuatorAngle() {
+        return commandActuatorAngle(actuatorPos);
+    }
+
+    public PositionCommandStatus commandActuatorAngle(double degrees) {
         if (!Double.isFinite(degrees)) {
             lastBlockedActuatorCommand = "set angle: invalid value";
             actuatorMotor.stop();
-            return false;
+            return PositionCommandStatus.REJECTED;
         }
         double safeDegrees = MathUtil.clamp(degrees, 0.0, 5.0);
         if (!actuatorMotor.isPositionReferenceValid(actuatorReference)) {
             lastBlockedActuatorCommand = "set angle: UNREFERENCED";
             actuatorMotor.stop();
-            return false;
+            return PositionCommandStatus.REJECTED;
         }
-        boolean atTarget = actuatorMotor.goToReferencedPosition(
+        PositionCommandStatus status = actuatorMotor.commandReferencedPosition(
             safeDegrees / 360.0, 0.5 / 360.0, actuatorReference);
-        if (!atTarget) {
-            lastBlockedActuatorCommand = "set angle: not at target or command rejected";
+        if (status == PositionCommandStatus.REJECTED) {
+            lastBlockedActuatorCommand = "set angle: command rejected";
         }
-        return atTarget;
+        return status;
     }
 
     public boolean isActuatorReferenced() {

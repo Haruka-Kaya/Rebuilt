@@ -18,6 +18,7 @@ import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Direction;
 import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Target;
 import frc.robot.constants.ConfiguredCanHardware;
 import frc.robot.constants.ConfiguredOperatorControls;
+import frc.robot.constants.ConfiguredOperatorActions.Action;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.utils.SparkMAXContainer.OutputStopBatch;
 import frc.robot.utils.SparkSimulationHandle.SimulationSnapshot;
@@ -68,10 +69,23 @@ class RobotContainerSimulationIntegrationTest {
 
       assertTrue(await(3.0, activeContainer, () -> pairEchoesRequestedVelocity(500.0)),
           () -> pairSummary("initial rev binding did not reach the SPARK pair"));
+      assertEquals(
+          "ACTIVE",
+          SmartDashboard.getString(OperatorActionEvidence.stateKey(Action.REV), "MISSING"));
+      assertTrue(
+          SmartDashboard.getString(OperatorActionEvidence.reasonKey(Action.REV), "")
+              .contains("HOOD_UNREFERENCED"),
+          "Rev evidence must explain that only the flywheel pair was accepted");
 
       setDriverButton(ConfiguredOperatorControls.DRIVER_REV, false);
       assertTrue(await(3.0, activeContainer, RobotContainerSimulationIntegrationTest::pairRawStopped),
           () -> pairSummary("RevUpCommand.end did not stop the SPARK pair"));
+      assertEquals(
+          "STOPPED",
+          SmartDashboard.getString(OperatorActionEvidence.stateKey(Action.REV), "MISSING"));
+      assertEquals(
+          "INPUT_RELEASED",
+          SmartDashboard.getString(OperatorActionEvidence.reasonKey(Action.REV), "MISSING"));
       OutputStopBatch firstStop = SparkMAXContainer.requestOutputStops(
           SHOOTER_LEADER_ID, SHOOTER_FOLLOWER_ID);
       assertTrue(await(3.0, activeContainer, () -> firstStop.snapshot().confirmed()),
@@ -97,6 +111,9 @@ class RobotContainerSimulationIntegrationTest {
             && follower.appliedOutput() == 0.0
             && follower.velocity() == 0.0;
       }), () -> pairSummary("CAN fault did not revoke output"));
+      assertEquals(
+          "BLOCKED",
+          SmartDashboard.getString(OperatorActionEvidence.stateKey(Action.REV), "MISSING"));
 
       // Recovery configuration is disabled-only. Keep the button held throughout recovery.
       enableDisabled();
@@ -116,6 +133,10 @@ class RobotContainerSimulationIntegrationTest {
             0.0,
             simulationHandle(SHOOTER_LEADER_ID).observe().setpoint(),
             "held input restarted the recovered leader during cycle " + recoveryCycle);
+        assertEquals(
+            "BLOCKED",
+            SmartDashboard.getString(OperatorActionEvidence.stateKey(Action.REV), "MISSING"),
+            "held recovery input lost its blocked evidence during cycle " + recoveryCycle);
       }
       assertFalse(
           pairEchoesRequestedVelocity(500.0),
@@ -127,6 +148,9 @@ class RobotContainerSimulationIntegrationTest {
       setDriverButton(ConfiguredOperatorControls.DRIVER_REV, true);
       assertTrue(await(3.0, activeContainer, () -> pairEchoesRequestedVelocity(500.0)),
           () -> pairSummary("release and fresh press did not rearm the binding"));
+      assertEquals(
+          "ACTIVE",
+          SmartDashboard.getString(OperatorActionEvidence.stateKey(Action.REV), "MISSING"));
 
       // The same production binding layer also reaches the one-shot unreferenced diagnostic.
       // Command echo proves output acceptance, but deliberately reports no invented motion.
@@ -137,6 +161,62 @@ class RobotContainerSimulationIntegrationTest {
           SHOOTER_LEADER_ID, SHOOTER_FOLLOWER_ID);
       assertTrue(await(3.0, activeContainer, () -> recoveredStop.snapshot().confirmed()),
           () -> recoveredStop.snapshot().summary());
+
+      // Ambiguous intake-path gestures are rejected as a group and require a full release.
+      pump(activeContainer, 3);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_INTAKE, true);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_OUTPUT, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.INTAKE, "CONFLICTING_INTAKE_PATH_INPUTS");
+      assertActionBlocked(Action.OUTPUT, "CONFLICTING_INTAKE_PATH_INPUTS");
+      assertRawSetpointsZero(
+          ConfiguredCanHardware.INTAKE_ACTUATOR_ID,
+          ConfiguredCanHardware.INTAKE_ROLLER_ID,
+          ConfiguredCanHardware.CONVEYOR_ID);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_INTAKE, false);
+      pump(activeContainer, 2);
+      assertEquals(
+          "BLOCKED",
+          SmartDashboard.getString(OperatorActionEvidence.stateKey(Action.OUTPUT), "MISSING"),
+          "one held button must not restart after an ambiguous gesture");
+      assertTrue(
+          SmartDashboard.getString(OperatorActionEvidence.reasonKey(Action.OUTPUT), "")
+              .contains("RELEASE_ALL_INTAKE_PATH_INPUTS_AFTER_CONFLICT"),
+          "held conflict input must preserve the exact release-all recovery instruction");
+      setDriverButton(ConfiguredOperatorControls.DRIVER_OUTPUT, false);
+      pump(activeContainer, 3);
+
+      // A fresh single press reaches the command, which reports the exact unreferenced blocker.
+      setDriverButton(ConfiguredOperatorControls.DRIVER_INTAKE, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.INTAKE, "ACTUATOR_UNREFERENCED");
+      assertRawSetpointsZero(
+          ConfiguredCanHardware.INTAKE_ACTUATOR_ID,
+          ConfiguredCanHardware.INTAKE_ROLLER_ID,
+          ConfiguredCanHardware.CONVEYOR_ID);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_INTAKE, false);
+      pump(activeContainer, 3);
+
+      // Fire preserves all simultaneous interlock blockers instead of hiding the known feeder fault.
+      setDriverButton(ConfiguredOperatorControls.DRIVER_FIRE, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.FIRE, "SHOOTER_NOT_READY");
+      assertTrue(
+          SmartDashboard.getString(OperatorActionEvidence.reasonKey(Action.FIRE), "")
+              .contains("FEEDER_KNOWN_STALL"));
+      assertRawSetpointsZero(
+          ConfiguredCanHardware.FEEDER_ID, ConfiguredCanHardware.CONVEYOR_ID);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_FIRE, false);
+      pump(activeContainer, 3);
+
+      // The dedicated maintenance auto-aim binding reports the reference failure without motion.
+      setMaintenanceButton(ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.AUTO_AIM, "TURRET_UNREFERENCED");
+      assertRawSetpointsZero(ConfiguredCanHardware.TURRET_ID);
+      setMaintenanceButton(ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM, false);
+      pump(activeContainer, 3);
+
       prepareTurretDiagnosticSelection();
       enableDisabledTest();
       activeContainer.armUnhomedDiagnosticSession(Target.TURRET, Direction.POSITIVE);
@@ -217,6 +297,26 @@ class RobotContainerSimulationIntegrationTest {
 
   private static void assertPairRawStopped() {
     assertTrue(pairRawStopped(), () -> pairSummary("SPARK pair remained nonzero"));
+  }
+
+  private static void assertActionBlocked(Action action, String expectedReason) {
+    assertEquals(
+        "BLOCKED",
+        SmartDashboard.getString(OperatorActionEvidence.stateKey(action), "MISSING"));
+    assertTrue(
+        SmartDashboard.getString(OperatorActionEvidence.reasonKey(action), "")
+            .contains(expectedReason),
+        () -> action + " reason="
+            + SmartDashboard.getString(OperatorActionEvidence.reasonKey(action), "MISSING"));
+  }
+
+  private static void assertRawSetpointsZero(int... canIds) {
+    for (int canId : canIds) {
+      assertEquals(
+          0.0,
+          simulationHandle(canId).observe().setpoint(),
+          "CAN " + canId + " retained a nonzero setpoint");
+    }
   }
 
   private static boolean pairRawStopped() {

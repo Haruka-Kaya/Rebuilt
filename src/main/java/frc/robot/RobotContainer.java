@@ -23,6 +23,7 @@ import frc.robot.commands.RetractIntakeCommand;
 import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.constants.ConfiguredOperatorControls;
+import frc.robot.constants.ConfiguredOperatorActions.Action;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.containers.DriveBaseContainer;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
@@ -36,6 +37,7 @@ import frc.robot.subsystems.VisionSubsystem;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.utils.SparkRawCommandEchoSimulation;
 import frc.robot.utils.NeutralAfterEnableGate;
+import frc.robot.utils.OperatorActionEvidence;
 import frc.robot.utils.AsyncDiagnosticSink;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.RunCommand;
@@ -43,6 +45,7 @@ import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
 import edu.wpi.first.wpilibj2.command.button.JoystickButton;
 import edu.wpi.first.wpilibj2.command.button.Trigger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.EnumSet;
 
 /*
  * This class is where the bulk of the robot should be declared.  Since Command-based is a
@@ -62,6 +65,10 @@ public class RobotContainer implements AutoCloseable {
   private final NeutralAfterEnableGate m_teleopInputGate = new NeutralAfterEnableGate();
   private final NeutralAfterEnableGate m_unhomedDiagnosticInputGate =
       new NeutralAfterEnableGate();
+  private final OperatorActionEvidence m_operatorActionEvidence =
+      new OperatorActionEvidence();
+  private final EnumSet<Action> m_conflictingIntakeActions = EnumSet.noneOf(Action.class);
+  private boolean m_jumpBumpRequiresRelease;
   private long m_teleopSafetySourceSignature;
   private Target m_unhomedDiagnosticTarget;
   private Direction m_unhomedDiagnosticDirection;
@@ -89,13 +96,18 @@ public class RobotContainer implements AutoCloseable {
   // The robot's commands
   private final JumpBumpCommand jumpBump;
 
-  private final IntakeCommand slurp = new IntakeCommand(m_intake, m_conveyor);
-  private final OutputCommand spit = new OutputCommand(m_intake, m_conveyor);
+  private final IntakeCommand slurp = new IntakeCommand(
+      m_intake, m_conveyor, m_operatorActionEvidence);
+  private final OutputCommand spit = new OutputCommand(
+      m_intake, m_conveyor, m_operatorActionEvidence);
 
-  private final RetractIntakeCommand back_in_shell = new RetractIntakeCommand(m_intake);
+  private final RetractIntakeCommand back_in_shell = new RetractIntakeCommand(
+      m_intake, m_operatorActionEvidence);
 
-  private final FireCommand fire = new FireCommand(m_feeder, m_conveyor, m_shooter);
-  private final RevUpCommand revWheel = new RevUpCommand(m_shooter);
+  private final FireCommand fire = new FireCommand(
+      m_feeder, m_conveyor, m_shooter, m_operatorActionEvidence);
+  private final RevUpCommand revWheel = new RevUpCommand(
+      m_shooter, m_operatorActionEvidence);
 
 
   // Something?
@@ -106,13 +118,16 @@ public class RobotContainer implements AutoCloseable {
    */
   public RobotContainer() {
     m_DriveBaseContainer = new DriveBaseContainer(
-        m_driverController, m_turret, m_shooter, m_feeder, m_conveyor, m_intake, m_climber);
+        m_driverController, m_turret, m_shooter, m_feeder, m_conveyor, m_intake, m_climber,
+        m_operatorActionEvidence);
     drivetrain = m_DriveBaseContainer.drivetrain;
 
     jumpBump = new JumpBumpCommand(
         drivetrain,
         m_driverController,
-        m_DriveBaseContainer::driverInputsAllowed);
+        m_DriveBaseContainer::driverInputsAllowed,
+        m_DriveBaseContainer::blockDriverInputsUntilNeutral,
+        m_operatorActionEvidence);
 
     SmartDashboard.putString(
         "Controls/Configured", ConfiguredOperatorControls.configuredSummary());
@@ -149,17 +164,16 @@ public class RobotContainer implements AutoCloseable {
     availableButton(
         m_driverController,
         OIConstants.kDriverControllerPort,
-        ConfiguredOperatorControls.DRIVER_JUMP_BUMP)
-        .and(availableButton(
-            m_driverController,
-            OIConstants.kDriverControllerPort,
-            ConfiguredOperatorControls.DRIVER_WHEEL_LOCK).negate())
+        ConfiguredOperatorControls.DRIVER_JUMP_BUMP,
+        Action.JUMP_BUMP)
+        .and(new Trigger(this::jumpBumpHasPriority))
         .whileTrue(jumpBump);
 
     availableButton(
         m_driverController,
         OIConstants.kDriverControllerPort,
-        ConfiguredOperatorControls.DRIVER_REV).whileTrue(revWheel);
+        ConfiguredOperatorControls.DRIVER_REV,
+        Action.REV).whileTrue(revWheel);
     exclusiveIntakePathButton(IntakePathAction.FIRE).whileTrue(fire);
 
     exclusiveIntakePathButton(IntakePathAction.RETRACT).whileTrue(back_in_shell);
@@ -168,24 +182,41 @@ public class RobotContainer implements AutoCloseable {
         m_maintenanceController,
         OIConstants.kMaintenanceControllerPort,
         ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM,
-        ConfiguredOperatorControls.DRIVER_AUTO_AIM_FALLBACK)
-        .whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret)
-            .finallyDo(interrupted -> m_turret.stop()));
+        ConfiguredOperatorControls.DRIVER_AUTO_AIM_FALLBACK,
+        Action.AUTO_AIM)
+        .whileTrue(new RunCommand(this::runAutoAimWithEvidence, m_turret)
+            .beforeStarting(() -> m_operatorActionEvidence.requested(Action.AUTO_AIM))
+            .finallyDo(interrupted -> {
+              m_turret.stop();
+              m_operatorActionEvidence.commandEnded(Action.AUTO_AIM, interrupted);
+            }));
 
     configureUnhomedDiagnosticBindings();
   }
 
-  private Trigger availableButton(CommandPS5Controller controller, int port, int button) {
-    return new Trigger(() -> teleopInputsAllowed()
-        && DriverStation.getStickButtonCount(port) >= button
-        && controller.getHID().getRawButton(button));
+  private Trigger availableButton(
+      CommandPS5Controller controller, int port, int button, Action action) {
+    return new Trigger(() -> {
+      boolean inputsAllowed = teleopInputsAllowed();
+      boolean pressed = rawButtonPressed(controller, port, button);
+      if (!pressed) {
+        if (action == Action.JUMP_BUMP) {
+          m_jumpBumpRequiresRelease = false;
+        }
+        recordReleased(action);
+        return false;
+      }
+      if (!inputsAllowed) {
+        m_operatorActionEvidence.blocked(action, mechanismGateBlockReason());
+        return false;
+      }
+      return true;
+    });
   }
 
   private Trigger exclusiveIntakePathButton(IntakePathAction requestedAction) {
     return new Trigger(() -> {
-      if (!teleopInputsAllowed()) {
-        return false;
-      }
+      boolean inputsAllowed = teleopInputsAllowed();
       boolean intake = rawButtonPressed(
           m_driverController,
           OIConstants.kDriverControllerPort,
@@ -203,23 +234,57 @@ public class RobotContainer implements AutoCloseable {
           OIConstants.kOperatorControllerPort,
           ConfiguredOperatorControls.OPERATOR_RETRACT,
           ConfiguredOperatorControls.DRIVER_RETRACT_FALLBACK);
+      boolean ignoredRetractFallback = dedicatedControllerPresent(
+              OIConstants.kOperatorControllerPort,
+              ConfiguredOperatorControls.OPERATOR_RETRACT)
+          && rawButtonPressed(
+              m_driverController,
+              OIConstants.kDriverControllerPort,
+              ConfiguredOperatorControls.DRIVER_RETRACT_FALLBACK)
+          && !rawButtonPressed(
+              m_operatorController,
+              OIConstants.kOperatorControllerPort,
+              ConfiguredOperatorControls.OPERATOR_RETRACT);
       int pressedCount = (intake ? 1 : 0)
           + (output ? 1 : 0)
           + (firePressed ? 1 : 0)
           + (retract ? 1 : 0);
-      if (pressedCount > 1) {
-        m_teleopInputGate.blockUntilNeutral();
-        return false;
-      }
-      if (pressedCount != 1) {
-        return false;
-      }
-      return switch (requestedAction) {
+      Action action = operatorAction(requestedAction);
+      boolean requestedPressed = switch (requestedAction) {
         case INTAKE -> intake;
         case OUTPUT -> output;
         case FIRE -> firePressed;
         case RETRACT -> retract;
       };
+      if (requestedAction == IntakePathAction.RETRACT && ignoredRetractFallback) {
+        m_operatorActionEvidence.blocked(
+            Action.RETRACT, "DEDICATED_OPERATOR_PRESENT_USE_OPERATOR_L1");
+        return false;
+      }
+      if (pressedCount > 1) {
+        m_teleopInputGate.blockUntilNeutral();
+        recordIntakePathConflict(intake, output, firePressed, retract);
+        return false;
+      }
+      if (pressedCount == 0) {
+        clearReleasedIntakeConflicts();
+        recordReleased(action);
+        return false;
+      }
+      if (!inputsAllowed) {
+        if (requestedPressed) {
+          m_operatorActionEvidence.blocked(
+              action,
+              m_conflictingIntakeActions.contains(action)
+                  ? "RELEASE_ALL_INTAKE_PATH_INPUTS_AFTER_CONFLICT"
+                  : mechanismGateBlockReason());
+        }
+        return false;
+      }
+      if (!requestedPressed) {
+        recordReleased(action);
+      }
+      return requestedPressed;
     });
   }
 
@@ -227,10 +292,130 @@ public class RobotContainer implements AutoCloseable {
       CommandPS5Controller dedicatedController,
       int dedicatedPort,
       int dedicatedButton,
-      int driverFallbackButton) {
-    return new Trigger(() -> teleopInputsAllowed()
-        && operatorOrDriverPressed(
-            dedicatedController, dedicatedPort, dedicatedButton, driverFallbackButton));
+      int driverFallbackButton,
+      Action action) {
+    return new Trigger(() -> {
+      boolean inputsAllowed = teleopInputsAllowed();
+      boolean dedicatedPresent = dedicatedControllerPresent(dedicatedPort, dedicatedButton);
+      boolean dedicatedPressed = rawButtonPressed(
+          dedicatedController, dedicatedPort, dedicatedButton);
+      boolean fallbackPressed = rawButtonPressed(
+          m_driverController, OIConstants.kDriverControllerPort, driverFallbackButton);
+      if (dedicatedPresent && fallbackPressed && !dedicatedPressed) {
+        m_operatorActionEvidence.blocked(
+            action, "DEDICATED_CONTROLLER_PRESENT_USE_DEDICATED_CONTROL");
+        return false;
+      }
+      boolean pressed = operatorOrDriverPressed(
+          dedicatedController, dedicatedPort, dedicatedButton, driverFallbackButton);
+      if (!pressed) {
+        recordReleased(action);
+        return false;
+      }
+      if (!inputsAllowed) {
+        m_operatorActionEvidence.blocked(action, mechanismGateBlockReason());
+        return false;
+      }
+      return true;
+    });
+  }
+
+  private boolean jumpBumpHasPriority() {
+    boolean jumpPressed = rawButtonPressed(
+        m_driverController,
+        OIConstants.kDriverControllerPort,
+        ConfiguredOperatorControls.DRIVER_JUMP_BUMP);
+    boolean wheelLockPressed = rawButtonPressed(
+        m_driverController,
+        OIConstants.kDriverControllerPort,
+        ConfiguredOperatorControls.DRIVER_WHEEL_LOCK);
+    if (m_jumpBumpRequiresRelease) {
+      return false;
+    }
+    if (jumpPressed && wheelLockPressed) {
+      m_jumpBumpRequiresRelease = true;
+      m_operatorActionEvidence.blocked(Action.JUMP_BUMP, "WHEEL_LOCK_PRIORITY");
+      return false;
+    }
+    return true;
+  }
+
+  private void runAutoAimWithEvidence() {
+    switch (m_turret.autoAimWithLimelight()) {
+      case ALIGNED -> m_operatorActionEvidence.active(Action.AUTO_AIM, "ALIGNED");
+      case CONFIRMING_ALIGNMENT -> m_operatorActionEvidence.active(
+          Action.AUTO_AIM, "CONFIRMING_ALIGNMENT");
+      case WAITING_FOR_NEW_FRAME -> m_operatorActionEvidence.active(
+          Action.AUTO_AIM, "WAITING_FOR_NEW_FRAME");
+      case COMMANDING_CORRECTION -> m_operatorActionEvidence.active(
+          Action.AUTO_AIM, "CORRECTION_COMMAND_ACCEPTED_NOT_MOTION_PROOF");
+      case CORRECTION_AT_TARGET -> m_operatorActionEvidence.active(
+          Action.AUTO_AIM, "CORRECTION_AT_TARGET");
+      case UNREFERENCED -> m_operatorActionEvidence.blocked(
+          Action.AUTO_AIM, "TURRET_UNREFERENCED");
+      case ALLIANCE_UNKNOWN -> m_operatorActionEvidence.blocked(
+          Action.AUTO_AIM, "ALLIANCE_UNKNOWN");
+      case VISION_NOT_READY -> m_operatorActionEvidence.blocked(
+          Action.AUTO_AIM, "VISION_NOT_READY");
+      case NO_VALID_TARGET -> m_operatorActionEvidence.blocked(
+          Action.AUTO_AIM, "NO_VALID_TARGET");
+      case WRONG_ALLIANCE_OR_NON_HUB_TAG -> m_operatorActionEvidence.blocked(
+          Action.AUTO_AIM, "WRONG_ALLIANCE_OR_NON_HUB_TAG");
+      case POSITION_UNAVAILABLE -> m_operatorActionEvidence.blocked(
+          Action.AUTO_AIM, "POSITION_UNAVAILABLE");
+      case COMMAND_REJECTED -> m_operatorActionEvidence.blocked(
+          Action.AUTO_AIM, "POSITION_COMMAND_REJECTED");
+    }
+  }
+
+  private static Action operatorAction(IntakePathAction action) {
+    return switch (action) {
+      case INTAKE -> Action.INTAKE;
+      case OUTPUT -> Action.OUTPUT;
+      case FIRE -> Action.FIRE;
+      case RETRACT -> Action.RETRACT;
+    };
+  }
+
+  private void recordIntakePathConflict(
+      boolean intake, boolean output, boolean firePressed, boolean retract) {
+    if (intake) {
+      recordIntakePathConflict(Action.INTAKE);
+    }
+    if (output) {
+      recordIntakePathConflict(Action.OUTPUT);
+    }
+    if (firePressed) {
+      recordIntakePathConflict(Action.FIRE);
+    }
+    if (retract) {
+      recordIntakePathConflict(Action.RETRACT);
+    }
+  }
+
+  private void recordIntakePathConflict(Action action) {
+    m_conflictingIntakeActions.add(action);
+    m_operatorActionEvidence.blocked(action, "CONFLICTING_INTAKE_PATH_INPUTS");
+  }
+
+  private void clearReleasedIntakeConflicts() {
+    for (Action action : m_conflictingIntakeActions) {
+      m_operatorActionEvidence.stopped(action, "INPUTS_RELEASED_AFTER_CONFLICT");
+    }
+    m_conflictingIntakeActions.clear();
+  }
+
+  private void recordReleased(Action action) {
+    OperatorActionEvidence.Snapshot snapshot = m_operatorActionEvidence.snapshot(action);
+    if (snapshot != null && snapshot.state() != OperatorActionEvidence.State.STOPPED) {
+      m_operatorActionEvidence.stopped(action, "INPUT_RELEASED");
+    }
+  }
+
+  private static String mechanismGateBlockReason() {
+    return DriverStation.isTeleopEnabled()
+        ? "RELEASE_TO_ARM_AFTER_ENABLE_OR_DEPENDENCY_CHANGE"
+        : "NOT_TELEOP";
   }
 
   private boolean teleopInputsAllowed() {
@@ -278,6 +463,10 @@ public class RobotContainer implements AutoCloseable {
     }
     return rawButtonPressed(
         m_driverController, OIConstants.kDriverControllerPort, driverFallbackButton);
+  }
+
+  private static boolean dedicatedControllerPresent(int port, int requiredButton) {
+    return DriverStation.getStickButtonCount(port) >= requiredButton;
   }
 
   private static boolean rawButtonPressed(
@@ -479,6 +668,7 @@ public class RobotContainer implements AutoCloseable {
 
   public void stopAll() {
     disarmUnhomedDiagnosticSession();
+    m_DriveBaseContainer.blockDriverInputsUntilNeutral();
     stopSafely("swerve", drivetrain::requestIdle);
     stopSafely("intake", m_intake::stopAll);
     stopSafely("conveyor", m_conveyor::stop);
@@ -486,6 +676,7 @@ public class RobotContainer implements AutoCloseable {
     stopSafely("shooter", m_shooter::stop);
     stopSafely("turret", m_turret::stop);
     stopSafely("climber", m_climber::stop);
+    m_operatorActionEvidence.allStopped("ROBOT_OUTPUT_STOP_REQUESTED");
   }
 
   /** Releases process-owned simulation/native resources after all outputs are requested neutral. */

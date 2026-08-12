@@ -105,6 +105,12 @@ class OperatorAssetTest {
           "/SmartDashboard/Controls/Configured",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
+          "/SmartDashboard/Operator Actions/Configured",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Operator Actions/Evidence",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
           "/SmartDashboard/Unhomed Actuator Diagnostic/Armed",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
@@ -196,32 +202,52 @@ class OperatorAssetTest {
   }
 
   @Test
-  void diagnosticsWidgetsHavePositiveNonoverlappingRectangles() throws IOException {
+  void everyCompetitionTabHasPositiveNonoverlappingRectangles() throws IOException {
     JsonNode root = objectMapper.readTree(COMP_LAYOUT.toFile());
-    JsonNode diagnosticsTab = findTab(root, "Diagnostics / Setup");
-    assertNotNull(diagnosticsTab, "Diagnostics / Setup tab is missing");
-    JsonNode widgets = diagnosticsTab.at("/grid_layout/containers");
-
-    for (int first = 0; first < widgets.size(); first++) {
-      JsonNode firstWidget = widgets.get(first);
-      assertPositiveRectangle(firstWidget);
-      for (int second = first + 1; second < widgets.size(); second++) {
-        JsonNode secondWidget = widgets.get(second);
-        assertFalse(
-            rectanglesOverlap(firstWidget, secondWidget),
-            () -> firstWidget.path("title").asText()
-                + " overlaps " + secondWidget.path("title").asText());
+    for (JsonNode tab : root.path("tabs")) {
+      JsonNode widgets = tab.at("/grid_layout/containers");
+      for (int first = 0; first < widgets.size(); first++) {
+        JsonNode firstWidget = widgets.get(first);
+        assertPositiveRectangle(firstWidget);
+        for (int second = first + 1; second < widgets.size(); second++) {
+          JsonNode secondWidget = widgets.get(second);
+          assertFalse(
+              rectanglesOverlap(firstWidget, secondWidget),
+              () -> tab.path("name").asText() + ": "
+                  + firstWidget.path("title").asText()
+                  + " overlaps " + secondWidget.path("title").asText());
+        }
       }
     }
   }
 
   @Test
-  void bothAllianceLayoutsExposeTheHubReleaseInterlock() throws IOException {
+  void bothAllianceLayoutsExposeHubAndCurrentOperatorActionEvidence() throws IOException {
     JsonNode root = objectMapper.readTree(COMP_LAYOUT.toFile());
 
     assertAll(
         () -> assertTabContainsTopic(root, "Red Alliance", "/SmartDashboard/Hub Active"),
-        () -> assertTabContainsTopic(root, "Blue Alliance", "/SmartDashboard/Hub Active"));
+        () -> assertTabContainsTopic(root, "Blue Alliance", "/SmartDashboard/Hub Active"),
+        () -> assertTabTopicMatches(
+            root,
+            "Red Alliance",
+            "/SmartDashboard/Operator Actions/Current State",
+            new WidgetExpectation("Large Text Display", "string")),
+        () -> assertTabTopicMatches(
+            root,
+            "Red Alliance",
+            "/SmartDashboard/Operator Actions/Current Reason",
+            new WidgetExpectation("Large Text Display", "string")),
+        () -> assertTabTopicMatches(
+            root,
+            "Blue Alliance",
+            "/SmartDashboard/Operator Actions/Current State",
+            new WidgetExpectation("Large Text Display", "string")),
+        () -> assertTabTopicMatches(
+            root,
+            "Blue Alliance",
+            "/SmartDashboard/Operator Actions/Current Reason",
+            new WidgetExpectation("Large Text Display", "string")));
   }
 
   @Test
@@ -296,6 +322,23 @@ class OperatorAssetTest {
       found |= topic.equals(widget.at("/properties/topic").asText());
     }
     assertTrue(found, () -> tabName + " is missing " + topic);
+  }
+
+  private static void assertTabTopicMatches(
+      JsonNode root, String tabName, String topic, WidgetExpectation expectation) {
+    JsonNode tab = findTab(root, tabName);
+    assertNotNull(tab, tabName + " tab is missing");
+    JsonNode matchingWidget = null;
+    for (JsonNode widget : tab.at("/grid_layout/containers")) {
+      if (topic.equals(widget.at("/properties/topic").asText())) {
+        matchingWidget = widget;
+        break;
+      }
+    }
+    assertNotNull(matchingWidget, tabName + " is missing " + topic);
+    assertEquals(expectation.type(), matchingWidget.path("type").asText(), topic);
+    assertEquals(
+        expectation.dataType(), matchingWidget.at("/properties/data_type").asText(), topic);
   }
 
   private static void assertControllerMapping(

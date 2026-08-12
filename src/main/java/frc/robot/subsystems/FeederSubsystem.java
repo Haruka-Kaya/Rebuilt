@@ -83,6 +83,10 @@ public class FeederSubsystem extends SubsystemBase {
         return !isMotionBlocked() && m_feeder.isReady();
     }
 
+    public boolean isMotionBlockedByKnownStall() {
+        return isMotionBlocked();
+    }
+
     public String getDiagnosticStatus() {
         String status = m_feeder.getDiagnosticStatus();
         if (isMotionBlocked()) {

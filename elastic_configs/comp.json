@@ -100,6 +100,32 @@
               "trajectory_color": 4294967295,
               "show_robot_outside_widget": true
             }
+          },
+          {
+            "title": "Operator Action State",
+            "x": 384.0,
+            "y": 0.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Operator Actions/Current State",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Operator Action Reason",
+            "x": 384.0,
+            "y": 128.0,
+            "width": 384.0,
+            "height": 256.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Operator Actions/Current Reason",
+              "period": 0.06,
+              "data_type": "string"
+            }
           }
         ]
       }
@@ -201,6 +227,32 @@
               "robot_color": 4294198070,
               "trajectory_color": 4294967295,
               "show_robot_outside_widget": true
+            }
+          },
+          {
+            "title": "Operator Action State",
+            "x": 384.0,
+            "y": 0.0,
+            "width": 384.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Operator Actions/Current State",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Operator Action Reason",
+            "x": 384.0,
+            "y": 128.0,
+            "width": 384.0,
+            "height": 256.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Operator Actions/Current Reason",
+              "period": 0.06,
+              "data_type": "string"
             }
           }
         ]
@@ -846,6 +898,32 @@
             "properties": {
               "topic": "/SmartDashboard/Hardware/Motor Blockers",
               "period": 0.25,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Configured Operator Actions",
+            "x": 0.0,
+            "y": 1920.0,
+            "width": 1152.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Operator Actions/Configured",
+              "period": 0.25,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Operator Action Evidence",
+            "x": 0.0,
+            "y": 2048.0,
+            "width": 1152.0,
+            "height": 256.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Operator Actions/Evidence",
+              "period": 0.06,
               "data_type": "string"
             }
           }

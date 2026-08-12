@@ -38,6 +38,10 @@ Teleopへ入った直後、controllerの再接続後、または機構healthの�
 | Maintenance | L1 | turret auto-aim（controllerが無い場合Driver Triangle） |
 | Maintenance（Testのみ・fallbackなし） | Create + L1 / R1 | 選択済み未reference motorのnegative / positive 3%診断pulse |
 
+Red/Blueの競技画面には直近操作の`Operator Action State`と`Operator Action Reason`を表示します。`ACTIVE`は機構ごとのsoftware APIが要求を受け付けたか、Swerveではnative control APIが例外なく戻ったことを示します。Swerve requestの内部受付、CAN frameの送信、物理的な動作の証明ではありません。`STOPPED`はoperator actionが終了して停止要求を発行した状態で、controller出力のzero確認を意味しません。`BLOCKED`は未reference、既知Feeder stall、入力競合、release待ち、CAN healthなど、その操作で実際に判定した理由を表示します。全10操作の状態、出力CAN、依存CANはDiagnostics / Setupの`Operator Action Evidence`で確認できます。
+
+Desktop simulationのSPARK modelは`RAW_COMMAND_ECHO_NO_PHYSICS_NO_REFERENCE`です。command到達、zero停止、fault時の拒否は検証しますが、機構の慣性・位置・電流・polarityを再現せず、homing/referenceや実機motion evidenceを生成しません。
+
 未reference motor診断はDisabledでTest modeを選び、Diagnostics / SetupでID30/34/35/38/39とNegative/Positiveをそれぞれexact-one選択し、対象と方向についてPhysical ClearanceとBrushless Motor Typeを確認してからfresh Armを立てます。その後Test Enableし、Maintenance controllerを一度全releaseしてからCreateと、snapshot済み方向に対応するL1またはR1だけを保持します。driver fallbackはありません。1回のArmで1 pulseだけ実行し、Climberでは非選択側も含め、開始前と終了後にSPARKのzero-output evidenceを確認します。途中releaseでもcommandは停止確認までrequirementsを保持し、外部cancel時だけ`STOP_REQUESTED`までを事実どおり表示します。Hardware Self-Test Armとの同時armは両方拒否します。
 
 Hardware Self-TestはDisabledでTest modeを選んだ状態でArmし、その有効時間内にTest Enableします。

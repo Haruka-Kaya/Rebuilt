@@ -15,6 +15,7 @@ import frc.robot.utils.DashboardApplyGate;
 import frc.robot.utils.DashboardApplyGate.Decision;
 import frc.robot.utils.PositionReferenceGuard.Token;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.SparkMAXContainer.PositionCommandStatus;
 import frc.robot.utils.HubTagFilter;
 
 public class TurretSubsystem extends SubsystemBase {
@@ -55,27 +56,31 @@ public class TurretSubsystem extends SubsystemBase {
     }
 
     public boolean setTurretAngle(double angleDegrees) {
+        return commandTurretAngle(angleDegrees) == PositionCommandStatus.AT_TARGET;
+    }
+
+    public PositionCommandStatus commandTurretAngle(double angleDegrees) {
         if (!Double.isFinite(angleDegrees)
             || angleDegrees < TurretConstants.MIN_ANGLE_DEGREES
             || angleDegrees > TurretConstants.MAX_ANGLE_DEGREES) {
             lastBlockedPositionCommand = "angle outside configured limits";
             stop();
-            return false;
+            return PositionCommandStatus.REJECTED;
         }
         if (!m_motor.isPositionReferenceValid(positionReference)) {
             lastBlockedPositionCommand = "set angle: UNREFERENCED";
             stop();
-            return false;
+            return PositionCommandStatus.REJECTED;
         }
         // convert turret degrees -> motor rotations before commanding
-        boolean atTarget = m_motor.goToReferencedPosition(
+        PositionCommandStatus status = m_motor.commandReferencedPosition(
             degreesToMotorRotations(angleDegrees),
             degreesToMotorRotations(TurretConstants.AIM_DEADBAND_DEG),
             positionReference);
-        if (!atTarget) {
-            lastBlockedPositionCommand = "set angle: not at target or command rejected";
+        if (status == PositionCommandStatus.REJECTED) {
+            lastBlockedPositionCommand = "set angle: command rejected";
         }
-        return atTarget;
+        return status;
     }
 
     public void stop() {
@@ -136,29 +141,35 @@ public class TurretSubsystem extends SubsystemBase {
         return (motorRotations / TurretConstants.GEAR_RATIO) * 360.0;
     }
     
-    public void autoAimWithLimelight() {
+    public AimStatus autoAimWithLimelight() {
         if (!m_motor.isPositionReferenceValid(positionReference)) {
             lastBlockedPositionCommand = "auto aim: UNREFERENCED";
             stop();
-            return;
+            return AimStatus.UNREFERENCED;
         }
 
         var observation = m_vision.getLatestTargetObservation();
         var alliance = DriverStation.getAlliance();
-        if (observation.isEmpty() || alliance.isEmpty()) {
+        if (alliance.isEmpty()) {
             stop();
-            return;
+            return AimStatus.ALLIANCE_UNKNOWN;
+        }
+        if (observation.isEmpty()) {
+            stop();
+            return m_vision.isTargetingPipelineReady()
+                ? AimStatus.NO_VALID_TARGET
+                : AimStatus.VISION_NOT_READY;
         }
 
         TargetObservation target = observation.get();
         if (!HubTagFilter.isHubTagForAlliance(alliance.get(), target.tagId())) {
             stop();
-            return;
+            return AimStatus.WRONG_ALLIANCE_OR_NON_HUB_TAG;
         }
 
         // Apply at most one correction per camera frame.
         if (target.timestampSeconds() <= lastAimFrameTimestamp + 1e-6) {
-            return;
+            return AimStatus.WAITING_FOR_NEW_FRAME;
         }
         lastAimFrameTimestamp = target.timestampSeconds();
 
@@ -167,7 +178,7 @@ public class TurretSubsystem extends SubsystemBase {
             stopMotorOutput();
             alignedFrameCount++;
             onTarget = alignedFrameCount >= TurretConstants.REQUIRED_ON_TARGET_FRAMES;
-            return;
+            return onTarget ? AimStatus.ALIGNED : AimStatus.CONFIRMING_ALIGNMENT;
         }
 
         onTarget = false;
@@ -178,16 +189,41 @@ public class TurretSubsystem extends SubsystemBase {
         if (currentAngle.isEmpty()) {
             lastBlockedPositionCommand = "auto aim: position unavailable";
             stop();
-            return;
+            return AimStatus.POSITION_UNAVAILABLE;
         }
         double correctionDegrees = MathUtil.clamp(
             -tx * TurretConstants.SAFE_KP,
             -TurretConstants.MAX_AIM_STEP_DEGREES,
             TurretConstants.MAX_AIM_STEP_DEGREES);
         double commandedAngle = currentAngle.getAsDouble() + correctionDegrees;
-        if (!setTurretAngle(commandedAngle)) {
+        PositionCommandStatus commandStatus = commandTurretAngle(commandedAngle);
+        if (commandStatus == PositionCommandStatus.REJECTED) {
             onTarget = false;
         }
+        return aimStatusForPositionCommand(commandStatus);
+    }
+
+    static AimStatus aimStatusForPositionCommand(PositionCommandStatus commandStatus) {
+        return switch (commandStatus) {
+            case REJECTED -> AimStatus.COMMAND_REJECTED;
+            case MOVING -> AimStatus.COMMANDING_CORRECTION;
+            case AT_TARGET -> AimStatus.CORRECTION_AT_TARGET;
+        };
+    }
+
+    public enum AimStatus {
+        UNREFERENCED,
+        ALLIANCE_UNKNOWN,
+        VISION_NOT_READY,
+        NO_VALID_TARGET,
+        WRONG_ALLIANCE_OR_NON_HUB_TAG,
+        WAITING_FOR_NEW_FRAME,
+        CONFIRMING_ALIGNMENT,
+        ALIGNED,
+        POSITION_UNAVAILABLE,
+        COMMAND_REJECTED,
+        COMMANDING_CORRECTION,
+        CORRECTION_AT_TARGET
     }
 
     public boolean isOnTarget() {

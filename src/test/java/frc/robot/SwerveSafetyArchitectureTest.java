@@ -42,6 +42,24 @@ class SwerveSafetyArchitectureTest {
   }
 
   @Test
+  void modeStopsAndModuleFaultsInvalidatePreviousDriverNeutralEvidence() throws IOException {
+    String container = Files.readString(DRIVE_CONTAINER_SOURCE);
+    String robotContainer = Files.readString(Path.of(
+        "src", "main", "java", "frc", "robot", "RobotContainer.java"));
+
+    assertTrue(container.contains("public void blockDriverInputsUntilNeutral()"));
+    assertTrue(container.contains("case MODULES_UNHEALTHY -> {"));
+    assertTrue(container.contains("blockDriverInputsUntilNeutral();"));
+    int seedRequest = container.indexOf("drivetrain.seedFieldCentric();");
+    int seedNeutralRearm = container.indexOf("blockDriverInputsUntilNeutral();", seedRequest);
+    assertTrue(seedRequest >= 0, "field-heading seed request must remain explicit");
+    assertTrue(
+        seedNeutralRearm > seedRequest && seedNeutralRearm - seedRequest < 500,
+        "a successful field-heading seed must invalidate held-stick neutral evidence");
+    assertTrue(robotContainer.contains("m_DriveBaseContainer.blockDriverInputsUntilNeutral();"));
+  }
+
+  @Test
   void criticalSignalHealthUsesNonblockingSilentRefreshes() throws IOException {
     String drivetrain = Files.readString(DRIVETRAIN_SOURCE);
 
