@@ -51,7 +51,7 @@ class ConfiguredMotorCapabilitiesTest {
         .map(ManualUnhomedActuatorDiagnosticCommand.Target::canId)
         .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
-    assertEquals(Set.of(30, 34, 35, 38, 39), commandTargetIds);
+    assertEquals(Set.of(30, 32, 34, 35, 38, 39), commandTargetIds);
     assertEquals(commandTargetIds, ConfiguredMotorCapabilities.manualDiagnosticCanIds());
   }
 
@@ -95,8 +95,13 @@ class ConfiguredMotorCapabilitiesTest {
         () -> assertTrue(intakeRoller.autonomous().blockers().contains(Blocker.NO_ROUTE)),
         () -> assertTrue(shooterLeader.teleop().reachable()),
         () -> assertTrue(feeder.teleop().blockers().contains(Blocker.KNOWN_STALL)),
-        () -> assertFalse(feeder.diagnosticReachable(),
-            "controlled feeder retest must stay blocked until its commissioning flag changes"));
+        () -> assertTrue(feeder.diagnosticReachable(),
+            "manual repair retest is reachable while automatic HST remains compile-time blocked"),
+        () -> assertTrue(feeder.diagnostics().contains(DiagnosticRoute.MANUAL_ARMED_PULSE_ONLY)),
+        () -> assertFalse(feeder.diagnostics().contains(
+            DiagnosticRoute.HST_CONTROLLED_RETEST_STAGE)),
+        () -> assertTrue(ConfiguredMotorCapabilities.idsWithDiagnostic(
+            DiagnosticRoute.HST_CONTROLLED_RETEST_STAGE).isEmpty()));
   }
 
   @Test
@@ -106,6 +111,8 @@ class ConfiguredMotorCapabilitiesTest {
     assertAll(
         () -> assertEquals(expected, HardwareSelfTestCommand.getCoverageManifest()),
         () -> assertTrue(expected.contains("Spark34/35 climber=MANUAL_ARMED_PULSE_ONLY")),
+        () -> assertTrue(expected.contains(
+            "Spark32 feeder=HST_SKIP_KNOWN_STALL+MANUAL_ARMED_REPAIR_RETEST_ONLY")),
         () -> assertTrue(expected.contains("Spark36/37 flywheel=PAIR_STAGE")),
         () -> assertTrue(expected.contains(
             ConfiguredCanHardware.ctreCoverageLabel()

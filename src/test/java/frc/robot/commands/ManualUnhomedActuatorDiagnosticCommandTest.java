@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Direction;
 import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Target;
 import frc.robot.constants.Constants.ClimberConstants;
+import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 import frc.robot.utils.SparkMAXContainer.TimedDiagnosticSnapshot;
@@ -64,5 +65,33 @@ class ManualUnhomedActuatorDiagnosticCommandTest {
     assertEquals(
         ClimberConstants.DIAGNOSTIC_CURRENT_LIMIT_AMPS,
         Target.CLIMBER_RIGHT.maximumCurrentAmps());
+  }
+
+  @Test
+  void feederRepairRetestUsesOnlyId32AndTheKnownTenAmpLimit() {
+    assertArrayEquals(
+        new int[] {ManipulatorConstants.FEEDER_CAN_ID}, Target.FEEDER.stopCanIds());
+    assertEquals(
+        ManipulatorConstants.FEEDER_CURRENT_LIMIT_AMPS,
+        Target.FEEDER.maximumCurrentAmps());
+  }
+
+  @Test
+  void feederSelectionRequiresTheDedicatedRepairAttestation() {
+    assertEquals(
+        Target.FEEDER,
+        ManualUnhomedActuatorDiagnosticCommand.selectExactlyOneTarget(
+            false, true, false, false, false, false).orElseThrow());
+    assertFalse(ManualUnhomedActuatorDiagnosticCommand
+        .targetSpecificVerificationSatisfied(Target.FEEDER, false));
+    assertTrue(ManualUnhomedActuatorDiagnosticCommand
+        .targetSpecificVerificationSatisfied(Target.FEEDER, true));
+    assertTrue(ManualUnhomedActuatorDiagnosticCommand
+        .targetSpecificVerificationSatisfied(Target.TURRET, false));
+
+    assertTrue(
+        ManualUnhomedActuatorDiagnosticCommand.selectExactlyOneTarget(
+            false, true, false, false, false, true).isEmpty(),
+        "ID32 plus another target must fail the exact-one selector");
   }
 }

@@ -123,10 +123,12 @@ public final class ConfiguredMotorCapabilities {
           "feeder",
           blocked("Fire", Blocker.KNOWN_STALL),
           blocked("Advanced Fire", Blocker.AUTONOMOUS_CALIBRATION, Blocker.KNOWN_STALL),
-          List.of(DiagnosticRoute.HST_CONTROLLED_RETEST_STAGE),
           ManipulatorConstants.FEEDER_CONTROLLED_RETEST_ENABLED
-              ? Set.of()
-              : Set.of(Blocker.KNOWN_STALL)),
+              ? List.of(
+                  DiagnosticRoute.HST_CONTROLLED_RETEST_STAGE,
+                  DiagnosticRoute.MANUAL_ARMED_PULSE_ONLY)
+              : List.of(DiagnosticRoute.MANUAL_ARMED_PULSE_ONLY),
+          Set.of()),
       capability(
           ConfiguredCanHardware.CONVEYOR_ID,
           "conveyor",
@@ -217,10 +219,9 @@ public final class ConfiguredMotorCapabilities {
 
   /** Existing operator-facing HST format, generated from the capability entries. */
   public static String hardwareSelfTestCoverageSummary() {
-    String feederStatus = byCanId(ConfiguredCanHardware.FEEDER_ID).orElseThrow()
-            .diagnosticReachable()
+    String feederStatus = ManipulatorConstants.FEEDER_CONTROLLED_RETEST_ENABLED
         ? "CONTROLLED_RETEST_STAGE"
-        : "SKIP_KNOWN_STALL_SUSPECTED";
+        : "HST_SKIP_KNOWN_STALL+MANUAL_ARMED_REPAIR_RETEST_ONLY";
     return String.join(
         "; ",
         sparkCoverage(ConfiguredCanHardware.INTAKE_ACTUATOR_ID, "MANUAL_ARMED_PULSE_ONLY"),

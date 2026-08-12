@@ -136,6 +136,11 @@ class SparkSimulationHandleTest {
           () -> assertEquals(continuityEpoch, container.getPositionContinuityEpoch(),
               "raw simulation position must never establish or mutate a reference token"));
 
+      assertFalse(
+          container.setDutyCycleIfAuthorized(0.03, () -> false),
+          "a revoked one-shot authorization must be checked inside the output boundary");
+      assertEquals(0.0, handle.observe().setpoint(), 1e-9);
+
       handle.setCanFault(true, false);
       assertTrue(await(2.0, () -> {
         SparkMAXContainer.serviceAll();

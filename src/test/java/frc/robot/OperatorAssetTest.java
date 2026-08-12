@@ -129,7 +129,13 @@ class OperatorAssetTest {
           "/SmartDashboard/Unhomed Actuator Diagnostic/Brushless Motor Type Verified",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/ID32 Jam and Power Branch Inspected",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
           "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID30 Intake",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID32 Feeder Retest",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
           "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID34 Climber Left",
@@ -154,6 +160,9 @@ class OperatorAssetTest {
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
           "/SmartDashboard/Unhomed Actuator Diagnostic/Stop Evidence",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Feeder/Manual Retest Guard",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
           "/SmartDashboard/Climber/Controllers Ready",

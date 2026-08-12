@@ -8,6 +8,7 @@ import com.pathplanner.lib.auto.AutoBuilder;
 import com.pathplanner.lib.auto.NamedCommands;
 import edu.wpi.first.hal.HAL;
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.simulation.DriverStationSim;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
@@ -20,6 +21,8 @@ import frc.robot.constants.ConfiguredCanHardware;
 import frc.robot.constants.ConfiguredOperatorControls;
 import frc.robot.constants.ConfiguredOperatorActions.Action;
 import frc.robot.constants.Constants.OIConstants;
+import frc.robot.constants.Constants.HardwareTestConstants;
+import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.utils.SparkMAXContainer.OutputStopBatch;
 import frc.robot.utils.SparkSimulationHandle.SimulationSnapshot;
 import java.util.function.BooleanSupplier;
@@ -235,9 +238,177 @@ class RobotContainerSimulationIntegrationTest {
       setMaintenanceButton(ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM, false);
       pump(activeContainer, 3);
 
+      // A repaired ID32 may receive one isolated 3% pulse, but the known-stall block remains.
+      prepareFeederDiagnosticSelection();
+      enableDisabledTest();
+      double feederDiagnosticExpiresAt =
+          Timer.getFPGATimestamp() + HardwareTestConstants.ARM_LIFETIME_SECONDS;
+      SmartDashboard.putBoolean(
+          ManualUnhomedActuatorDiagnosticCommand.FEEDER_REPAIR_VERIFIED_KEY, false);
+      assertFalse(activeContainer.prepareUnhomedDiagnosticSession(
+          Target.FEEDER,
+          Direction.POSITIVE,
+          feederDiagnosticExpiresAt),
+          "ID32 repair attestation must be checked by the production session boundary");
+      // Restore the complete exact-one selection after the negative boundary assertion. Other
+      // dashboard-focused suites deliberately reset these shared NT keys in their cleanup.
+      prepareFeederDiagnosticSelection();
+      assertTrue(activeContainer.prepareUnhomedDiagnosticSession(
+          Target.FEEDER,
+          Direction.POSITIVE,
+          feederDiagnosticExpiresAt),
+          () -> "feeder prepare rejected: guard="
+              + SmartDashboard.getString("Feeder/Manual Retest Guard", "MISSING")
+              + " target=" + ManualUnhomedActuatorDiagnosticCommand.readExactlyOneTarget()
+              + " targetBits=" + java.util.List.of(
+                  SmartDashboard.getBoolean(
+                      ManualUnhomedActuatorDiagnosticCommand.TARGET_INTAKE_KEY, false),
+                  SmartDashboard.getBoolean(
+                      ManualUnhomedActuatorDiagnosticCommand.TARGET_FEEDER_KEY, false),
+                  SmartDashboard.getBoolean(
+                      ManualUnhomedActuatorDiagnosticCommand.TARGET_CLIMBER_LEFT_KEY, false),
+                  SmartDashboard.getBoolean(
+                      ManualUnhomedActuatorDiagnosticCommand.TARGET_CLIMBER_RIGHT_KEY, false),
+                  SmartDashboard.getBoolean(
+                      ManualUnhomedActuatorDiagnosticCommand.TARGET_SHOOTER_KEY, false),
+                  SmartDashboard.getBoolean(
+                      ManualUnhomedActuatorDiagnosticCommand.TARGET_TURRET_KEY, false))
+              + " direction=" + ManualUnhomedActuatorDiagnosticCommand.readExactlyOneDirection()
+              + " repair=" + SmartDashboard.getBoolean(
+                  ManualUnhomedActuatorDiagnosticCommand.FEEDER_REPAIR_VERIFIED_KEY, false)
+              + " dsDisabled=" + DriverStation.isDisabled()
+              + " dsTest=" + DriverStation.isTest()
+              + " fms=" + DriverStation.isFMSAttached());
+      activeContainer.stopAllPreservingPreparedUnhomedDiagnosticSession();
+      activeContainer.armUnhomedDiagnosticSession(
+          Target.FEEDER, Direction.POSITIVE, feederDiagnosticExpiresAt);
+      enableTest();
+      pump(activeContainer, 3);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, true);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, true);
+      assertTrue(await(3.0, activeContainer, () -> Math.abs(
+          simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().appliedOutput() - 0.03)
+          < 1e-9),
+          () -> "manual feeder retest duty did not reach ID32: "
+              + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
+      SimulationSnapshot feederPulse =
+          simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe();
+      assertEquals(0.0, feederPulse.velocity(), "raw echo must not invent feeder motion");
+      assertEquals(0.0, feederPulse.motorCurrentAmps(), "raw echo must not invent feeder current");
+      Thread.sleep(100L);
+      assertEquals(
+          0.03,
+          simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint(),
+          1e-9,
+          "the watchdog stopped the pulse before its bounded 0.35-second window");
+      assertTrue(awaitWithoutRobotLoop(3.0, () -> SmartDashboard.getString(
+          "Feeder/Manual Retest Guard", "")
+              .contains("WATCHDOG_DEADLINE_STOP_REQUESTED")
+          && simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint() == 0.0),
+          () -> SmartDashboard.getString("Feeder/Manual Retest Guard", "MISSING_GUARD"));
+      assertTrue(await(3.0, activeContainer, () -> rawControllerStopped(
+          ConfiguredCanHardware.FEEDER_ID)),
+          () -> "independent feeder watchdog did not stop ID32: "
+              + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
+      assertTrue(await(5.0, activeContainer, () -> SmartDashboard.getString(
+          ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY, "")
+              .contains("INTERLOCK_RELEASED_STOP_CONFIRMED")),
+          () -> SmartDashboard.getString(
+              ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY, "MISSING_STATUS"));
+      assertTrue(await(3.0, activeContainer, () -> rawControllerStopped(
+          ConfiguredCanHardware.FEEDER_ID)),
+          () -> "manual feeder retest did not stop ID32: "
+              + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, false);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, false);
+
+      // The consumed arm cannot be reused by releasing and pressing the same gesture again.
+      pump(activeContainer, 3);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, true);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, true);
+      for (int reuseCycle = 0; reuseCycle < 8; reuseCycle++) {
+        pump(activeContainer, 1);
+        assertTrue(
+            rawControllerStopped(ConfiguredCanHardware.FEEDER_ID),
+            "consumed feeder arm restarted during cycle " + reuseCycle + ": "
+                + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
+      }
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, false);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, false);
+      enableDisabled();
+      assertTrue(await(8.0, activeContainer, () -> ConfiguredCanHardware.sparkDeviceIds().stream()
+          .allMatch(id -> SparkMAXContainer.getDiagnosticSnapshotForId(id)
+              .map(snapshot -> snapshot.ready())
+              .orElse(false))),
+          SparkMAXContainer::getDeviceAvailabilitySummary);
+
+      // A fresh arm also proves the independent 8A known-stall cutoff without scheduler ticks.
+      prepareFeederDiagnosticSelection();
+      enableDisabledTest();
+      double currentCutoffExpiresAt =
+          Timer.getFPGATimestamp() + HardwareTestConstants.ARM_LIFETIME_SECONDS;
+      assertTrue(activeContainer.prepareUnhomedDiagnosticSession(
+          Target.FEEDER, Direction.POSITIVE, currentCutoffExpiresAt));
+      activeContainer.stopAllPreservingPreparedUnhomedDiagnosticSession();
+      activeContainer.armUnhomedDiagnosticSession(
+          Target.FEEDER, Direction.POSITIVE, currentCutoffExpiresAt);
+      enableTest();
+      pump(activeContainer, 3);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, true);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, true);
+      assertTrue(await(3.0, activeContainer, () -> Math.abs(
+          simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().appliedOutput() - 0.03)
+          < 1e-9));
+      SimulationSnapshot beforeCurrentInjection =
+          simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe();
+      simulationHandle(ConfiguredCanHardware.FEEDER_ID).injectRawTelemetry(
+          new SparkSimulationHandle.RawTelemetry(
+              0.03,
+              ManipulatorConstants.FEEDER_CURRENT_LIMIT_AMPS * 0.8,
+              500.0,
+              beforeCurrentInjection.position(),
+              12.0));
+      assertTrue(awaitWithoutRobotLoop(3.0, () -> SmartDashboard.getString(
+          "Feeder/Manual Retest Guard", "")
+              .contains("CURRENT_CUTOFF_STOP_REQUESTED")
+          && simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint() == 0.0),
+          () -> SmartDashboard.getString("Feeder/Manual Retest Guard", "MISSING_GUARD"));
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, false);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, false);
+      assertTrue(await(5.0, activeContainer, () -> rawControllerStopped(
+          ConfiguredCanHardware.FEEDER_ID)),
+          () -> "current cutoff did not finish zeroing ID32: "
+              + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
+      assertTrue(await(5.0, activeContainer, () -> SmartDashboard.getString(
+          ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY, "")
+              .contains("STOP_CONFIRMED")),
+          () -> SmartDashboard.getString(
+              ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY, "MISSING_STATUS"));
+
+      // A successful isolated retest never unlocks the normal Fire path.
+      enableTeleop(false);
+      pump(activeContainer, 3);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_FIRE, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.FIRE, "FEEDER_KNOWN_STALL");
+      assertTrue(
+          rawControllerStopped(ConfiguredCanHardware.FEEDER_ID),
+          () -> "normal Fire moved ID32 after retest: "
+              + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
+      setDriverButton(ConfiguredOperatorControls.DRIVER_FIRE, false);
+      pump(activeContainer, 3);
+
       prepareTurretDiagnosticSelection();
       enableDisabledTest();
-      activeContainer.armUnhomedDiagnosticSession(Target.TURRET, Direction.POSITIVE);
+      double turretDiagnosticExpiresAt =
+          Timer.getFPGATimestamp() + HardwareTestConstants.ARM_LIFETIME_SECONDS;
+      assertTrue(activeContainer.prepareUnhomedDiagnosticSession(
+          Target.TURRET,
+          Direction.POSITIVE,
+          turretDiagnosticExpiresAt));
+      activeContainer.stopAllPreservingPreparedUnhomedDiagnosticSession();
+      activeContainer.armUnhomedDiagnosticSession(
+          Target.TURRET, Direction.POSITIVE, turretDiagnosticExpiresAt);
       double referenceEpochBefore = SmartDashboard.getNumber("Turret/Continuity Epoch", -1.0);
       enableTest();
       pump(activeContainer, 3);
@@ -337,6 +508,13 @@ class RobotContainerSimulationIntegrationTest {
     }
   }
 
+  private static boolean rawControllerStopped(int canId) {
+    SimulationSnapshot snapshot = simulationHandle(canId).observe();
+    return snapshot.setpoint() == 0.0
+        && snapshot.appliedOutput() == 0.0
+        && snapshot.velocity() == 0.0;
+  }
+
   private static boolean pairRawStopped() {
     SimulationSnapshot leader = simulationHandle(SHOOTER_LEADER_ID).observe();
     SimulationSnapshot follower = simulationHandle(SHOOTER_FOLLOWER_ID).observe();
@@ -379,6 +557,18 @@ class RobotContainerSimulationIntegrationTest {
       Thread.sleep(10L);
     } while (System.nanoTime() < deadline);
     return SparkMAXContainer.cleanupSimulationDevicesForTesting();
+  }
+
+  private static boolean awaitWithoutRobotLoop(
+      double timeoutSeconds, BooleanSupplier condition) throws InterruptedException {
+    long deadline = System.nanoTime() + (long) (timeoutSeconds * 1_000_000_000L);
+    do {
+      if (condition.getAsBoolean()) {
+        return true;
+      }
+      Thread.sleep(5L);
+    } while (System.nanoTime() < deadline);
+    return condition.getAsBoolean();
   }
 
   private static void pump(RobotContainer container, int iterations) throws InterruptedException {
@@ -455,6 +645,8 @@ class RobotContainerSimulationIntegrationTest {
     SmartDashboard.putBoolean(
         ManualUnhomedActuatorDiagnosticCommand.TARGET_INTAKE_KEY, false);
     SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.TARGET_FEEDER_KEY, false);
+    SmartDashboard.putBoolean(
         ManualUnhomedActuatorDiagnosticCommand.TARGET_CLIMBER_LEFT_KEY, false);
     SmartDashboard.putBoolean(
         ManualUnhomedActuatorDiagnosticCommand.TARGET_CLIMBER_RIGHT_KEY, false);
@@ -462,6 +654,32 @@ class RobotContainerSimulationIntegrationTest {
         ManualUnhomedActuatorDiagnosticCommand.TARGET_SHOOTER_KEY, false);
     SmartDashboard.putBoolean(
         ManualUnhomedActuatorDiagnosticCommand.TARGET_TURRET_KEY, true);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.DIRECTION_NEGATIVE_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.DIRECTION_POSITIVE_KEY, true);
+  }
+
+  private static void prepareFeederDiagnosticSelection() {
+    SmartDashboard.putBoolean(HardwareSelfTestCommand.RUNNING_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, true);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, true);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.FEEDER_REPAIR_VERIFIED_KEY, true);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.TARGET_INTAKE_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.TARGET_FEEDER_KEY, true);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.TARGET_CLIMBER_LEFT_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.TARGET_CLIMBER_RIGHT_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.TARGET_SHOOTER_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.TARGET_TURRET_KEY, false);
     SmartDashboard.putBoolean(
         ManualUnhomedActuatorDiagnosticCommand.DIRECTION_NEGATIVE_KEY, false);
     SmartDashboard.putBoolean(

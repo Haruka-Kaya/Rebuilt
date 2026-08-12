@@ -59,6 +59,13 @@ public final class OneShotTimedArmGate {
     armedAtSeconds = Double.NaN;
   }
 
+  /** Returns the original absolute deadline without extending it during a mode transition. */
+  public synchronized double expiresAtSeconds() {
+    return Double.isFinite(armedAtSeconds)
+        ? armedAtSeconds + lifetimeSeconds
+        : Double.NEGATIVE_INFINITY;
+  }
+
   private boolean isFresh(double nowSeconds) {
     if (!Double.isFinite(nowSeconds) || !Double.isFinite(armedAtSeconds)) {
       return false;

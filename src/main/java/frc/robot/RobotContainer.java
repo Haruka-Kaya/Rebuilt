@@ -17,6 +17,7 @@ import frc.robot.commands.JumpBumpCommand;
 import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand;
 import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Direction;
 import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Target;
+import frc.robot.utils.OneShotMotorRetestLease.Token;
 import frc.robot.commands.RevUpCommand;
 import frc.robot.commands.OutputCommand;
 import frc.robot.commands.RetractIntakeCommand;
@@ -73,6 +74,10 @@ public class RobotContainer implements AutoCloseable {
   private Target m_unhomedDiagnosticTarget;
   private Direction m_unhomedDiagnosticDirection;
   private double m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
+  private Token m_feederManualRetestToken;
+  private Target m_preparedUnhomedDiagnosticTarget;
+  private Direction m_preparedUnhomedDiagnosticDirection;
+  private double m_preparedUnhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
 
   // The driver's controller
   private final CommandPS5Controller m_driverController = new CommandPS5Controller(OIConstants.kDriverControllerPort);
@@ -505,6 +510,8 @@ public class RobotContainer implements AutoCloseable {
             () -> unhomedDiagnosticInterlocksHeld(
                 target, direction, selectedDirectionButton, oppositeDirectionButton),
             m_intake,
+            m_feeder,
+            () -> m_feederManualRetestToken,
             m_shooter,
             m_turret,
             m_climber,
@@ -576,16 +583,11 @@ public class RobotContainer implements AutoCloseable {
     }
     boolean selectionAndVerificationMatch = target == m_unhomedDiagnosticTarget
         && direction == m_unhomedDiagnosticDirection
-        && SmartDashboard.getBoolean(
-            ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false)
-        && SmartDashboard.getBoolean(
-            ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false)
-        && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneTarget()
-            .filter(selected -> selected == target)
-            .isPresent()
-        && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneDirection()
-            .filter(selected -> selected == direction)
-            .isPresent();
+        && unhomedDiagnosticSelectionVerified(target, direction)
+        && (target != Target.FEEDER
+            || (m_feederManualRetestToken != null
+                && m_feeder.isManualControlledRetestSessionValid(
+                    m_feederManualRetestToken, direction.duty())));
     if (!selectionAndVerificationMatch && m_unhomedDiagnosticTarget != null) {
       disarmUnhomedDiagnosticSession();
       SmartDashboard.putString(
@@ -606,11 +608,63 @@ public class RobotContainer implements AutoCloseable {
   }
 
   /** Starts the already consumed, disabled-mode target snapshot for this Test session. */
-  public void armUnhomedDiagnosticSession(Target target, Direction direction) {
+  public boolean prepareUnhomedDiagnosticSession(
+      Target target, Direction direction, double absoluteExpiresAtSeconds) {
+    discardPreparedUnhomedDiagnosticSession();
+    double now = Timer.getFPGATimestamp();
+    boolean valid = target != null
+        && direction != null
+        && DriverStation.isDisabled()
+        && DriverStation.isTest()
+        && !DriverStation.isFMSAttached()
+        && unhomedDiagnosticSelectionVerified(target, direction)
+        && Double.isFinite(absoluteExpiresAtSeconds)
+        && absoluteExpiresAtSeconds > now
+        && absoluteExpiresAtSeconds <= now + HardwareTestConstants.ARM_LIFETIME_SECONDS;
+    if (!valid) {
+      return false;
+    }
+    Token feederToken = null;
+    if (target == Target.FEEDER) {
+      feederToken = m_feeder.armManualControlledRetest(
+          direction.duty(), absoluteExpiresAtSeconds).orElse(null);
+      if (feederToken == null) {
+        return false;
+      }
+    }
+    m_preparedUnhomedDiagnosticTarget = target;
+    m_preparedUnhomedDiagnosticDirection = direction;
+    m_preparedUnhomedDiagnosticExpiresAt = absoluteExpiresAtSeconds;
+    m_feederManualRetestToken = feederToken;
+    return true;
+  }
+
+  public void armUnhomedDiagnosticSession(
+      Target target, Direction direction, double absoluteExpiresAtSeconds) {
+    double now = Timer.getFPGATimestamp();
+    if (target == null
+        || direction == null
+        || target != m_preparedUnhomedDiagnosticTarget
+        || direction != m_preparedUnhomedDiagnosticDirection
+        || !unhomedDiagnosticSelectionVerified(target, direction)
+        || Double.compare(
+            absoluteExpiresAtSeconds, m_preparedUnhomedDiagnosticExpiresAt) != 0
+        || !Double.isFinite(absoluteExpiresAtSeconds)
+        || absoluteExpiresAtSeconds <= now
+        || absoluteExpiresAtSeconds > now + HardwareTestConstants.ARM_LIFETIME_SECONDS
+        || (target == Target.FEEDER && m_feederManualRetestToken == null)) {
+      discardPreparedUnhomedDiagnosticSession();
+      SmartDashboard.putString(
+          ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+          "ARM_EXPIRED_OR_INVALID_REARM_DISABLED");
+      return;
+    }
     m_unhomedDiagnosticTarget = target;
     m_unhomedDiagnosticDirection = direction;
-    m_unhomedDiagnosticExpiresAt = Timer.getFPGATimestamp()
-        + HardwareTestConstants.ARM_LIFETIME_SECONDS;
+    m_unhomedDiagnosticExpiresAt = absoluteExpiresAtSeconds;
+    m_preparedUnhomedDiagnosticTarget = null;
+    m_preparedUnhomedDiagnosticDirection = null;
+    m_preparedUnhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
     SmartDashboard.putString(
         ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
         "ARMED_" + target.label() + "_" + direction.name() + "_RELEASE_CONTROLS");
@@ -623,7 +677,39 @@ public class RobotContainer implements AutoCloseable {
     m_unhomedDiagnosticTarget = null;
     m_unhomedDiagnosticDirection = null;
     m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
+    m_feederManualRetestToken = null;
+    m_feeder.disarmManualControlledRetest();
+    m_preparedUnhomedDiagnosticTarget = null;
+    m_preparedUnhomedDiagnosticDirection = null;
+    m_preparedUnhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
     m_unhomedDiagnosticInputGate.blockUntilNeutral();
+  }
+
+  private static boolean unhomedDiagnosticSelectionVerified(
+      Target target, Direction direction) {
+    return target != null
+        && direction != null
+        && SmartDashboard.getBoolean(
+            ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false)
+        && SmartDashboard.getBoolean(
+            ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false)
+        && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneTarget()
+            .filter(selected -> selected == target)
+            .isPresent()
+        && ManualUnhomedActuatorDiagnosticCommand.readExactlyOneDirection()
+            .filter(selected -> selected == direction)
+            .isPresent()
+        && ManualUnhomedActuatorDiagnosticCommand.targetSpecificVerificationSatisfied(target);
+  }
+
+  public void discardPreparedUnhomedDiagnosticSession() {
+    if (m_unhomedDiagnosticTarget == null && m_feederManualRetestToken != null) {
+      m_feederManualRetestToken = null;
+      m_feeder.disarmManualControlledRetest();
+    }
+    m_preparedUnhomedDiagnosticTarget = null;
+    m_preparedUnhomedDiagnosticDirection = null;
+    m_preparedUnhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
   }
 
   /**
@@ -672,12 +758,27 @@ public class RobotContainer implements AutoCloseable {
   }
 
   public void stopAll() {
-    disarmUnhomedDiagnosticSession();
+    stopAllInternal(false);
+  }
+
+  public void stopAllPreservingPreparedUnhomedDiagnosticSession() {
+    stopAllInternal(true);
+  }
+
+  private void stopAllInternal(boolean preservePreparedUnhomedSession) {
+    if (!preservePreparedUnhomedSession) {
+      disarmUnhomedDiagnosticSession();
+    } else {
+      m_unhomedDiagnosticTarget = null;
+      m_unhomedDiagnosticDirection = null;
+      m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
+      m_unhomedDiagnosticInputGate.blockUntilNeutral();
+    }
     m_DriveBaseContainer.blockDriverInputsUntilNeutral();
     stopSafely("swerve", drivetrain::requestIdle);
     stopSafely("intake", m_intake::stopAll);
     stopSafely("conveyor", m_conveyor::stop);
-    stopSafely("feeder", m_feeder::stop);
+    stopSafely("feeder", m_feeder::stopDiagnosticOutput);
     stopSafely("shooter", m_shooter::stop);
     stopSafely("turret", m_turret::stop);
     stopSafely("climber", m_climber::stop);
@@ -693,7 +794,11 @@ public class RobotContainer implements AutoCloseable {
     try {
       stopAll();
     } finally {
-      m_DriveBaseContainer.close();
+      try {
+        m_feeder.close();
+      } finally {
+        m_DriveBaseContainer.close();
+      }
     }
   }
 

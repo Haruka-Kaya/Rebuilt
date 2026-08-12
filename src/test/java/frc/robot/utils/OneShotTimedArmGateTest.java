@@ -1,6 +1,7 @@
 package frc.robot.utils;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -12,7 +13,11 @@ class OneShotTimedArmGateTest {
 
     assertFalse(gate.observe(false, true, 1.0));
     assertTrue(gate.observe(true, true, 2.0));
+    assertEquals(17.0, gate.expiresAtSeconds());
+    assertTrue(gate.observe(true, true, 2.5));
+    assertEquals(17.0, gate.expiresAtSeconds(), "a held arm cannot extend its deadline");
     assertTrue(gate.consume(3.0));
+    assertEquals(Double.NEGATIVE_INFINITY, gate.expiresAtSeconds());
     assertFalse(gate.consume(3.1));
     assertFalse(gate.observe(true, true, 3.2));
   }

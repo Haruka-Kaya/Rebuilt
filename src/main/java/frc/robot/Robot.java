@@ -50,6 +50,7 @@ public class Robot extends TimedRobot {
       HardwareTestConstants.ARM_LIFETIME_SECONDS);
   private Target m_unhomedDiagnosticTargetSnapshot;
   private Direction m_unhomedDiagnosticDirectionSnapshot;
+  private double m_unhomedDiagnosticSnapshotExpiresAt = Double.NEGATIVE_INFINITY;
   private Target m_lastUnhomedDiagnosticTargetSelection;
   private Direction m_lastUnhomedDiagnosticDirectionSelection;
 
@@ -343,6 +344,7 @@ public class Robot extends TimedRobot {
           && m_selfTestArmGate.consume(now);
       Target diagnosticTarget = m_unhomedDiagnosticTargetSnapshot;
       Direction diagnosticDirection = m_unhomedDiagnosticDirectionSnapshot;
+      double diagnosticExpiresAt = m_unhomedDiagnosticSnapshotExpiresAt;
       boolean unhomedDiagnosticAccepted = !conflictingArms
           && !DriverStation.isFMSAttached()
           && unhomedDiagnosticRequested
@@ -358,10 +360,16 @@ public class Robot extends TimedRobot {
               ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false)
           && SmartDashboard.getBoolean(
               ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false)
+          && ManualUnhomedActuatorDiagnosticCommand.targetSpecificVerificationSatisfied(
+              diagnosticTarget)
           && m_unhomedDiagnosticArmGate.consume(now);
       clearSelfTestArm();
-      clearUnhomedDiagnosticArm();
-      m_robotContainer.stopAll();
+      clearUnhomedDiagnosticArm(!unhomedDiagnosticAccepted);
+      if (unhomedDiagnosticAccepted) {
+        m_robotContainer.stopAllPreservingPreparedUnhomedDiagnosticSession();
+      } else {
+        m_robotContainer.stopAll();
+      }
       if (conflictingArms) {
         SmartDashboard.putString(
             ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
@@ -375,7 +383,8 @@ public class Robot extends TimedRobot {
         m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand();
         CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
       } else if (unhomedDiagnosticAccepted) {
-        m_robotContainer.armUnhomedDiagnosticSession(diagnosticTarget, diagnosticDirection);
+        m_robotContainer.armUnhomedDiagnosticSession(
+            diagnosticTarget, diagnosticDirection, diagnosticExpiresAt);
       }
     });
   }
@@ -405,6 +414,10 @@ public class Robot extends TimedRobot {
   }
 
   private void clearUnhomedDiagnosticArm() {
+    clearUnhomedDiagnosticArm(true);
+  }
+
+  private void clearUnhomedDiagnosticArm(boolean discardPreparedSession) {
     SmartDashboard.putBoolean(ManualUnhomedActuatorDiagnosticCommand.ARM_KEY, false);
     SmartDashboard.putBoolean(ManualUnhomedActuatorDiagnosticCommand.ARM_VALID_KEY, false);
     SmartDashboard.putString(
@@ -412,6 +425,10 @@ public class Robot extends TimedRobot {
     m_unhomedDiagnosticArmGate.requireRelease();
     m_unhomedDiagnosticTargetSnapshot = null;
     m_unhomedDiagnosticDirectionSnapshot = null;
+    m_unhomedDiagnosticSnapshotExpiresAt = Double.NEGATIVE_INFINITY;
+    if (discardPreparedSession) {
+      m_robotContainer.discardPreparedUnhomedDiagnosticSession();
+    }
   }
 
   private void clearUnhomedDiagnosticVerifications() {
@@ -419,6 +436,8 @@ public class Robot extends TimedRobot {
         ManualUnhomedActuatorDiagnosticCommand.PHYSICAL_CLEARANCE_KEY, false);
     SmartDashboard.putBoolean(
         ManualUnhomedActuatorDiagnosticCommand.MOTOR_TYPE_VERIFIED_KEY, false);
+    SmartDashboard.putBoolean(
+        ManualUnhomedActuatorDiagnosticCommand.FEEDER_REPAIR_VERIFIED_KEY, false);
   }
 
   private void updateDiagnosticArmGates() {
@@ -469,6 +488,8 @@ public class Robot extends TimedRobot {
       if (!unhomedRequested) {
         m_unhomedDiagnosticTargetSnapshot = null;
         m_unhomedDiagnosticDirectionSnapshot = null;
+        m_unhomedDiagnosticSnapshotExpiresAt = Double.NEGATIVE_INFINITY;
+        m_robotContainer.discardPreparedUnhomedDiagnosticSession();
       }
       boolean selectionChangedWhileArmed = unhomedRequested
           && (m_unhomedDiagnosticTargetSnapshot != null
@@ -479,6 +500,7 @@ public class Robot extends TimedRobot {
               || selectedDirection.get() != m_unhomedDiagnosticDirectionSnapshot);
       if (selectionChangedWhileArmed) {
         m_unhomedDiagnosticArmGate.invalidate(true);
+        m_robotContainer.discardPreparedUnhomedDiagnosticSession();
       } else {
         unhomedArmValid = m_unhomedDiagnosticArmGate.observe(
             unhomedRequested,
@@ -486,11 +508,29 @@ public class Robot extends TimedRobot {
                 && !selfTestRequested
                 && unhomedVerifications
                 && selectedTarget.isPresent()
-                && selectedDirection.isPresent(),
+                && selectedDirection.isPresent()
+                && ManualUnhomedActuatorDiagnosticCommand
+                    .targetSpecificVerificationSatisfied(selectedTarget.orElse(null)),
             now);
         if (unhomedArmValid && m_unhomedDiagnosticTargetSnapshot == null) {
           m_unhomedDiagnosticTargetSnapshot = selectedTarget.orElseThrow();
           m_unhomedDiagnosticDirectionSnapshot = selectedDirection.orElseThrow();
+          m_unhomedDiagnosticSnapshotExpiresAt =
+              m_unhomedDiagnosticArmGate.expiresAtSeconds();
+          boolean prepared = m_robotContainer.prepareUnhomedDiagnosticSession(
+              m_unhomedDiagnosticTargetSnapshot,
+              m_unhomedDiagnosticDirectionSnapshot,
+              m_unhomedDiagnosticSnapshotExpiresAt);
+          if (!prepared) {
+            m_unhomedDiagnosticArmGate.invalidate(true);
+            m_unhomedDiagnosticTargetSnapshot = null;
+            m_unhomedDiagnosticDirectionSnapshot = null;
+            m_unhomedDiagnosticSnapshotExpiresAt = Double.NEGATIVE_INFINITY;
+            unhomedArmValid = false;
+            SmartDashboard.putString(
+                ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
+                "PREPARE_REJECTED_RELEASE_ARM");
+          }
         }
       }
 
@@ -509,10 +549,14 @@ public class Robot extends TimedRobot {
           SmartDashboard.putString(
               ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
               "SELECT_EXACTLY_ONE_TARGET_AND_DIRECTION");
-        } else if (unhomedRequested && !unhomedVerifications) {
+        } else if (unhomedRequested && (!unhomedVerifications
+            || !ManualUnhomedActuatorDiagnosticCommand
+                .targetSpecificVerificationSatisfied(selectedTarget.orElse(null)))) {
           SmartDashboard.putString(
               ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
-              "VERIFY_CLEARANCE_AND_MOTOR_TYPE");
+              selectedTarget.filter(target -> target == Target.FEEDER).isPresent()
+                  ? "VERIFY_CLEARANCE_MOTOR_TYPE_AND_ID32_REPAIR"
+                  : "VERIFY_CLEARANCE_AND_MOTOR_TYPE");
         }
       }
     }

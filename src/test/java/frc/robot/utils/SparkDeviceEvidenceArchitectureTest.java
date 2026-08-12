@@ -54,8 +54,16 @@ class SparkDeviceEvidenceArchitectureTest {
     int outputEpochAdvance = setpointMethod.indexOf("outputEpoch++", successfulBranch);
     int acceptedEvidence = setpointMethod.indexOf("lastRequestAccepted = true", successfulBranch);
     int failureBranch = setpointMethod.indexOf("} else {", successfulBranch);
+    int outputLock = setpointMethod.indexOf("synchronized (OUTPUT_ORDER_LOCK)");
+    int authorizationCheck = setpointMethod.indexOf(
+        "authorizationStillValid.getAsBoolean()", outputLock);
+    int vendorSetpoint = setpointMethod.indexOf(
+        "sendSetpointTracked(value, controlType)", authorizationCheck);
 
     assertTrue(successfulBranch >= 0);
+    assertTrue(outputLock >= 0);
+    assertTrue(authorizationCheck > outputLock);
+    assertTrue(vendorSetpoint > authorizationCheck);
     assertTrue(outputEpochAdvance > successfulBranch && outputEpochAdvance < failureBranch);
     assertTrue(acceptedEvidence > successfulBranch && acceptedEvidence < failureBranch);
     assertTrue(setpointMethod.contains("REV_API_RETURNED_K_OK_NOT_MOTION_PROOF"));

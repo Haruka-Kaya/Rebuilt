@@ -97,6 +97,18 @@ public final class HardwareDiagnosticEvaluator {
     return MotionResult.INCONCLUSIVE_NO_MOTION;
   }
 
+  /** True only when a finite sample reaches a finite positive fraction of a current limit. */
+  public static boolean isCurrentAtOrAboveFraction(
+      Snapshot snapshot, double maxCurrentAmps, double fraction) {
+    return snapshot != null
+        && Double.isFinite(snapshot.currentAmps())
+        && Double.isFinite(maxCurrentAmps)
+        && maxCurrentAmps > 0.0
+        && Double.isFinite(fraction)
+        && fraction > 0.0
+        && Math.abs(snapshot.currentAmps()) >= maxCurrentAmps * fraction;
+  }
+
   private static boolean allFinite(double... values) {
     for (double value : values) {
       if (!Double.isFinite(value)) {

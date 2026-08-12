@@ -137,6 +137,23 @@ class HardwareDiagnosticEvaluatorTest {
         sample(true, 0.0, stallCurrent, 0.0, 5.0, false));
   }
 
+  @Test
+  void currentCutoffDoesNotDependOnVelocityAndRejectsInvalidThresholds() {
+    Snapshot fastHighCurrent = sample(true, REQUESTED_DUTY, 8.0, 500.0, 12.0, true);
+    assertEquals(
+        true,
+        HardwareDiagnosticEvaluator.isCurrentAtOrAboveFraction(
+            fastHighCurrent, CURRENT_LIMIT_AMPS, 0.8));
+    assertEquals(
+        false,
+        HardwareDiagnosticEvaluator.isCurrentAtOrAboveFraction(
+            fastHighCurrent, Double.NaN, 0.8));
+    assertEquals(
+        false,
+        HardwareDiagnosticEvaluator.isCurrentAtOrAboveFraction(
+            fastHighCurrent, CURRENT_LIMIT_AMPS, Double.NaN));
+  }
+
   private static Snapshot sample(
       boolean ready,
       double appliedOutput,

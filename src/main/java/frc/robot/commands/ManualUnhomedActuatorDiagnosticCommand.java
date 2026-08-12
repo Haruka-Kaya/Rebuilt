@@ -2,6 +2,7 @@ package frc.robot.commands;
 
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
@@ -10,30 +11,40 @@ import edu.wpi.first.wpilibj2.command.Subsystem;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.constants.Constants.IntakeConstants;
+import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.constants.Constants.ShooterConstants;
 import frc.robot.constants.Constants.TurretConstants;
+import frc.robot.constants.ConfiguredCanHardware;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.MotionResult;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 import frc.robot.subsystems.ClimberSubsystem;
+import frc.robot.subsystems.FeederSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.utils.SparkMAXContainer.TimedDiagnosticSnapshot;
+import frc.robot.utils.OneShotMotorRetestLease.Token;
 
 /**
- * One manually held polarity pulse for an actuator whose mechanical reference is not configured.
- * This command never creates or updates a position-reference token.
+ * One manually held polarity pulse for an unreferenced actuator or an intentionally blocked motor.
+ * This command never creates or updates a position-reference token or unblocks normal motion.
  */
 public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
+  private static final int[] ALL_SPARK_IDS = ConfiguredCanHardware.sparkDeviceIds().stream()
+      .mapToInt(Integer::intValue)
+      .toArray();
   public static final String PREFIX = "Unhomed Actuator Diagnostic/";
   public static final String ARM_KEY = PREFIX + "Armed";
   public static final String ARM_VALID_KEY = PREFIX + "Arm Valid";
   public static final String PHYSICAL_CLEARANCE_KEY = PREFIX + "Physical Clearance Verified";
   public static final String MOTOR_TYPE_VERIFIED_KEY = PREFIX + "Brushless Motor Type Verified";
+  public static final String FEEDER_REPAIR_VERIFIED_KEY =
+      PREFIX + "ID32 Jam and Power Branch Inspected";
   public static final String TARGET_INTAKE_KEY = PREFIX + "Target ID30 Intake";
+  public static final String TARGET_FEEDER_KEY = PREFIX + "Target ID32 Feeder Retest";
   public static final String TARGET_CLIMBER_LEFT_KEY = PREFIX + "Target ID34 Climber Left";
   public static final String TARGET_CLIMBER_RIGHT_KEY = PREFIX + "Target ID35 Climber Right";
   public static final String TARGET_SHOOTER_KEY = PREFIX + "Target ID38 Shooter";
@@ -48,6 +59,10 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
         IntakeConstants.INTAKE_ACTUATOR_CAN_ID,
         "ID30_INTAKE_ACTUATOR",
         HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_CURRENT_AMPS),
+    FEEDER(
+        ManipulatorConstants.FEEDER_CAN_ID,
+        "ID32_FEEDER_KNOWN_STALL_RETEST",
+        ManipulatorConstants.FEEDER_CURRENT_LIMIT_AMPS),
     CLIMBER_LEFT(
         ClimberConstants.LEFT_MOTOR_CAN_ID,
         "ID34_CLIMBER_LEFT",
@@ -142,6 +157,8 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
       double requestedDuty,
       BooleanSupplier interlocksHeld,
       IntakeSubsystem intake,
+      FeederSubsystem feeder,
+      Supplier<Token> feederRetestLease,
       ShooterSubsystem shooter,
       TurretSubsystem turret,
       ClimberSubsystem climber,
@@ -155,11 +172,19 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     this.target = target;
     this.requestedDuty = requestedDuty;
     this.interlocksHeld = interlocksHeld;
+    if (feederRetestLease == null) {
+      throw new IllegalArgumentException("feeder retest lease supplier is required");
+    }
 
     switch (target) {
       case INTAKE_ACTUATOR -> {
         runAction = () -> intake.runUnhomedActuatorDiagnostic(requestedDuty);
         stopAction = intake::stopActuatorDiagnostic;
+      }
+      case FEEDER -> {
+        runAction = () -> feeder.runManualControlledRetest(
+            feederRetestLease.get(), requestedDuty);
+        stopAction = feeder::stopDiagnosticOutput;
       }
       case CLIMBER_LEFT -> {
         runAction = () -> climber.runLeftUnhomedDiagnostic(requestedDuty);
@@ -189,7 +214,9 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     SmartDashboard.putBoolean(ARM_VALID_KEY, false);
     SmartDashboard.putBoolean(PHYSICAL_CLEARANCE_KEY, false);
     SmartDashboard.putBoolean(MOTOR_TYPE_VERIFIED_KEY, false);
+    SmartDashboard.putBoolean(FEEDER_REPAIR_VERIFIED_KEY, false);
     SmartDashboard.putBoolean(TARGET_INTAKE_KEY, false);
+    SmartDashboard.putBoolean(TARGET_FEEDER_KEY, false);
     SmartDashboard.putBoolean(TARGET_CLIMBER_LEFT_KEY, false);
     SmartDashboard.putBoolean(TARGET_CLIMBER_RIGHT_KEY, false);
     SmartDashboard.putBoolean(TARGET_SHOOTER_KEY, false);
@@ -202,12 +229,25 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
 
   /** Returns a target only when exactly one dashboard selection is active. */
   public static Optional<Target> readExactlyOneTarget() {
-    boolean intake = SmartDashboard.getBoolean(TARGET_INTAKE_KEY, false);
-    boolean climberLeft = SmartDashboard.getBoolean(TARGET_CLIMBER_LEFT_KEY, false);
-    boolean climberRight = SmartDashboard.getBoolean(TARGET_CLIMBER_RIGHT_KEY, false);
-    boolean shooter = SmartDashboard.getBoolean(TARGET_SHOOTER_KEY, false);
-    boolean turret = SmartDashboard.getBoolean(TARGET_TURRET_KEY, false);
+    return selectExactlyOneTarget(
+        SmartDashboard.getBoolean(TARGET_INTAKE_KEY, false),
+        SmartDashboard.getBoolean(TARGET_FEEDER_KEY, false),
+        SmartDashboard.getBoolean(TARGET_CLIMBER_LEFT_KEY, false),
+        SmartDashboard.getBoolean(TARGET_CLIMBER_RIGHT_KEY, false),
+        SmartDashboard.getBoolean(TARGET_SHOOTER_KEY, false),
+        SmartDashboard.getBoolean(TARGET_TURRET_KEY, false));
+  }
+
+  /** Pure exact-one selector used by the dashboard boundary and deterministic tests. */
+  static Optional<Target> selectExactlyOneTarget(
+      boolean intake,
+      boolean feeder,
+      boolean climberLeft,
+      boolean climberRight,
+      boolean shooter,
+      boolean turret) {
     int count = (intake ? 1 : 0)
+        + (feeder ? 1 : 0)
         + (climberLeft ? 1 : 0)
         + (climberRight ? 1 : 0)
         + (shooter ? 1 : 0)
@@ -217,6 +257,9 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     }
     if (intake) {
       return Optional.of(Target.INTAKE_ACTUATOR);
+    }
+    if (feeder) {
+      return Optional.of(Target.FEEDER);
     }
     if (climberLeft) {
       return Optional.of(Target.CLIMBER_LEFT);
@@ -228,6 +271,18 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
       return Optional.of(Target.SHOOTER_ACTUATOR);
     }
     return Optional.of(Target.TURRET);
+  }
+
+  /** The known ID32 stall needs a repair attestation in addition to generic clearance checks. */
+  public static boolean targetSpecificVerificationSatisfied(Target target) {
+    return targetSpecificVerificationSatisfied(
+        target, SmartDashboard.getBoolean(FEEDER_REPAIR_VERIFIED_KEY, false));
+  }
+
+  /** Pure target-specific verification rule used by the dashboard boundary and tests. */
+  static boolean targetSpecificVerificationSatisfied(
+      Target target, boolean feederRepairVerified) {
+    return target != null && (target != Target.FEEDER || feederRepairVerified);
   }
 
   /** Returns a direction only when exactly one Disabled-mode direction selection is active. */
@@ -249,7 +304,8 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     lastEvaluatedSampleAt = Double.NEGATIVE_INFINITY;
     pulseOutputEpoch = -1;
     stopAction.run();
-    stopBatch = SparkMAXContainer.requestOutputStops(target.stopCanIds());
+    // No manual motor pulse may begin while another configured SPARK output remains active.
+    stopBatch = SparkMAXContainer.requestOutputStops(ALL_SPARK_IDS);
     phase = Phase.PRE_STOP;
     phaseDeadlineSeconds = Timer.getFPGATimestamp()
         + HardwareTestConstants.STOP_CONFIRM_TIMEOUT_SECONDS;
@@ -281,7 +337,7 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
   private void executePreStop(double now) {
     SparkMAXContainer.OutputStopSnapshot stop = stopBatch.snapshot();
     if (stop.confirmed()) {
-      SmartDashboard.putString(STOP_EVIDENCE_KEY, "PRE_STOP_CONFIRMED");
+      SmartDashboard.putString(STOP_EVIDENCE_KEY, "GLOBAL_SPARK_PRE_STOP_CONFIRMED");
       Snapshot readySnapshot = timedSnapshot(false).map(TimedDiagnosticSnapshot::snapshot)
           .orElse(null);
       if (readySnapshot == null || !readySnapshot.ready()) {
@@ -305,7 +361,9 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
       pulseCommandCompletedAt = Timer.getFPGATimestamp();
       phase = Phase.PULSE;
       phaseDeadlineSeconds = now + HardwareTestConstants.UNHOMED_DIAGNOSTIC_PULSE_SECONDS;
-      publish("PULSING_" + signedDirection(), "PRE_STOP_CONFIRMED_PULSE_ACTIVE");
+      publish(
+          "PULSING_" + signedDirection(),
+          "GLOBAL_SPARK_PRE_STOP_CONFIRMED_PULSE_ACTIVE");
       return;
     }
     if (now >= phaseDeadlineSeconds) {
@@ -339,6 +397,13 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     }
     lastEvaluatedSampleAt = timed.sampledAtSeconds();
     Snapshot snapshot = timed.snapshot();
+    if (target == Target.FEEDER
+        && HardwareDiagnosticEvaluator.isCurrentAtOrAboveFraction(
+            snapshot, target.maximumCurrentAmps(), 0.8)) {
+      latestMotionResult = MotionResult.STALL_SUSPECTED;
+      beginPostStop(MotionResult.STALL_SUSPECTED.name());
+      return;
+    }
     MotionResult sample = HardwareDiagnosticEvaluator.evaluateOpenLoop(
         snapshot,
         requestedDuty,

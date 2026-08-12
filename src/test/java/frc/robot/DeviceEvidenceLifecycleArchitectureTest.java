@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 class DeviceEvidenceLifecycleArchitectureTest {
   private static final Path ROBOT_SOURCE = Path.of(
       "src", "main", "java", "frc", "robot", "Robot.java");
+  private static final Path ROBOT_CONTAINER_SOURCE = Path.of(
+      "src", "main", "java", "frc", "robot", "RobotContainer.java");
 
   @Test
   void fmsSuppressionRunsBeforeTheIrreversibleRuntimeFaultEarlyReturn() throws IOException {
@@ -36,6 +38,23 @@ class DeviceEvidenceLifecycleArchitectureTest {
     assertTrue(periodic.contains("Hardware/CTRE Health\", \"RUNTIME_FAULT"));
     assertTrue(periodic.contains("m_deviceEvidenceUnavailableForRuntimeFault = false"));
     assertTrue(periodic.contains("m_deviceEvidenceSuppressedForFms = false"));
+  }
+
+  @Test
+  void idleArmCleanupCannotContinuouslyStopTheFeederOrBreakFutureControlledHst()
+      throws IOException {
+    String source = Files.readString(ROBOT_CONTAINER_SOURCE);
+    String discard = between(
+        source,
+        "public void discardPreparedUnhomedDiagnosticSession()",
+        "public Command getAutonomousCommand()");
+    int tokenGuard = discard.indexOf(
+        "m_unhomedDiagnosticTarget == null && m_feederManualRetestToken != null");
+    int feederDisarm = discard.indexOf("m_feeder.disarmManualControlledRetest()");
+    int guardedBlockEnd = discard.indexOf("}", feederDisarm);
+
+    assertTrue(tokenGuard >= 0, "prepared Feeder cleanup must require an actual token");
+    assertTrue(feederDisarm > tokenGuard && guardedBlockEnd > feederDisarm);
   }
 
   private static String between(String source, String start, String end) {

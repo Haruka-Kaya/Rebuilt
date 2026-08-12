@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 import com.revrobotics.PersistMode;
@@ -1830,6 +1831,34 @@ public class SparkMAXContainer implements MotorContainer {
     return setDutyCycleInternal(output, false);
   }
 
+  /**
+   * Sends open-loop duty only if an external one-shot authorization is still valid at the exact
+   * point protected by the ordered output lock.
+   *
+   * <p>The authorization must be bounded, side-effect-free, and must not acquire any lock whose
+   * holder can call back into this container. Revoking it before this method acquires the output
+   * lock prevents a late nonzero call; revoking it after the check orders the caller's subsequent
+   * zero request after this vendor call.
+   */
+  public boolean setDutyCycleIfAuthorized(
+      double output, BooleanSupplier authorizationStillValid) {
+    if (authorizationStillValid == null) {
+      rejectSetpointRequestAndRequestZero("MISSING_EXTERNAL_SETPOINT_AUTHORIZATION");
+      return false;
+    }
+    if (!Double.isFinite(output)) {
+      rejectSetpointRequestAndRequestZero("NONFINITE_DUTY_CYCLE_REJECTED");
+      return false;
+    }
+    double clampedOutput = Math.max(-1.0, Math.min(1.0, output));
+    if (Math.abs(clampedOutput) <= 1e-9) {
+      requestZeroOutput();
+      return true;
+    }
+    return trySetpoint(
+        clampedOutput, ControlType.kDutyCycle, false, null, authorizationStillValid);
+  }
+
   private boolean setDutyCycleInternal(double output, boolean diagnosticFollowerOutput) {
     if (!Double.isFinite(output)) {
       rejectSetpointRequestAndRequestZero("NONFINITE_DUTY_CYCLE_REJECTED");
@@ -1950,6 +1979,16 @@ public class SparkMAXContainer implements MotorContainer {
       ControlType controlType,
       boolean diagnosticFollowerOutput,
       PositionReferenceGuard.Token positionReference) {
+    return trySetpoint(
+        value, controlType, diagnosticFollowerOutput, positionReference, () -> true);
+  }
+
+  private boolean trySetpoint(
+      double value,
+      ControlType controlType,
+      boolean diagnosticFollowerOutput,
+      PositionReferenceGuard.Token positionReference,
+      BooleanSupplier authorizationStillValid) {
     if (!Double.isFinite(value)) {
       rejectSetpointRequestAndRequestZero("NONFINITE_SETPOINT_REJECTED");
       return false;
@@ -1976,11 +2015,19 @@ public class SparkMAXContainer implements MotorContainer {
         boolean positionReferenceAllowed = controlType != ControlType.kPosition
             || positionReferenceGuard.isValid(positionReference);
         boolean baseReady = failure == null && isBaseReadyLocked(now);
+        boolean externallyAuthorized;
+        try {
+          externallyAuthorized = authorizationStillValid != null
+              && authorizationStillValid.getAsBoolean();
+        } catch (RuntimeException ignored) {
+          externallyAuthorized = false;
+        }
         if (failure == null
             && dependenciesReady
             && baseReady
             && followerOutputAllowed
-            && positionReferenceAllowed) {
+            && positionReferenceAllowed
+            && externallyAuthorized) {
           SparkVendorCall.Result result = SparkVendorCall.execute(
               "setpoint", () -> sendSetpointTracked(value, controlType));
           if (result.succeeded()) {
@@ -2006,6 +2053,8 @@ public class SparkMAXContainer implements MotorContainer {
             lastRequestReason = "FOLLOWER_OUTPUT_NOT_ALLOWED";
           } else if (!positionReferenceAllowed) {
             lastRequestReason = "POSITION_REFERENCE_INVALID";
+          } else if (!externallyAuthorized) {
+            lastRequestReason = "EXTERNAL_SETPOINT_AUTHORIZATION_REVOKED";
           } else {
             lastRequestReason = "SETPOINT_REQUEST_REJECTED";
           }

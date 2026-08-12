@@ -393,9 +393,9 @@
           },
           {
             "title": "Target ID34 Climber Left",
-            "x": 742.0,
+            "x": 810.0,
             "y": 1536.0,
-            "width": 102.0,
+            "width": 85.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -406,9 +406,9 @@
           },
           {
             "title": "Target ID35 Climber Right",
-            "x": 844.0,
+            "x": 895.0,
             "y": 1536.0,
-            "width": 102.0,
+            "width": 85.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -788,7 +788,7 @@
             "title": "Target ID30 Intake",
             "x": 640.0,
             "y": 1536.0,
-            "width": 102.0,
+            "width": 85.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -798,10 +798,23 @@
             }
           },
           {
-            "title": "Target ID38 Shooter",
-            "x": 946.0,
+            "title": "ID32 REPAIR",
+            "x": 725.0,
             "y": 1536.0,
-            "width": 102.0,
+            "width": 85.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID32 Feeder Retest",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Target ID38 Shooter",
+            "x": 980.0,
+            "y": 1536.0,
+            "width": 85.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -812,9 +825,9 @@
           },
           {
             "title": "Target ID39 Turret",
-            "x": 1048.0,
+            "x": 1065.0,
             "y": 1536.0,
-            "width": 104.0,
+            "width": 87.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -824,8 +837,21 @@
             }
           },
           {
-            "title": "Direction Negative",
+            "title": "Verify ID32 Jam and Power Branch Inspected",
             "x": 0.0,
+            "y": 1664.0,
+            "width": 256.0,
+            "height": 128.0,
+            "type": "Toggle Button",
+            "properties": {
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/ID32 Jam and Power Branch Inspected",
+              "period": 0.06,
+              "data_type": "boolean"
+            }
+          },
+          {
+            "title": "Direction Negative",
+            "x": 256.0,
             "y": 1664.0,
             "width": 128.0,
             "height": 128.0,
@@ -838,7 +864,7 @@
           },
           {
             "title": "Direction Positive",
-            "x": 128.0,
+            "x": 384.0,
             "y": 1664.0,
             "width": 128.0,
             "height": 128.0,
@@ -851,9 +877,9 @@
           },
           {
             "title": "Unhomed Actuator Diagnostic Status",
-            "x": 256.0,
+            "x": 512.0,
             "y": 1664.0,
-            "width": 512.0,
+            "width": 384.0,
             "height": 128.0,
             "type": "Large Text Display",
             "properties": {
@@ -864,9 +890,9 @@
           },
           {
             "title": "Unhomed Actuator Stop Evidence",
-            "x": 768.0,
+            "x": 896.0,
             "y": 1664.0,
-            "width": 384.0,
+            "width": 256.0,
             "height": 128.0,
             "type": "Large Text Display",
             "properties": {
@@ -876,9 +902,22 @@
             }
           },
           {
-            "title": "Motor Capability Summary",
+            "title": "ID32 Manual Retest Guard",
             "x": 0.0,
             "y": 1792.0,
+            "width": 1152.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Feeder/Manual Retest Guard",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Motor Capability Summary",
+            "x": 0.0,
+            "y": 1920.0,
             "width": 576.0,
             "height": 128.0,
             "type": "Large Text Display",
@@ -891,7 +930,7 @@
           {
             "title": "Motor Blockers",
             "x": 576.0,
-            "y": 1792.0,
+            "y": 1920.0,
             "width": 576.0,
             "height": 128.0,
             "type": "Large Text Display",
@@ -904,7 +943,7 @@
           {
             "title": "Configured Operator Actions",
             "x": 0.0,
-            "y": 1920.0,
+            "y": 2048.0,
             "width": 1152.0,
             "height": 128.0,
             "type": "Large Text Display",
@@ -917,7 +956,7 @@
           {
             "title": "Operator Action Evidence",
             "x": 0.0,
-            "y": 2048.0,
+            "y": 2176.0,
             "width": 1152.0,
             "height": 256.0,
             "type": "Large Text Display",
@@ -930,7 +969,7 @@
           {
             "title": "CAN Device Evidence Scope",
             "x": 0.0,
-            "y": 2304.0,
+            "y": 2432.0,
             "width": 1152.0,
             "height": 128.0,
             "type": "Large Text Display",
@@ -943,7 +982,7 @@
           {
             "title": "All 23 CAN Device Evidence",
             "x": 0.0,
-            "y": 2432.0,
+            "y": 2560.0,
             "width": 1152.0,
             "height": 768.0,
             "type": "Large Text Display",
