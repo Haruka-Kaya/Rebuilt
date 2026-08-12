@@ -5,6 +5,7 @@ import edu.wpi.first.wpilibj.Notifier;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator;
@@ -144,7 +145,8 @@ public class FeederSubsystem extends SubsystemBase {
     }
 
     /** Consumes the exact lease once and applies at most one 0.35-second, 3% pulse. */
-    public boolean runManualControlledRetest(Token token, double requestedDuty) {
+    public boolean runManualControlledRetest(
+            Token token, double requestedDuty, PulsePermit permit) {
         // The command's global pre-stop may become confirmed after this subsystem's periodic ran in
         // the same scheduler cycle. Re-evaluate the identical cached ID32 evidence before consuming
         // the one-shot lease so a confirmed neutral is not mistaken for a pending stop.
@@ -152,7 +154,9 @@ public class FeederSubsystem extends SubsystemBase {
         double now = Timer.getFPGATimestamp();
         boolean allowed = isMotionBlocked()
             && DriverStation.isTestEnabled()
-            && !DriverStation.isFMSAttached();
+            && !DriverStation.isFMSAttached()
+            && permit != null
+            && permit.isValidFor(requestedDuty);
         boolean prepared = false;
         long watchdogGeneration = -1;
         synchronized (manualRetestSafetyLock) {
@@ -199,6 +203,7 @@ public class FeederSubsystem extends SubsystemBase {
                             && isMotionBlocked()
                             && DriverStation.isTestEnabled()
                             && !DriverStation.isFMSAttached()
+                            && permit.isValidFor(requestedDuty)
                             && manualRetestLease.outputAuthorizationSnapshot(
                                 token, requestedDuty, authorizationNow, true)
                             && authorizationNow <= authorizationDeadline;
@@ -219,7 +224,9 @@ public class FeederSubsystem extends SubsystemBase {
                 committedAt = Timer.getFPGATimestamp();
                 stillAllowed = isMotionBlocked()
                     && DriverStation.isTestEnabled()
-                    && !DriverStation.isFMSAttached();
+                    && !DriverStation.isFMSAttached()
+                    && permit != null
+                    && permit.isValidFor(requestedDuty);
             } catch (RuntimeException ignored) {
                 committedAt = Double.POSITIVE_INFINITY;
                 stillAllowed = false;
@@ -271,19 +278,25 @@ public class FeederSubsystem extends SubsystemBase {
     }
 
     /** Low-output Test-mode path used before normal motion is re-enabled after the known stall. */
-    public boolean runControlledDiagnostic(double requestedDuty) {
+    public boolean runControlledDiagnostic(double requestedDuty, PulsePermit permit) {
         if (!ManipulatorConstants.FEEDER_CONTROLLED_RETEST_ENABLED
                 || !DriverStation.isTestEnabled()
                 || DriverStation.isFMSAttached()
                 || !Double.isFinite(requestedDuty)
-                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE) {
+                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE
+                || permit == null
+                || !permit.isValidFor(requestedDuty)) {
             stop();
             return false;
         }
         automaticRetestOutputActive = true;
         automaticRetestExpiresAt = Timer.getFPGATimestamp()
             + HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS;
-        boolean accepted = m_feeder.setDutyCycle(requestedDuty);
+        boolean accepted = m_feeder.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
         if (!accepted) {
             stop();
         }

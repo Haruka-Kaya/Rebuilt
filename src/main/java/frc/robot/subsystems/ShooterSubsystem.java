@@ -6,6 +6,7 @@ import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.ShooterConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.utils.DashboardApplyGate;
@@ -16,6 +17,7 @@ import frc.robot.utils.SparkMAXContainer.PositionCommandStatus;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 
 public class ShooterSubsystem extends SubsystemBase {
+    private static final double FOLLOWER_DIAGNOSTIC_DUTY = 0.08;
     private static final String TUNING_APPLY_KEY = "Tuning/Shooter/Apply";
     private static final String TUNING_STATUS_KEY = "Tuning/Shooter/Status";
     private static final double MAX_PID_GAIN = 10.0;
@@ -211,29 +213,43 @@ public class ShooterSubsystem extends SubsystemBase {
         SmartDashboard.putBoolean("Shooter Ready To Feed", isReadyToFeed());
     }
 
-    public boolean runFollowerDiagnostic() {
+    public boolean runFollowerDiagnostic(PulsePermit permit) {
         flywheelRequested = false;
         flywheelIsSet = false;
         flywheelMotor_1.stop();
-        if (!DriverStation.isTestEnabled() || DriverStation.isFMSAttached()) {
+        if (!DriverStation.isTestEnabled()
+                || DriverStation.isFMSAttached()
+                || permit == null
+                || !permit.isValidFor(FOLLOWER_DIAGNOSTIC_DUTY)) {
             flywheelMotor_2.endFollowerDiagnostic();
             return false;
         }
-        return flywheelMotor_2.beginFollowerDiagnostic(0.08);
+        return flywheelMotor_2.beginFollowerDiagnosticIfAuthorized(
+            FOLLOWER_DIAGNOSTIC_DUTY,
+            () -> permit.isValidFor(FOLLOWER_DIAGNOSTIC_DUTY)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
     }
 
-    public boolean runFlywheelPairDiagnostic(double requestedDuty) {
+    public boolean runFlywheelPairDiagnostic(
+            double requestedDuty, PulsePermit permit) {
         flywheelRequested = false;
         flywheelIsSet = false;
         if (!DriverStation.isTestEnabled()
                 || DriverStation.isFMSAttached()
                 || !Double.isFinite(requestedDuty)
                 || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE
+                || permit == null
+                || !permit.isValidFor(requestedDuty)
                 || !flywheelPairReady()) {
             flywheelMotor_1.stop();
             return false;
         }
-        return flywheelMotor_1.setDutyCycle(requestedDuty);
+        return flywheelMotor_1.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
     }
 
     public void stopFlywheelPairDiagnostic() {
@@ -246,13 +262,18 @@ public class ShooterSubsystem extends SubsystemBase {
     }
 
     /** Test-only low-output polarity evidence; this does not establish a hood reference. */
-    public boolean runUnhomedActuatorDiagnostic(double requestedDuty) {
-        if (!unhomedDiagnosticAllowed(requestedDuty)) {
+    public boolean runUnhomedActuatorDiagnostic(
+            double requestedDuty, PulsePermit permit) {
+        if (!unhomedDiagnosticAllowed(requestedDuty, permit)) {
             stopActuatorDiagnostic();
             return false;
         }
         actuatorDiagnosticActive = true;
-        boolean accepted = actuatorMotor.setDutyCycle(requestedDuty);
+        boolean accepted = actuatorMotor.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
         if (!accepted) {
             stopActuatorDiagnostic();
         }
@@ -326,12 +347,15 @@ public class ShooterSubsystem extends SubsystemBase {
         return flywheelMotor_1.isReady() && flywheelMotor_2.isReady();
     }
 
-    private static boolean unhomedDiagnosticAllowed(double requestedDuty) {
+    private static boolean unhomedDiagnosticAllowed(
+            double requestedDuty, PulsePermit permit) {
         return DriverStation.isTestEnabled()
             && !DriverStation.isFMSAttached()
             && Double.isFinite(requestedDuty)
             && Math.abs(requestedDuty)
-                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE;
+                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE
+            && permit != null
+            && permit.isValidFor(requestedDuty);
     }
 
     private static boolean pidChanged(

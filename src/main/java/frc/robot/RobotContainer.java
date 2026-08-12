@@ -5,6 +5,7 @@
 package frc.robot;
 
 
+import com.ctre.phoenix6.swerve.SwerveDrivetrain.SwerveDriveState;
 import edu.wpi.first.wpilibj.PS5Controller;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.RobotBase;
@@ -74,10 +75,10 @@ public class RobotContainer implements AutoCloseable {
   private final EnumSet<Action> m_conflictingIntakeActions = EnumSet.noneOf(Action.class);
   private boolean m_jumpBumpRequiresRelease;
   private long m_teleopSafetySourceSignature;
-  private Target m_unhomedDiagnosticTarget;
-  private Direction m_unhomedDiagnosticDirection;
-  private double m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
-  private Token m_feederManualRetestToken;
+  private volatile Target m_unhomedDiagnosticTarget;
+  private volatile Direction m_unhomedDiagnosticDirection;
+  private volatile double m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
+  private volatile Token m_feederManualRetestToken;
   private Target m_preparedUnhomedDiagnosticTarget;
   private Direction m_preparedUnhomedDiagnosticDirection;
   private double m_preparedUnhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
@@ -513,6 +514,7 @@ public class RobotContainer implements AutoCloseable {
         .onTrue(new ManualUnhomedActuatorDiagnosticCommand(
             target,
             direction.duty(),
+            () -> createManualDiagnosticOutputSession(target, direction),
             () -> unhomedDiagnosticInterlocksHeld(
                 target, direction, selectedDirectionButton, oppositeDirectionButton),
             m_intake,
@@ -579,8 +581,16 @@ public class RobotContainer implements AutoCloseable {
   }
 
   private boolean unhomedDiagnosticSessionAllowed(Target target, Direction direction) {
-    boolean unexpired = Double.isFinite(m_unhomedDiagnosticExpiresAt)
-        && Timer.getFPGATimestamp() <= m_unhomedDiagnosticExpiresAt;
+    boolean allowed = unhomedDiagnosticSessionAuthorizationValid(target, direction);
+    double now;
+    try {
+      now = Timer.getFPGATimestamp();
+    } catch (RuntimeException exception) {
+      now = Double.NaN;
+    }
+    boolean unexpired = Double.isFinite(now)
+        && Double.isFinite(m_unhomedDiagnosticExpiresAt)
+        && now <= m_unhomedDiagnosticExpiresAt;
     if (!unexpired && m_unhomedDiagnosticTarget != null) {
       disarmUnhomedDiagnosticSession();
       SmartDashboard.putString(
@@ -601,8 +611,28 @@ public class RobotContainer implements AutoCloseable {
           "SESSION_INVALIDATED_REARM_DISABLED");
       return false;
     }
-    return unexpired
-        && selectionAndVerificationMatch
+    return allowed;
+  }
+
+  /** Side-effect-free live authorization used inside the ordered motor output boundary. */
+  private boolean unhomedDiagnosticSessionAuthorizationValid(
+      Target target, Direction direction) {
+    double now;
+    try {
+      now = Timer.getFPGATimestamp();
+    } catch (RuntimeException exception) {
+      return false;
+    }
+    return Double.isFinite(now)
+        && Double.isFinite(m_unhomedDiagnosticExpiresAt)
+        && now <= m_unhomedDiagnosticExpiresAt
+        && target == m_unhomedDiagnosticTarget
+        && direction == m_unhomedDiagnosticDirection
+        && unhomedDiagnosticSelectionVerified(target, direction)
+        && (target != Target.FEEDER
+            || (m_feederManualRetestToken != null
+                && m_feeder.isManualControlledRetestSessionValid(
+                    m_feederManualRetestToken, direction.duty())))
         && DriverStation.isTestEnabled()
         && !DriverStation.isFMSAttached()
         && !SmartDashboard.getBoolean(HardwareSelfTestCommand.RUNNING_KEY, false);
@@ -680,9 +710,10 @@ public class RobotContainer implements AutoCloseable {
   }
 
   public void disarmUnhomedDiagnosticSession() {
+    // Publish expiry first so the Notifier/vendor-boundary interlock fails before identity cleanup.
+    m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
     m_unhomedDiagnosticTarget = null;
     m_unhomedDiagnosticDirection = null;
-    m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
     m_feederManualRetestToken = null;
     m_feeder.disarmManualControlledRetest();
     m_preparedUnhomedDiagnosticTarget = null;
@@ -746,12 +777,111 @@ public class RobotContainer implements AutoCloseable {
   }
 
   public Command getHardwareSelfTestCommand() {
+    if (!RobotBase.isSimulation()) {
+      return rejectedHardwareSelfTestCommand("SIMULATION_TEST_SEAM_UNAVAILABLE_ON_ROBOT");
+    }
+    return getHardwareSelfTestCommand(
+        Timer.getFPGATimestamp() + HardwareTestConstants.ARM_LIFETIME_SECONDS);
+  }
+
+  Command getHardwareSelfTestCommand(double absoluteExpiresAtSeconds) {
+    DiagnosticOutputSession outputSession = createHardwareSelfTestOutputSession(
+        absoluteExpiresAtSeconds);
+    if (outputSession == null) {
+      return rejectedHardwareSelfTestCommand("DIAGNOSTIC_OUTPUT_SESSION_REJECTED");
+    }
     return HardwareSelfTestCommand.create(
-        drivetrain, m_intake, m_conveyor, m_feeder, m_shooter, m_turret, m_climber);
+        outputSession,
+        drivetrain,
+        m_intake,
+        m_conveyor,
+        m_feeder,
+        m_shooter,
+        m_turret,
+        m_climber);
+  }
+
+  private DiagnosticOutputSession createManualDiagnosticOutputSession(
+      Target target, Direction direction) {
+    if (!unhomedDiagnosticSessionAllowed(target, direction)) {
+      return null;
+    }
+    try {
+      return DiagnosticOutputSession.create(
+          m_unhomedDiagnosticExpiresAt,
+          () -> unhomedDiagnosticSessionAuthorizationValid(target, direction),
+          this::tripOutputSafety);
+    } catch (RuntimeException exception) {
+      tripOutputSafety(
+          "DIAGNOSTIC_SESSION_CREATE_EXCEPTION_" + exception.getClass().getSimpleName());
+      return null;
+    }
+  }
+
+  private DiagnosticOutputSession createHardwareSelfTestOutputSession(
+      double armExpiresAtSeconds) {
+    double now = Timer.getFPGATimestamp();
+    Snapshot outputSafety = getOutputSafetySnapshot();
+    boolean valid = DriverStation.isTestEnabled()
+        && !DriverStation.isFMSAttached()
+        && Double.isFinite(now)
+        && Double.isFinite(armExpiresAtSeconds)
+        && armExpiresAtSeconds > now
+        && armExpiresAtSeconds <= now + HardwareTestConstants.ARM_LIFETIME_SECONDS
+        && outputSafety.phase() == RobotOutputSafetySupervisor.Phase.ARMED
+        && outputSafety.processOutputSafety().outputAuthorized();
+    if (!valid) {
+      return null;
+    }
+    try {
+      double sessionExpiresAtSeconds =
+          now + HardwareTestConstants.HARDWARE_SELF_TEST_SESSION_LIFETIME_SECONDS;
+      return DiagnosticOutputSession.create(
+          sessionExpiresAtSeconds,
+          () -> {
+            Snapshot current = getOutputSafetySnapshot();
+            return DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached()
+                && current.phase() == RobotOutputSafetySupervisor.Phase.ARMED
+                && current.processOutputSafety().outputAuthorized();
+          },
+          this::tripOutputSafety);
+    } catch (RuntimeException exception) {
+      tripOutputSafety(
+          "DIAGNOSTIC_SESSION_CREATE_EXCEPTION_" + exception.getClass().getSimpleName());
+      return null;
+    }
+  }
+
+  private Command rejectedHardwareSelfTestCommand(String reason) {
+    return edu.wpi.first.wpilibj2.command.Commands.runOnce(() -> {
+      stopAll();
+      SmartDashboard.putBoolean(HardwareSelfTestCommand.RUNNING_KEY, false);
+      SmartDashboard.putString("Hardware Self-Test/Overall", "REJECTED");
+      SmartDashboard.putString("Hardware Self-Test/Abort Reason", reason);
+    }, drivetrain, m_intake, m_conveyor, m_feeder, m_shooter, m_turret, m_climber);
   }
 
   public String getSwerveDeviceHealthSummary() {
     return drivetrain.getDeviceHealthSummary();
+  }
+
+  /** Returns a thread-safe drivetrain state copy without exposing the mutable subsystem. */
+  public SwerveDriveState getSwerveDriveStateCopy() {
+    return drivetrain.getStateCopy();
+  }
+
+  /** Sets the existing drivetrain Pigeon's simulated yaw; unavailable on a real robot. */
+  public boolean setSwerveSimRawYawForTesting(double rawYawRadians) {
+    if (!RobotBase.isSimulation() || !Double.isFinite(rawYawRadians)) {
+      return false;
+    }
+    try {
+      return drivetrain.getPigeon2().getSimState()
+          .setRawYaw(Math.toDegrees(rawYawRadians)).isOK();
+    } catch (RuntimeException exception) {
+      return false;
+    }
   }
 
   public java.util.List<frc.robot.utils.CtreDeviceEvidence.Snapshot>
@@ -763,9 +893,21 @@ public class RobotContainer implements AutoCloseable {
     return SparkMAXContainer.getDeviceAvailabilitySummary();
   }
 
-  /** Renews the independent process-wide authorization immediately before scheduler execution. */
+  /**
+   * Renews the independent process-wide authorization from a fresh completed scheduler epoch.
+   */
   public void serviceOutputSafetyHeartbeat() {
     m_outputSafetySupervisor.heartbeat();
+  }
+
+  /** Marks the start of the scheduler run owned by the current robot loop. */
+  public long beginCommandSchedulerRun() {
+    return m_outputSafetySupervisor.beginSchedulerRun();
+  }
+
+  /** Publishes scheduler progress only after the corresponding run returned normally. */
+  public void completeCommandSchedulerRun(long schedulerRunEpoch) {
+    m_outputSafetySupervisor.completeSchedulerRun(schedulerRunEpoch);
   }
 
   /** Revokes nonzero output before requesting the independent global stop sequence. */
@@ -795,9 +937,9 @@ public class RobotContainer implements AutoCloseable {
     if (!preservePreparedUnhomedSession) {
       disarmUnhomedDiagnosticSession();
     } else {
+      m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
       m_unhomedDiagnosticTarget = null;
       m_unhomedDiagnosticDirection = null;
-      m_unhomedDiagnosticExpiresAt = Double.NEGATIVE_INFINITY;
       m_unhomedDiagnosticInputGate.blockUntilNeutral();
     }
     m_DriveBaseContainer.blockDriverInputsUntilNeutral();

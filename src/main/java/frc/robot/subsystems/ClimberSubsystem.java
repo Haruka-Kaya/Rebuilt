@@ -3,6 +3,7 @@ package frc.robot.subsystems;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.utils.SparkMAXContainer;
 
@@ -36,29 +37,36 @@ public class ClimberSubsystem extends SubsystemBase {
     }
 
     /** Test-only raw polarity pulse; session ownership is enforced by the command layer. */
-    public boolean runLeftUnhomedDiagnostic(double requestedDuty) {
-        return runUnhomedDiagnostic(leftMotor, rightMotor, requestedDuty);
+    public boolean runLeftUnhomedDiagnostic(double requestedDuty, PulsePermit permit) {
+        return runUnhomedDiagnostic(leftMotor, rightMotor, requestedDuty, permit);
     }
 
-    public boolean runRightUnhomedDiagnostic(double requestedDuty) {
-        return runUnhomedDiagnostic(rightMotor, leftMotor, requestedDuty);
+    public boolean runRightUnhomedDiagnostic(double requestedDuty, PulsePermit permit) {
+        return runUnhomedDiagnostic(rightMotor, leftMotor, requestedDuty, permit);
     }
 
     private boolean runUnhomedDiagnostic(
         SparkMAXContainer selectedMotor,
         SparkMAXContainer otherMotor,
-        double requestedDuty) {
+        double requestedDuty,
+        PulsePermit permit) {
         if (!DriverStation.isTestEnabled()
             || DriverStation.isFMSAttached()
             || !Double.isFinite(requestedDuty)
             || Math.abs(requestedDuty) <= 1e-9
             || Math.abs(requestedDuty) > ClimberConstants.DIAGNOSTIC_MAX_DUTY_CYCLE
+            || permit == null
+            || !permit.isValidFor(requestedDuty)
             || !isReady()) {
             stop();
             return false;
         }
         otherMotor.stop();
-        boolean started = selectedMotor.setDutyCycle(requestedDuty);
+        boolean started = selectedMotor.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
         if (!started) {
             stop();
         }

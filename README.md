@@ -7,9 +7,11 @@ The programmer knows what it is doing at all times. It knows this because it kno
 - Intake actuator、Shooter actuator、Turretの通常位置制御は、limit switchまたはabsolute encoderによるhomingが実装されるまで出力を拒否します。Climberの通常動作も方向・limit・homing確定まで拒否します。これら5台は自動Hardware Self-Testでは動かさず、別途armした手動診断だけが、referenceを発行せず、選択した1台を一方向3%・最大0.35秒だけ動かします。
 - PathPlanner autonomousは、wheel radius・module geometry・gearing・maximum speedをCAD/実測値へ統一するまでsafe-stopだけを返します。
 - Feeder ID 32は過去の実機ログで約44 A・約0 rpmだったため、詰まり・機構・電源枝を点検して制御下で再試験するまで、通常のfeed/rejectとHardware Self-Testのmotion testを遮断します。
-- すべてのSPARK/CTRE nonzero要求は、独立5 ms watchdogが監視する100 msのrobot-loop heartbeatがfreshな間だけ受理します。CommandSchedulerまたはrobot loopが停止した場合はprocess-wide authorizationを先に失効し、全SPARKとswerveのfresh zero evidenceが揃うまでscheduler外で停止を再試行します。同じEnabled sessionでは自動再始動せず、Disabledで停止確認後にだけ再armします。
+- すべてのSPARK/CTRE nonzero要求は、独立5 ms watchdogが監視する100 msのrobot-loop heartbeatがfreshで、かつ直前の`CommandScheduler.run()`が正常完了した間だけ受理します。scheduler完了なしでheartbeatだけを繰り返しても期限は延びません。CommandSchedulerまたはrobot loopが停止した場合はprocess-wide authorizationを先に失効し、全SPARKとswerveのfresh zero evidenceが揃うまでscheduler外で停止を再試行します。同じEnabled sessionでは自動再始動せず、Disabledで停止確認後にだけ再armします。
 
 ## Dashboard tuning
+
+Swerveの`Drive/Output Scale`は現在`FIXED_CODE_CONFIGURATION`で、speed/rotationともに5%へ固定しています。旧`Speed Factor`/`Rotation Factor`の編集欄は値が実行経路へ届かなかったため除去しました。距離Alignmentはcamera geometry・対象tag・距離モデル・操作bindingが未確定なので、未完成commandを削除し`Drive/Alignment Availability=UNAVAILABLE_PENDING_TARGET_DISTANCE_MODEL_AND_BINDING`と表示します。
 
 数値欄を書き換えただけでは実行値は変わりません。ロボットをDisabled、FMS未接続にしたうえで、対応するApplyをfalseからtrueへ切り替えてください。Applyはtrueのままでは再適用されません。次に適用するときは一度falseへ戻してからtrueへ切り替えます。
 

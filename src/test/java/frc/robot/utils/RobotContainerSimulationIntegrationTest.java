@@ -6,8 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.pathplanner.lib.auto.AutoBuilder;
 import com.pathplanner.lib.auto.NamedCommands;
+import com.ctre.phoenix6.swerve.SwerveDrivetrain.SwerveDriveState;
 import edu.wpi.first.hal.HAL;
+import edu.wpi.first.math.geometry.Translation2d;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
+import edu.wpi.first.math.kinematics.SwerveModuleState;
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.Notifier;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.simulation.DriverStationSim;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
@@ -22,8 +28,10 @@ import frc.robot.constants.ConfiguredCanHardware;
 import frc.robot.constants.ConfiguredOperatorControls;
 import frc.robot.constants.ConfiguredOperatorActions.Action;
 import frc.robot.constants.Constants.OIConstants;
+import frc.robot.constants.Constants.DebugConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.Constants.ManipulatorConstants;
+import frc.robot.constants.TunerConstants;
 import frc.robot.utils.CtreDeviceEvidence.Metric;
 import frc.robot.utils.SparkMAXContainer.OutputStopBatch;
 import frc.robot.utils.SparkSimulationHandle.SimulationSnapshot;
@@ -45,6 +53,14 @@ class RobotContainerSimulationIntegrationTest {
   private static final int DRIVER_PORT = OIConstants.kDriverControllerPort;
   private static final int SHOOTER_LEADER_ID = ConfiguredCanHardware.SHOOTER_LEADER_ID;
   private static final int SHOOTER_FOLLOWER_ID = ConfiguredCanHardware.SHOOTER_FOLLOWER_ID;
+  private static final Translation2d[] SWERVE_MODULE_LOCATIONS = {
+      new Translation2d(TunerConstants.FrontLeft.LocationX, TunerConstants.FrontLeft.LocationY),
+      new Translation2d(TunerConstants.FrontRight.LocationX, TunerConstants.FrontRight.LocationY),
+      new Translation2d(TunerConstants.BackLeft.LocationX, TunerConstants.BackLeft.LocationY),
+      new Translation2d(TunerConstants.BackRight.LocationX, TunerConstants.BackRight.LocationY)
+  };
+  private static final SwerveDriveKinematics SWERVE_KINEMATICS =
+      new SwerveDriveKinematics(SWERVE_MODULE_LOCATIONS);
 
   @BeforeAll
   static void initializeHal() {
@@ -110,6 +126,7 @@ class RobotContainerSimulationIntegrationTest {
           SmartDashboard.getString(OperatorActionEvidence.reasonKey(Action.REV), "")
               .contains("HOOD_UNREFERENCED"),
           "Rev evidence must explain that only the flywheel pair was accepted");
+      assertRawControllersStopped(ConfiguredCanHardware.SHOOTER_ACTUATOR_ID);
 
       setDriverButton(ConfiguredOperatorControls.DRIVER_REV, false);
       assertTrue(await(3.0, activeContainer, RobotContainerSimulationIntegrationTest::pairRawStopped),
@@ -125,6 +142,7 @@ class RobotContainerSimulationIntegrationTest {
       assertTrue(await(3.0, activeContainer, () -> firstStop.snapshot().confirmed()),
           () -> firstStop.snapshot().summary());
       assertPairRawStopped();
+      assertRawControllersStopped(ConfiguredCanHardware.SHOOTER_ACTUATOR_ID);
 
       // Start once more, then inject the vendor CAN-fault bit while the physical input is held.
       pump(activeContainer, 2);
@@ -232,6 +250,44 @@ class RobotContainerSimulationIntegrationTest {
           ConfiguredCanHardware.CONVEYOR_ID);
       setDriverButton(ConfiguredOperatorControls.DRIVER_INTAKE, false);
       pump(activeContainer, 3);
+      assertActionStopped(Action.INTAKE);
+      assertRawControllersStopped(
+          ConfiguredCanHardware.INTAKE_ACTUATOR_ID,
+          ConfiguredCanHardware.INTAKE_ROLLER_ID,
+          ConfiguredCanHardware.CONVEYOR_ID);
+
+      // R1 has its own production route and must report the same unavailable reference without
+      // allowing the roller or conveyor to move before the actuator is commissioned.
+      setDriverButton(ConfiguredOperatorControls.DRIVER_OUTPUT, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.OUTPUT, "ACTUATOR_UNREFERENCED");
+      assertRawControllersStopped(
+          ConfiguredCanHardware.INTAKE_ACTUATOR_ID,
+          ConfiguredCanHardware.INTAKE_ROLLER_ID,
+          ConfiguredCanHardware.CONVEYOR_ID);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_OUTPUT, false);
+      pump(activeContainer, 3);
+      assertActionStopped(Action.OUTPUT);
+
+      // A present operator controller owns retract; the driver fallback must explain why it was
+      // ignored instead of silently scheduling a second route.
+      setDriverButton(ConfiguredOperatorControls.DRIVER_RETRACT_FALLBACK, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.RETRACT, "DEDICATED_OPERATOR_PRESENT_USE_OPERATOR_L1");
+      assertRawControllersStopped(ConfiguredCanHardware.INTAKE_ACTUATOR_ID);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_RETRACT_FALLBACK, false);
+      pump(activeContainer, 3);
+      assertActionStopped(Action.RETRACT);
+
+      // The dedicated Operator L1 route reaches ID30 and reports the uncommissioned reference.
+      setOperatorButton(ConfiguredOperatorControls.OPERATOR_RETRACT, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(Action.RETRACT, "ACTUATOR_UNREFERENCED");
+      assertRawControllersStopped(ConfiguredCanHardware.INTAKE_ACTUATOR_ID);
+      setOperatorButton(ConfiguredOperatorControls.OPERATOR_RETRACT, false);
+      pump(activeContainer, 3);
+      assertActionStopped(Action.RETRACT);
+      assertRawControllersStopped(ConfiguredCanHardware.INTAKE_ACTUATOR_ID);
 
       // Fire preserves all simultaneous interlock blockers instead of hiding the known feeder fault.
       setDriverButton(ConfiguredOperatorControls.DRIVER_FIRE, true);
@@ -244,14 +300,29 @@ class RobotContainerSimulationIntegrationTest {
           ConfiguredCanHardware.FEEDER_ID, ConfiguredCanHardware.CONVEYOR_ID);
       setDriverButton(ConfiguredOperatorControls.DRIVER_FIRE, false);
       pump(activeContainer, 3);
+      assertActionStopped(Action.FIRE);
+      assertRawControllersStopped(
+          ConfiguredCanHardware.FEEDER_ID, ConfiguredCanHardware.CONVEYOR_ID);
 
-      // The dedicated maintenance auto-aim binding reports the reference failure without motion.
+      // A populated maintenance controller owns auto-aim; the driver fallback is rejected with an
+      // actionable reason before the dedicated route reports the reference failure without motion.
+      setDriverButton(ConfiguredOperatorControls.DRIVER_AUTO_AIM_FALLBACK, true);
+      pump(activeContainer, 2);
+      assertActionBlocked(
+          Action.AUTO_AIM, "DEDICATED_CONTROLLER_PRESENT_USE_DEDICATED_CONTROL");
+      assertRawControllersStopped(ConfiguredCanHardware.TURRET_ID);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_AUTO_AIM_FALLBACK, false);
+      pump(activeContainer, 3);
+      assertActionStopped(Action.AUTO_AIM);
+
       setMaintenanceButton(ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM, true);
       pump(activeContainer, 2);
       assertActionBlocked(Action.AUTO_AIM, "TURRET_UNREFERENCED");
       assertRawSetpointsZero(ConfiguredCanHardware.TURRET_ID);
       setMaintenanceButton(ConfiguredOperatorControls.MAINTENANCE_AUTO_AIM, false);
       pump(activeContainer, 3);
+      assertActionStopped(Action.AUTO_AIM);
+      assertRawControllersStopped(ConfiguredCanHardware.TURRET_ID);
 
       // A repaired ID32 may receive one isolated 3% pulse, but the known-stall block remains.
       prepareFeederDiagnosticSelection();
@@ -311,30 +382,18 @@ class RobotContainerSimulationIntegrationTest {
           simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe();
       assertEquals(0.0, feederPulse.velocity(), "raw echo must not invent feeder motion");
       assertEquals(0.0, feederPulse.motorCurrentAmps(), "raw echo must not invent feeder current");
-      keepHeartbeatWithoutScheduler(activeContainer, 0.10);
+      assertTrue(
+          awaitWithoutScheduler(
+              3.0,
+              activeContainer,
+              () -> !ProcessOutputSafety.isOutputAuthorized()
+                  && rawControllerStopped(ConfiguredCanHardware.FEEDER_ID)),
+          () -> "heartbeats without scheduler completion kept ID32 authorized: safety="
+              + activeContainer.getOutputSafetySnapshot()
+              + " raw=" + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
       assertEquals(
-          0.03,
-          simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint(),
-          1e-9,
-          "the watchdog stopped the pulse before its bounded 0.35-second window");
-      assertTrue(awaitWithoutScheduler(3.0, activeContainer, () -> SmartDashboard.getString(
-          "Feeder/Manual Retest Guard", "")
-              .contains("WATCHDOG_DEADLINE_STOP_REQUESTED")
-          && simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint() == 0.0),
-          () -> SmartDashboard.getString("Feeder/Manual Retest Guard", "MISSING_GUARD"));
-      assertTrue(await(3.0, activeContainer, () -> rawControllerStopped(
-          ConfiguredCanHardware.FEEDER_ID)),
-          () -> "independent feeder watchdog did not stop ID32: "
-              + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
-      assertTrue(await(5.0, activeContainer, () -> SmartDashboard.getString(
-          ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY, "")
-              .contains("INTERLOCK_RELEASED_STOP_CONFIRMED")),
-          () -> SmartDashboard.getString(
-              ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY, "MISSING_STATUS"));
-      assertTrue(await(3.0, activeContainer, () -> rawControllerStopped(
-          ConfiguredCanHardware.FEEDER_ID)),
-          () -> "manual feeder retest did not stop ID32: "
-              + simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe());
+          "ROBOT_LOOP_HEARTBEAT_EXPIRED",
+          activeContainer.getOutputSafetySnapshot().schedulerFaultReason());
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, false);
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, false);
 
@@ -586,10 +645,10 @@ class RobotContainerSimulationIntegrationTest {
           "SPARK_ID37_FLYWHEEL_FOLLOWER_PAIR", "INCONCLUSIVE_NO_MOTION");
       assertHardwareSelfTestResult("SPARK_ID37_FOLLOWER_ISOLATED", "INCONCLUSIVE_NO_MOTION");
 
-      assertHardwareSelfTestReachedSimulationTerminalAssessment("SWERVE_FORWARD", false);
-      assertHardwareSelfTestReachedSimulationTerminalAssessment("SWERVE_STRAFE", true);
-      assertHardwareSelfTestReachedSimulationTerminalAssessment("SWERVE_ROTATE", false);
-      swerveObservation.assertEveryDriveMotorReceivedEachStage();
+      swerveObservation.assertEveryMotorReceivedEachStage();
+      assertHardwareSelfTestReachedSimulationTerminalAssessment("SWERVE_FORWARD");
+      assertHardwareSelfTestReachedSimulationTerminalAssessment("SWERVE_STRAFE");
+      assertHardwareSelfTestReachedSimulationTerminalAssessment("SWERVE_ROTATE");
 
       assertHardwareSelfTestStopConfirmed("GLOBAL_START");
       assertHardwareSelfTestStopConfirmed("SPARK_ID31_INTAKE_ROLLER_SPARK_STOP");
@@ -650,6 +709,351 @@ class RobotContainerSimulationIntegrationTest {
     }
   }
 
+  @Test
+  void normalDriveSeedWheelLockAndJumpBumpReachCtreOutputsAndStop()
+      throws InterruptedException {
+    CommandScheduler scheduler = CommandScheduler.getInstance();
+    RobotContainer container = null;
+    configureDisabledDriverStation();
+    try {
+      SparkMAXContainer.configureProcessDefaults();
+      container = new RobotContainer();
+      RobotContainer activeContainer = container;
+
+      assertTrue(
+          await(12.0, activeContainer, () -> ConfiguredCanHardware.sparkDeviceIds().stream()
+              .allMatch(id -> SparkMAXContainer.getDiagnosticSnapshotForId(id)
+                  .map(snapshot -> snapshot.ready())
+                  .orElse(false))),
+          SparkMAXContainer::getDeviceAvailabilitySummary);
+      assertOutputSafetyReadyDisabled(activeContainer);
+
+      // A stick held across enable must never inherit the previous neutral authorization.
+      setDriverAxis(1, 0.65);
+      enableTeleop(false);
+      assertOutputSafetyArmed(activeContainer);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsBlocked(Action.DRIVE, "RELEASE_TO_ARM")),
+          () -> actionSummary(Action.DRIVE));
+      Map<Integer, Map<Metric, Double>> heldEnableBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      assertTrue(
+          await(3.0, activeContainer, () -> allSwerveMotorsHaveFreshZeroOutput(
+              activeContainer, heldEnableBaseline)),
+          () -> swerveOutputSummary(activeContainer, heldEnableBaseline));
+
+      // One neutral sample arms the shared gate; only a later fresh deflection may drive.
+      setDriverAxis(1, 0.0);
+      assertTrue(
+          await(2.0, activeContainer, () -> actionIsStopped(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      setDriverAxis(1, 0.65);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsActive(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      Map<Integer, Map<Metric, Double>> driveBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      SwerveDriveState forwardStateBaseline = activeContainer.getSwerveDriveStateCopy();
+      assertTrue(
+          await(4.0, activeContainer, () -> actionIsActive(Action.DRIVE)
+              && configuredDriveIdsHaveFreshNonzeroOutput(activeContainer, driveBaseline)
+              && hasPostRequestTargetPattern(
+                  activeContainer, forwardStateBaseline, TargetPattern.NEGATIVE_X_TRANSLATION)),
+          () -> actionSummary(Action.DRIVE) + " "
+              + swerveOutputSummary(activeContainer, driveBaseline) + " "
+              + swerveStateSummary(activeContainer, forwardStateBaseline));
+
+      // Exercise every normal drive axis independently. The post-request module target vectors are
+      // converted back through the configured Tuner kinematics, so swapped axes or signs fail even
+      // if all eight Talons still happen to receive fresh output frames.
+      setDriverAxis(1, 0.0);
+      assertTrue(await(2.0, activeContainer, () -> actionIsStopped(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      setDriverAxis(0, 0.55);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsActive(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      Map<Integer, Map<Metric, Double>> strafeBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      SwerveDriveState strafeStateBaseline = activeContainer.getSwerveDriveStateCopy();
+      assertTrue(
+          await(4.0, activeContainer, () -> actionIsActive(Action.DRIVE)
+              && configuredDriveIdsHaveFreshNonzeroOutput(activeContainer, strafeBaseline)
+              && configuredSteerIdsHaveFreshNonzeroOutput(activeContainer, strafeBaseline)
+              && hasPostRequestTargetPattern(
+                  activeContainer, strafeStateBaseline, TargetPattern.NEGATIVE_Y_TRANSLATION)),
+          () -> actionSummary(Action.DRIVE) + " "
+              + swerveOutputSummary(activeContainer, strafeBaseline) + " "
+              + swerveStateSummary(activeContainer, strafeStateBaseline));
+
+      setDriverAxis(0, 0.0);
+      assertTrue(await(2.0, activeContainer, () -> actionIsStopped(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      setDriverAxis(2, 0.50);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsActive(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      Map<Integer, Map<Metric, Double>> rotationBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      SwerveDriveState rotationStateBaseline = activeContainer.getSwerveDriveStateCopy();
+      assertTrue(
+          await(4.0, activeContainer, () -> actionIsActive(Action.DRIVE)
+              && configuredDriveIdsHaveFreshNonzeroOutput(activeContainer, rotationBaseline)
+              && configuredSteerIdsHaveFreshNonzeroOutput(activeContainer, rotationBaseline)
+              && hasPostRequestTargetPattern(
+                  activeContainer, rotationStateBaseline, TargetPattern.NEGATIVE_ROTATION)),
+          () -> actionSummary(Action.DRIVE) + " "
+              + swerveOutputSummary(activeContainer, rotationBaseline) + " "
+              + swerveStateSummary(activeContainer, rotationStateBaseline));
+
+      setDriverAxis(2, 0.0);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsStopped(Action.DRIVE)
+              && drivetrainIsSettled(activeContainer.getSwerveDriveStateCopy())),
+          () -> actionSummary(Action.DRIVE) + " state="
+              + swerveStateSummary(activeContainer, rotationStateBaseline));
+
+      // Seed is a pose operation, not a motor-output claim. It must preserve translation and the
+      // raw gyro heading while resetting only the field-relative pose rotation on a later DAQ.
+      SwerveDriveState seedInjectionBaseline = activeContainer.getSwerveDriveStateCopy();
+      try (SimYawOverride seedYaw = new SimYawOverride(
+          activeContainer, rawYawForPoseHeading(seedInjectionBaseline, 0.20))) {
+        assertTrue(
+            await(3.0, activeContainer, () -> hasPostRequestHeadingNear(
+                activeContainer, seedInjectionBaseline, 0.20, 0.02)),
+            () -> "simulation Pigeon did not reach the deterministic pre-seed heading: "
+                + swerveStateSummary(activeContainer, seedInjectionBaseline));
+        SwerveDriveState seedPoseBaseline = activeContainer.getSwerveDriveStateCopy();
+        assertTrue(Math.abs(seedPoseBaseline.Pose.getRotation().getRadians()) > 0.10,
+            () -> "pre-seed heading was not nonzero: " + describeState(seedPoseBaseline));
+        setDriverButton(ConfiguredOperatorControls.DRIVER_SEED_FIELD, true);
+        assertTrue(
+            await(3.0, activeContainer, () -> actionIsCompleted(
+                Action.SEED_FIELD, "HEADING_SEED_API_RETURNED_NOT_POSE_PROOF")),
+            () -> actionSummary(Action.SEED_FIELD));
+        SwerveDriveState seedCompletionBaseline = activeContainer.getSwerveDriveStateCopy();
+        assertTrue(
+            await(3.0, activeContainer, () -> seedAppliedToPostDaqState(
+                activeContainer.getSwerveDriveStateCopy(),
+                seedPoseBaseline,
+                seedCompletionBaseline)),
+            () -> actionSummary(Action.SEED_FIELD) + " requestReference="
+                + describeState(seedPoseBaseline) + " "
+                + swerveStateSummary(activeContainer, seedCompletionBaseline));
+        setDriverButton(ConfiguredOperatorControls.DRIVER_SEED_FIELD, false);
+        pump(activeContainer, 3);
+      }
+
+      setDriverAxis(1, 0.65);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsActive(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      Map<Integer, Map<Metric, Double>> preSeedDriveBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      assertTrue(
+          await(4.0, activeContainer, () -> actionIsActive(Action.DRIVE)
+              && configuredDriveIdsHaveFreshNonzeroOutput(
+                  activeContainer, preSeedDriveBaseline)),
+          () -> actionSummary(Action.DRIVE) + " "
+              + swerveOutputSummary(activeContainer, preSeedDriveBaseline));
+
+      // Seeding changes the field-relative frame. The held stick must be neutralized and must not
+      // restart in the new frame until it has been released and deflected again.
+      setDriverButton(ConfiguredOperatorControls.DRIVER_SEED_FIELD, true);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsCompleted(
+              Action.SEED_FIELD, "HEADING_SEED_API_RETURNED_NOT_POSE_PROOF")),
+          () -> actionSummary(Action.SEED_FIELD));
+      Map<Integer, Map<Metric, Double>> seedBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsBlocked(Action.DRIVE, "RELEASE_TO_ARM")
+              && allSwerveMotorsHaveFreshZeroOutput(activeContainer, seedBaseline)),
+          () -> actionSummary(Action.DRIVE) + " "
+              + swerveOutputSummary(activeContainer, seedBaseline));
+      setDriverButton(ConfiguredOperatorControls.DRIVER_SEED_FIELD, false);
+      pump(activeContainer, 3);
+      assertTrue(actionIsBlocked(Action.DRIVE, "RELEASE_TO_ARM"),
+          () -> actionSummary(Action.DRIVE));
+
+      setDriverAxis(1, 0.0);
+      assertTrue(
+          await(2.0, activeContainer, () -> actionIsStopped(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      setDriverAxis(1, 0.55);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsActive(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      Map<Integer, Map<Metric, Double>> reseededDriveBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      assertTrue(
+          await(4.0, activeContainer, () -> actionIsActive(Action.DRIVE)
+              && configuredDriveIdsHaveFreshNonzeroOutput(
+                  activeContainer, reseededDriveBaseline)),
+          () -> actionSummary(Action.DRIVE) + " "
+              + swerveOutputSummary(activeContainer, reseededDriveBaseline));
+
+      // Touchpad has explicit priority over R3. Every steer Talon must receive a fresh brake
+      // response, while the held R3 cannot auto-start after Touchpad is released.
+      setDriverAxis(1, 0.0);
+      assertTrue(
+          await(2.0, activeContainer, () -> actionIsStopped(Action.DRIVE)),
+          () -> actionSummary(Action.DRIVE));
+      setDriverButton(ConfiguredOperatorControls.DRIVER_WHEEL_LOCK, true);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP, true);
+      assertTrue(
+          await(4.0, activeContainer, () -> actionIsActive(
+              Action.WHEEL_LOCK, "BRAKE_REQUEST_SUBMITTED_NOT_MOTION_PROOF")
+              && actionIsBlocked(Action.JUMP_BUMP, "WHEEL_LOCK_PRIORITY")),
+          () -> actionSummary(Action.WHEEL_LOCK) + " " + actionSummary(Action.JUMP_BUMP));
+      Map<Integer, Map<Metric, Double>> wheelLockBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      SwerveDriveState wheelLockStateBaseline = activeContainer.getSwerveDriveStateCopy();
+      assertTrue(
+          await(4.0, activeContainer, () -> actionIsActive(
+              Action.WHEEL_LOCK, "BRAKE_REQUEST_SUBMITTED_NOT_MOTION_PROOF")
+              && actionIsBlocked(Action.JUMP_BUMP, "WHEEL_LOCK_PRIORITY")
+              && configuredSteerIdsHaveFreshNonzeroOutput(
+                  activeContainer, wheelLockBaseline)
+              && hasPostRequestXLockTargets(activeContainer, wheelLockStateBaseline)),
+          () -> actionSummary(Action.WHEEL_LOCK) + " " + actionSummary(Action.JUMP_BUMP)
+              + " " + swerveOutputSummary(activeContainer, wheelLockBaseline) + " "
+              + swerveStateSummary(activeContainer, wheelLockStateBaseline));
+
+      setDriverButton(ConfiguredOperatorControls.DRIVER_WHEEL_LOCK, false);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsStopped(Action.WHEEL_LOCK)
+              && actionIsBlocked(Action.JUMP_BUMP, "WHEEL_LOCK_PRIORITY")),
+          () -> actionSummary(Action.WHEEL_LOCK) + " " + actionSummary(Action.JUMP_BUMP));
+      Map<Integer, Map<Metric, Double>> priorityReleaseBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsBlocked(
+              Action.JUMP_BUMP, "WHEEL_LOCK_PRIORITY")
+              && configuredDriveIdsHaveFreshZeroOutput(
+                  activeContainer, priorityReleaseBaseline)),
+          () -> actionSummary(Action.JUMP_BUMP) + " "
+              + swerveOutputSummary(activeContainer, priorityReleaseBaseline));
+
+      // Give Jump Bump an unambiguous starting quadrant. The CTRE command-output model above proves
+      // rotation requests, while this read-only simulation seam sets a deterministic Pigeon heading
+      // so the snap target and convergence can be asserted without depending on simulated friction.
+      setDriverButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP, false);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsStopped(Action.JUMP_BUMP)),
+          () -> actionSummary(Action.JUMP_BUMP));
+      SwerveDriveState preJumpHeadingBaseline = activeContainer.getSwerveDriveStateCopy();
+      try (SimYawOverride jumpYaw = new SimYawOverride(
+          activeContainer, rawYawForPoseHeading(preJumpHeadingBaseline, 0.30))) {
+        assertTrue(
+            await(3.0, activeContainer, () -> hasPostRequestHeadingNear(
+                activeContainer, preJumpHeadingBaseline, 0.30, 0.02)),
+            () -> "simulation Pigeon heading did not reach the pre-snap value: "
+                + swerveStateSummary(activeContainer, preJumpHeadingBaseline));
+
+        SwerveDriveState jumpStartState = activeContainer.getSwerveDriveStateCopy();
+        assertTrue(jumpStartState != null && jumpStartState.Pose != null,
+            () -> describeState(jumpStartState));
+        double jumpStartHeading = jumpStartState.Pose.getRotation().getRadians();
+        assertTrue(Double.isFinite(jumpStartHeading), () -> describeState(jumpStartState));
+        assertTrue(distanceFromBumpSelectionBoundary(jumpStartHeading) > 0.12,
+            () -> "Jump Bump start remained too close to a quadrant boundary: "
+                + describeState(jumpStartState));
+        double expectedJumpHeading = closestDiagonalHeading(jumpStartHeading);
+        assertTrue(Math.abs(moduloAngleError(expectedJumpHeading, jumpStartHeading)) > 0.12,
+            () -> "Jump Bump start did not leave a meaningful snap error: start="
+                + jumpStartHeading + " expected=" + expectedJumpHeading);
+
+        // A completely new R3 press may run Jump Bump. Capture both baselines only after ACTIVE,
+        // then require later output/DAQ progress and convergence while R3 remains held.
+        startJumpBumpAfterAtMostOneRecoveredDesktopHealthTransient(activeContainer);
+        Map<Integer, Map<Metric, Double>> jumpBaseline =
+            captureSwerveOutputBaseline(activeContainer);
+        SwerveDriveState jumpStateBaseline = activeContainer.getSwerveDriveStateCopy();
+        assertTrue(
+            await(4.0, activeContainer, () -> actionIsActive(
+                Action.JUMP_BUMP, "BUMP_HEADING_API_RETURNED_NOT_REQUEST_OR_MOTION_PROOF")
+                && configuredDriveIdsHaveFreshNonzeroOutput(activeContainer, jumpBaseline)
+                && hasPostRequestRotationToward(
+                    activeContainer,
+                    jumpStateBaseline,
+                    jumpStartHeading,
+                    expectedJumpHeading)),
+            () -> actionSummary(Action.JUMP_BUMP) + " "
+                + swerveOutputSummary(activeContainer, jumpBaseline) + " "
+                + swerveStateSummary(activeContainer, jumpStateBaseline));
+        jumpYaw.setRawYaw(rawYawForPoseHeading(
+            activeContainer.getSwerveDriveStateCopy(), expectedJumpHeading));
+        assertTrue(
+            await(3.0, activeContainer, () -> actionIsActive(
+                Action.JUMP_BUMP, "BUMP_HEADING_API_RETURNED_NOT_REQUEST_OR_MOTION_PROOF")
+                && headingConvergedToPostRequestState(
+                    activeContainer.getSwerveDriveStateCopy(),
+                    jumpStateBaseline,
+                    expectedJumpHeading,
+                    Math.toRadians(3.0))),
+            () -> "R3-held Jump Bump did not converge modulo 2pi: expected="
+                + expectedJumpHeading + " " + actionSummary(Action.JUMP_BUMP) + " "
+                + swerveStateSummary(activeContainer, jumpStateBaseline));
+      }
+
+      setDriverButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP, false);
+      assertTrue(
+          await(3.0, activeContainer, () -> actionIsStopped(Action.JUMP_BUMP)),
+          () -> actionSummary(Action.JUMP_BUMP));
+      Map<Integer, Map<Metric, Double>> jumpReleaseBaseline =
+          captureSwerveOutputBaseline(activeContainer);
+      assertTrue(
+          await(3.0, activeContainer, () -> configuredDriveIdsHaveFreshZeroOutput(
+              activeContainer, jumpReleaseBaseline)),
+          () -> actionSummary(Action.JUMP_BUMP) + " "
+              + swerveOutputSummary(activeContainer, jumpReleaseBaseline));
+
+      // Enabled neutral driving may retain a small steer-angle hold. Disabled OutputSafety is the
+      // authoritative all-eight-motor neutral barrier and must still complete after the sequence.
+      enableDisabled();
+      assertOutputSafetyReadyDisabled(activeContainer);
+    } finally {
+      try {
+        setDriverAxis(0, 0.0);
+        setDriverAxis(1, 0.0);
+        setDriverAxis(2, 0.0);
+        setDriverButton(ConfiguredOperatorControls.DRIVER_SEED_FIELD, false);
+        setDriverButton(ConfiguredOperatorControls.DRIVER_WHEEL_LOCK, false);
+        setDriverButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP, false);
+        enableDisabled();
+        if (container != null) {
+          scheduler.cancelAll();
+          container.stopAll();
+          int[] ids = ConfiguredCanHardware.sparkDeviceIds().stream().mapToInt(Integer::intValue)
+              .toArray();
+          OutputStopBatch finalStop = SparkMAXContainer.requestOutputStops(ids);
+          RobotContainer closingContainer = container;
+          assertTrue(await(5.0, closingContainer, () -> finalStop.snapshot().confirmed()),
+              () -> finalStop.snapshot().summary());
+        }
+      } finally {
+        if (container != null) {
+          container.close();
+          container.close();
+        }
+        scheduler.cancelAll();
+        scheduler.getDefaultButtonLoop().clear();
+        scheduler.setActiveButtonLoop(scheduler.getDefaultButtonLoop());
+        scheduler.unregisterAllSubsystems();
+        scheduler.clearComposedCommands();
+        AutoBuilder.resetForTesting();
+        NamedCommands.clearAll();
+        try {
+          assertTrue(awaitCleanup(5.0), "SPARK simulation registry did not quiesce");
+        } finally {
+          DriverStationSim.resetData();
+          DriverStationSim.notifyNewData();
+        }
+      }
+    }
+  }
+
   private static void assertHardwareSelfTestResult(String target, String expected) {
     assertEquals(
         expected,
@@ -658,8 +1062,7 @@ class RobotContainerSimulationIntegrationTest {
         () -> hardwareSelfTestSummary("unexpected result for " + target));
   }
 
-  private static void assertHardwareSelfTestReachedSimulationTerminalAssessment(
-      String target, boolean allowRecoveredDesktopConnectivityTransient) {
+  private static void assertHardwareSelfTestReachedSimulationTerminalAssessment(String target) {
     String result = SmartDashboard.getString(
         "Hardware Self-Test/" + target + "/Motion Result", "MISSING");
     if (result.equals("PASS_OBSERVED") || result.equals("INCONCLUSIVE_NO_MOTION")) {
@@ -667,17 +1070,10 @@ class RobotContainerSimulationIntegrationTest {
     }
     String reason = SmartDashboard.getString(
         "Hardware Self-Test/" + target + "/Reason", "MISSING");
-    // On the Linux Phoenix desktop backend only, strafe has exhibited one aggregate-readiness
-    // transition even though all 13 per-device snapshots recover and all eight Talons produce
-    // post-baseline output. Production correctly keeps FAIL_NOT_READY; this narrow allowance must
-    // not turn a persistent readiness/evidence failure in any stage into a green E2E.
     assertTrue(
-        allowRecoveredDesktopConnectivityTransient
-            && result.equals("FAIL_NOT_READY")
-            && reason.equals(
-                "DEVICE_CONNECTIVITY_LOST_DURING_STAGE_RECOVERED_BEFORE_FINAL_ASSESSMENT"),
+        result.equals("PASS_OBSERVED") || result.equals("INCONCLUSIVE_NO_MOTION"),
         () -> hardwareSelfTestSummary(
-            target + " did not produce valid terminal evidence reason=" + reason));
+        target + " did not produce valid terminal evidence reason=" + reason));
   }
 
   private static void assertHardwareSelfTestStopConfirmed(String stopName) {
@@ -787,7 +1183,7 @@ class RobotContainerSimulationIntegrationTest {
       }
     }
 
-    void assertEveryDriveMotorReceivedEachStage() {
+    void assertEveryMotorReceivedEachStage() {
       for (String stage : STAGES) {
         assertEquals(
             MOTOR_IDS,
@@ -869,6 +1265,435 @@ class RobotContainerSimulationIntegrationTest {
         && Math.abs(follower.velocity() + expected) < 1e-9;
   }
 
+  private enum TargetPattern {
+    NEGATIVE_X_TRANSLATION,
+    NEGATIVE_Y_TRANSLATION,
+    NEGATIVE_ROTATION,
+    POSITIVE_ROTATION
+  }
+
+  private static boolean hasPostRequestTargetPattern(
+      RobotContainer container, SwerveDriveState baseline, TargetPattern pattern) {
+    SwerveDriveState state = container.getSwerveDriveStateCopy();
+    if (!isPostRequestState(state, baseline) || !hasCompleteModuleTargets(state)) {
+      return false;
+    }
+    ChassisSpeeds target = SWERVE_KINEMATICS.toChassisSpeeds(state.ModuleTargets);
+    if (!Double.isFinite(target.vxMetersPerSecond)
+        || !Double.isFinite(target.vyMetersPerSecond)
+        || !Double.isFinite(target.omegaRadiansPerSecond)) {
+      return false;
+    }
+    double maximumTranslation = TunerConstants.kSpeedAt12Volts.baseUnitMagnitude()
+        * DebugConstants.MAX_SWERVE_TRANSLATION_FRACTION + 1e-6;
+    double maximumRotation = DebugConstants.MAX_SWERVE_ROTATION_RADIANS_PER_SECOND + 1e-6;
+    boolean withinFixedSafetyCap = Math.hypot(
+        target.vxMetersPerSecond, target.vyMetersPerSecond) <= maximumTranslation
+        && Math.abs(target.omegaRadiansPerSecond) <= maximumRotation;
+    return withinFixedSafetyCap && switch (pattern) {
+      case NEGATIVE_X_TRANSLATION -> target.vxMetersPerSecond < -0.02
+          && Math.abs(target.vyMetersPerSecond) <= 0.005
+          && Math.abs(target.omegaRadiansPerSecond) <= 0.01;
+      case NEGATIVE_Y_TRANSLATION -> target.vyMetersPerSecond < -0.02
+          && Math.abs(target.vxMetersPerSecond) <= 0.005
+          && Math.abs(target.omegaRadiansPerSecond) <= 0.01;
+      case NEGATIVE_ROTATION -> target.omegaRadiansPerSecond < -0.01
+          && Math.abs(target.vxMetersPerSecond) <= 0.005
+          && Math.abs(target.vyMetersPerSecond) <= 0.005;
+      case POSITIVE_ROTATION -> target.omegaRadiansPerSecond > 0.005
+          && Math.abs(target.vxMetersPerSecond) <= 0.005
+          && Math.abs(target.vyMetersPerSecond) <= 0.005;
+    };
+  }
+
+  private static boolean hasPostRequestXLockTargets(
+      RobotContainer container, SwerveDriveState baseline) {
+    SwerveDriveState state = container.getSwerveDriveStateCopy();
+    if (!isPostRequestState(state, baseline) || !hasCompleteModuleTargets(state)) {
+      return false;
+    }
+    for (int index = 0; index < state.ModuleTargets.length; index++) {
+      SwerveModuleState target = state.ModuleTargets[index];
+      Translation2d location = SWERVE_MODULE_LOCATIONS[index];
+      double inwardAngle = Math.atan2(-location.getY(), -location.getX());
+      double lineAngleError = Math.IEEEremainder(
+          target.angle.getRadians() - inwardAngle, Math.PI);
+      if (Math.abs(target.speedMetersPerSecond) > 1e-6
+          || Math.abs(lineAngleError) > Math.toRadians(2.0)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean hasPostRequestHeadingNear(
+      RobotContainer container,
+      SwerveDriveState baseline,
+      double expectedHeadingRadians,
+      double toleranceRadians) {
+    SwerveDriveState state = container.getSwerveDriveStateCopy();
+    return isPostRequestState(state, baseline)
+        && state.Pose != null
+        && Double.isFinite(state.Pose.getRotation().getRadians())
+        && Math.abs(moduloAngleError(
+            expectedHeadingRadians,
+            state.Pose.getRotation().getRadians())) <= toleranceRadians;
+  }
+
+  private static boolean hasPostRequestRotationToward(
+      RobotContainer container,
+      SwerveDriveState baseline,
+      double requestHeadingRadians,
+      double expectedHeadingRadians) {
+    SwerveDriveState state = container.getSwerveDriveStateCopy();
+    if (!isPostRequestState(state, baseline) || !hasCompleteModuleTargets(state)) {
+      return false;
+    }
+    ChassisSpeeds target = SWERVE_KINEMATICS.toChassisSpeeds(state.ModuleTargets);
+    double expectedError = moduloAngleError(expectedHeadingRadians, requestHeadingRadians);
+    return Double.isFinite(target.omegaRadiansPerSecond)
+        && Math.abs(target.vxMetersPerSecond) <= 0.005
+        && Math.abs(target.vyMetersPerSecond) <= 0.005
+        && Math.abs(target.omegaRadiansPerSecond) > 0.005
+        && target.omegaRadiansPerSecond * expectedError > 0.0;
+  }
+
+  private static boolean seedAppliedToPostDaqState(
+      SwerveDriveState state,
+      SwerveDriveState requestReference,
+      SwerveDriveState completionBaseline) {
+    return requestReference != null
+        && requestReference.Pose != null
+        && requestReference.RawHeading != null
+        && isPostRequestState(state, completionBaseline)
+        && state.Pose != null
+        && state.RawHeading != null
+        && Math.abs(state.Pose.getRotation().getRadians()) <= 0.01
+        && state.Pose.getTranslation().getDistance(
+            requestReference.Pose.getTranslation()) <= 0.01
+        && Math.abs(Math.IEEEremainder(
+            state.RawHeading.minus(requestReference.RawHeading).getRadians(),
+            2.0 * Math.PI)) <= 0.01;
+  }
+
+  private static boolean headingConvergedToPostRequestState(
+      SwerveDriveState state,
+      SwerveDriveState baseline,
+      double expectedHeadingRadians,
+      double toleranceRadians) {
+    return isPostRequestState(state, baseline)
+        && state.Pose != null
+        && Double.isFinite(expectedHeadingRadians)
+        && Double.isFinite(toleranceRadians)
+        && toleranceRadians >= 0.0
+        && Math.abs(moduloAngleError(
+            expectedHeadingRadians,
+            state.Pose.getRotation().getRadians())) <= toleranceRadians;
+  }
+
+  private static double closestDiagonalHeading(double currentHeadingRadians) {
+    if (!Double.isFinite(currentHeadingRadians)) {
+      return Double.NaN;
+    }
+    double wrappedHeading = Math.IEEEremainder(currentHeadingRadians, 2.0 * Math.PI);
+    double quadrantStart = Math.floor(wrappedHeading / (Math.PI / 2.0)) * (Math.PI / 2.0);
+    return Math.IEEEremainder(quadrantStart + Math.PI / 4.0, 2.0 * Math.PI);
+  }
+
+  private static double distanceFromBumpSelectionBoundary(double headingRadians) {
+    return Math.abs(Math.IEEEremainder(headingRadians, Math.PI / 2.0));
+  }
+
+  private static double moduloAngleError(double expectedRadians, double actualRadians) {
+    return Math.IEEEremainder(expectedRadians - actualRadians, 2.0 * Math.PI);
+  }
+
+  private static double rawYawForPoseHeading(
+      SwerveDriveState referenceState, double requestedPoseHeadingRadians) {
+    if (referenceState == null
+        || referenceState.Pose == null
+        || referenceState.RawHeading == null
+        || !Double.isFinite(requestedPoseHeadingRadians)) {
+      return Double.NaN;
+    }
+    double poseHeading = referenceState.Pose.getRotation().getRadians();
+    double rawHeading = referenceState.RawHeading.getRadians();
+    if (!Double.isFinite(poseHeading) || !Double.isFinite(rawHeading)) {
+      return Double.NaN;
+    }
+    return Math.IEEEremainder(
+        rawHeading + requestedPoseHeadingRadians - poseHeading,
+        2.0 * Math.PI);
+  }
+
+  private static final class SimYawOverride implements AutoCloseable {
+    private final RobotContainer container;
+    private final Notifier notifier;
+    private volatile double rawYawRadians;
+
+    SimYawOverride(RobotContainer container, double initialRawYawRadians) {
+      this.container = container;
+      if (!setRawYaw(initialRawYawRadians)) {
+        throw new IllegalStateException("simulation Pigeon rejected the yaw override");
+      }
+      notifier = new Notifier(this::apply);
+      notifier.startPeriodic(0.001);
+    }
+
+    boolean setRawYaw(double requestedRawYawRadians) {
+      if (!Double.isFinite(requestedRawYawRadians)) {
+        return false;
+      }
+      rawYawRadians = Math.IEEEremainder(requestedRawYawRadians, 2.0 * Math.PI);
+      return apply();
+    }
+
+    private boolean apply() {
+      try {
+        return container.setSwerveSimRawYawForTesting(rawYawRadians);
+      } catch (RuntimeException exception) {
+        return false;
+      }
+    }
+
+    @Override
+    public void close() {
+      notifier.close();
+    }
+  }
+
+  private static boolean drivetrainIsSettled(SwerveDriveState state) {
+    return state != null
+        && state.Speeds != null
+        && Math.abs(state.Speeds.vxMetersPerSecond) <= 0.02
+        && Math.abs(state.Speeds.vyMetersPerSecond) <= 0.02
+        && Math.abs(state.Speeds.omegaRadiansPerSecond) <= 0.03;
+  }
+
+  private static boolean isPostRequestState(
+      SwerveDriveState state, SwerveDriveState baseline) {
+    return state != null
+        && baseline != null
+        && Double.isFinite(state.Timestamp)
+        && Double.isFinite(baseline.Timestamp)
+        && state.Timestamp > baseline.Timestamp
+        && state.SuccessfulDaqs > baseline.SuccessfulDaqs;
+  }
+
+  private static boolean hasCompleteModuleTargets(SwerveDriveState state) {
+    if (state.ModuleTargets == null
+        || state.ModuleTargets.length != SWERVE_MODULE_LOCATIONS.length) {
+      return false;
+    }
+    for (SwerveModuleState target : state.ModuleTargets) {
+      if (target == null
+          || target.angle == null
+          || !Double.isFinite(target.speedMetersPerSecond)
+          || !Double.isFinite(target.angle.getRadians())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static String swerveStateSummary(
+      RobotContainer container, SwerveDriveState baseline) {
+    return "stateBaseline=" + describeState(baseline)
+        + " stateNow=" + describeState(container.getSwerveDriveStateCopy());
+  }
+
+  private static String describeState(SwerveDriveState state) {
+    if (state == null) {
+      return "null";
+    }
+    String targets = state.ModuleTargets == null
+        ? "null" : java.util.Arrays.toString(state.ModuleTargets);
+    ChassisSpeeds targetSpeeds = hasCompleteModuleTargets(state)
+        ? SWERVE_KINEMATICS.toChassisSpeeds(state.ModuleTargets) : null;
+    return "{timestamp=" + state.Timestamp
+        + ",daqs=" + state.SuccessfulDaqs
+        + ",pose=" + state.Pose
+        + ",rawHeading=" + state.RawHeading
+        + ",speeds=" + state.Speeds
+        + ",targetSpeeds=" + targetSpeeds
+        + ",targets=" + targets + "}";
+  }
+
+  private static boolean actionIsActive(Action action) {
+    return "ACTIVE".equals(SmartDashboard.getString(
+        OperatorActionEvidence.stateKey(action), "MISSING"));
+  }
+
+  private static boolean actionIsActive(Action action, String reason) {
+    return actionIsActive(action) && SmartDashboard.getString(
+        OperatorActionEvidence.reasonKey(action), "").contains(reason);
+  }
+
+  private static boolean actionIsBlocked(Action action, String reason) {
+    return "BLOCKED".equals(SmartDashboard.getString(
+        OperatorActionEvidence.stateKey(action), "MISSING"))
+        && SmartDashboard.getString(
+            OperatorActionEvidence.reasonKey(action), "").contains(reason);
+  }
+
+  private static boolean actionIsStopped(Action action) {
+    return "STOPPED".equals(SmartDashboard.getString(
+        OperatorActionEvidence.stateKey(action), "MISSING"));
+  }
+
+  private static boolean actionIsCompleted(Action action, String reason) {
+    return "COMPLETED".equals(SmartDashboard.getString(
+        OperatorActionEvidence.stateKey(action), "MISSING"))
+        && SmartDashboard.getString(
+            OperatorActionEvidence.reasonKey(action), "").contains(reason);
+  }
+
+  private static String actionSummary(Action action) {
+    return action + "=" + SmartDashboard.getString(
+        OperatorActionEvidence.stateKey(action), "MISSING") + "/"
+        + SmartDashboard.getString(
+            OperatorActionEvidence.reasonKey(action), "MISSING");
+  }
+
+  private static void startJumpBumpAfterAtMostOneRecoveredDesktopHealthTransient(
+      RobotContainer container) throws InterruptedException {
+    setDriverButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP, true);
+    if (await(4.0, container, () -> actionIsActive(
+        Action.JUMP_BUMP, "BUMP_HEADING_API_RETURNED_NOT_REQUEST_OR_MOTION_PROOF"))) {
+      return;
+    }
+
+    // Phoenix desktop status updates can invalidate aggregate readiness for one scheduler poll.
+    // Production correctly blocks and rearms on that transition. Exercise that exact recovery once
+    // instead of weakening the action assertion or treating a persistent unhealthy state as success.
+    assertTrue(
+        actionIsBlocked(Action.JUMP_BUMP, "DRIVETRAIN_UNHEALTHY"),
+        () -> actionSummary(Action.JUMP_BUMP));
+    setDriverButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP, false);
+    assertTrue(
+        await(4.0, container, () -> actionIsStopped(Action.JUMP_BUMP)
+            && everyConfiguredCtreSnapshotReady(container)),
+        () -> actionSummary(Action.JUMP_BUMP) + " snapshots="
+            + container.getSwerveDeviceEvidenceSnapshots());
+    setDriverButton(ConfiguredOperatorControls.DRIVER_JUMP_BUMP, true);
+    assertTrue(
+        await(4.0, container, () -> actionIsActive(
+            Action.JUMP_BUMP, "BUMP_HEADING_API_RETURNED_NOT_REQUEST_OR_MOTION_PROOF")),
+        () -> actionSummary(Action.JUMP_BUMP));
+  }
+
+  private static boolean everyConfiguredCtreSnapshotReady(RobotContainer container) {
+    var snapshots = container.getSwerveDeviceEvidenceSnapshots();
+    Set<Integer> readyIds = snapshots.stream()
+        .filter(snapshot -> snapshot.ready())
+        .map(CtreDeviceEvidence.Snapshot::canId)
+        .collect(java.util.stream.Collectors.toSet());
+    return readyIds.equals(Set.copyOf(ConfiguredCanHardware.ctreDeviceIds()));
+  }
+
+  private static Map<Integer, Map<Metric, Double>> captureSwerveOutputBaseline(
+      RobotContainer container) {
+    Map<Integer, Map<Metric, Double>> baseline = new LinkedHashMap<>();
+    Set<Integer> motorIds = configuredSwerveMotorIdsForNormalTest();
+    for (var snapshot : container.getSwerveDeviceEvidenceSnapshots()) {
+      if (motorIds.contains(snapshot.canId())) {
+        baseline.put(
+            snapshot.canId(),
+            Map.of(
+                Metric.DUTY_CYCLE,
+                swerveProgressTimestamp(snapshot, Metric.DUTY_CYCLE),
+                Metric.MOTOR_VOLTAGE_VOLTS,
+                swerveProgressTimestamp(snapshot, Metric.MOTOR_VOLTAGE_VOLTS)));
+      }
+    }
+    return baseline;
+  }
+
+  private static boolean configuredDriveIdsHaveFreshNonzeroOutput(
+      RobotContainer container, Map<Integer, Map<Metric, Double>> baseline) {
+    return swerveOutputIdsMatching(container, baseline, false).containsAll(
+        ConfiguredCanHardware.swerveDriveIds());
+  }
+
+  private static boolean configuredSteerIdsHaveFreshNonzeroOutput(
+      RobotContainer container, Map<Integer, Map<Metric, Double>> baseline) {
+    return swerveOutputIdsMatching(container, baseline, false).containsAll(
+        ConfiguredCanHardware.swerveSteerIds());
+  }
+
+  private static boolean configuredDriveIdsHaveFreshZeroOutput(
+      RobotContainer container, Map<Integer, Map<Metric, Double>> baseline) {
+    return swerveOutputIdsMatching(container, baseline, true).containsAll(
+        ConfiguredCanHardware.swerveDriveIds());
+  }
+
+  private static boolean allSwerveMotorsHaveFreshZeroOutput(
+      RobotContainer container, Map<Integer, Map<Metric, Double>> baseline) {
+    return swerveOutputIdsMatching(container, baseline, true).equals(
+        configuredSwerveMotorIdsForNormalTest());
+  }
+
+  private static Set<Integer> swerveOutputIdsMatching(
+      RobotContainer container,
+      Map<Integer, Map<Metric, Double>> baseline,
+      boolean requireZero) {
+    Set<Integer> matched = new LinkedHashSet<>();
+    Set<Integer> motorIds = configuredSwerveMotorIdsForNormalTest();
+    for (var snapshot : container.getSwerveDeviceEvidenceSnapshots()) {
+      if (!motorIds.contains(snapshot.canId())) {
+        continue;
+      }
+      Map<Metric, Double> before = baseline.get(snapshot.canId());
+      if (before == null
+          || !swerveOutputAdvanced(snapshot, Metric.DUTY_CYCLE, before)
+          || !swerveOutputAdvanced(snapshot, Metric.MOTOR_VOLTAGE_VOLTS, before)) {
+        continue;
+      }
+      double duty = snapshot.value(Metric.DUTY_CYCLE).orElse(Double.NaN);
+      double voltage = snapshot.value(Metric.MOTOR_VOLTAGE_VOLTS).orElse(Double.NaN);
+      if (!Double.isFinite(duty) || !Double.isFinite(voltage)) {
+        continue;
+      }
+      boolean matches = requireZero
+          ? Math.abs(duty) <= 0.01 && Math.abs(voltage) <= 0.25
+          : Math.abs(duty) > 1e-4 || Math.abs(voltage) > 1e-3;
+      if (matches) {
+        matched.add(snapshot.canId());
+      }
+    }
+    return matched;
+  }
+
+  private static boolean swerveOutputAdvanced(
+      CtreDeviceEvidence.Snapshot snapshot,
+      Metric metric,
+      Map<Metric, Double> baseline) {
+    double before = baseline.getOrDefault(metric, Double.NaN);
+    double after = swerveProgressTimestamp(snapshot, metric);
+    return Double.isFinite(before) && Double.isFinite(after) && after > before;
+  }
+
+  private static double swerveProgressTimestamp(
+      CtreDeviceEvidence.Snapshot snapshot, Metric metric) {
+    return snapshot.observations().stream()
+        .filter(observation -> observation.metric() == metric)
+        .filter(CtreDeviceEvidence.SignalObservation::fresh)
+        .mapToDouble(CtreDeviceEvidence.SignalObservation::progressTimestampSeconds)
+        .findFirst()
+        .orElse(Double.NaN);
+  }
+
+  private static Set<Integer> configuredSwerveMotorIdsForNormalTest() {
+    Set<Integer> ids = new LinkedHashSet<>(ConfiguredCanHardware.swerveDriveIds());
+    ids.addAll(ConfiguredCanHardware.swerveSteerIds());
+    return Set.copyOf(ids);
+  }
+
+  private static String swerveOutputSummary(
+      RobotContainer container, Map<Integer, Map<Metric, Double>> baseline) {
+    return "baseline=" + baseline + " snapshots=" + container.getSwerveDeviceEvidenceSnapshots();
+  }
+
   private static void assertPairRawStopped() {
     assertTrue(pairRawStopped(), () -> pairSummary("SPARK pair remained nonzero"));
   }
@@ -882,6 +1707,15 @@ class RobotContainerSimulationIntegrationTest {
             .contains(expectedReason),
         () -> action + " reason="
             + SmartDashboard.getString(OperatorActionEvidence.reasonKey(action), "MISSING"));
+  }
+
+  private static void assertActionStopped(Action action) {
+    assertEquals(
+        "STOPPED",
+        SmartDashboard.getString(OperatorActionEvidence.stateKey(action), "MISSING"));
+    assertEquals(
+        "INPUT_RELEASED",
+        SmartDashboard.getString(OperatorActionEvidence.reasonKey(action), "MISSING"));
   }
 
   private static void assertRawSetpointsZero(int... canIds) {
@@ -978,21 +1812,14 @@ class RobotContainerSimulationIntegrationTest {
     return condition.getAsBoolean();
   }
 
-  private static void keepHeartbeatWithoutScheduler(
-      RobotContainer container, double durationSeconds) throws InterruptedException {
-    long deadline = System.nanoTime() + (long) (durationSeconds * 1_000_000_000L);
-    do {
-      container.serviceOutputSafetyHeartbeat();
-      Thread.sleep(5L);
-    } while (System.nanoTime() < deadline);
-  }
-
   private static void pump(RobotContainer container, int iterations) throws InterruptedException {
     for (int iteration = 0; iteration < iterations; iteration++) {
       SparkMAXContainer.serviceAll();
       container.updateTeleopSafetyState();
       container.serviceOutputSafetyHeartbeat();
+      long schedulerRunEpoch = container.beginCommandSchedulerRun();
       CommandScheduler.getInstance().run();
+      container.completeCommandSchedulerRun(schedulerRunEpoch);
       container.simulationPeriodic();
       Thread.sleep(20L);
     }
@@ -1068,6 +1895,17 @@ class RobotContainerSimulationIntegrationTest {
 
   private static void setDriverButton(int button, boolean pressed) {
     DriverStationSim.setJoystickButton(DRIVER_PORT, button, pressed);
+    DriverStationSim.notifyNewData();
+  }
+
+  private static void setDriverAxis(int axis, double value) {
+    DriverStationSim.setJoystickAxis(DRIVER_PORT, axis, value);
+    DriverStationSim.notifyNewData();
+  }
+
+  private static void setOperatorButton(int button, boolean pressed) {
+    DriverStationSim.setJoystickButton(
+        OIConstants.kOperatorControllerPort, button, pressed);
     DriverStationSim.notifyNewData();
   }
 

@@ -32,13 +32,19 @@ class SwerveSafetyArchitectureTest {
   }
 
   @Test
-  void everyReusableDriveCommandRequestsRealNeutralWhenItEnds() throws IOException {
+  void incompleteDistanceAlignmentCannotBeBoundAccidentally() throws IOException {
     String drivetrain = Files.readString(DRIVETRAIN_SOURCE);
-    String alignment = Files.readString(ALIGNMENT_COMMAND_SOURCE);
+    String container = Files.readString(DRIVE_CONTAINER_SOURCE);
 
     assertTrue(drivetrain.contains("}).finallyDo(interrupted -> requestIdle());"));
-    assertTrue(alignment.contains("drive.requestIdle();"));
-    assertFalse(alignment.contains("drive.drive(0, 0, 0"));
+    assertFalse(Files.exists(ALIGNMENT_COMMAND_SOURCE));
+    assertTrue(container.contains(
+        "UNAVAILABLE_PENDING_TARGET_DISTANCE_MODEL_AND_BINDING"));
+    assertFalse(container.contains("putNumber(\"Speed Factor\""));
+    assertFalse(container.contains("putNumber(\"Rotation Factor\""));
+    assertTrue(container.contains("FIXED_CODE_CONFIGURATION"));
+    assertTrue(container.contains("private static final double SPEED_FACTOR = 0.05"));
+    assertTrue(container.contains("private static final double ROTATION_FACTOR = 0.05"));
   }
 
   @Test

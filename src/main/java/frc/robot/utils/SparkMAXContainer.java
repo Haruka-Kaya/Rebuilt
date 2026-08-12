@@ -2140,7 +2140,12 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   /** Pauses configured follower mode and applies a diagnostic output capped at 10%. */
-  public boolean beginFollowerDiagnostic(double output) {
+  public boolean beginFollowerDiagnosticIfAuthorized(
+      double output, BooleanSupplier authorizationStillValid) {
+    if (authorizationStillValid == null) {
+      endFollowerDiagnostic();
+      return false;
+    }
     double safeOutput = Math.max(
         -MAX_DIAGNOSTIC_DUTY_CYCLE,
         Math.min(MAX_DIAGNOSTIC_DUTY_CYCLE, output));
@@ -2223,7 +2228,18 @@ public class SparkMAXContainer implements MotorContainer {
     if (failure != null) {
       logState(failure + " zero=queued");
     }
-    return applyOutput ? setDutyCycleInternal(safeOutput, true) : accepted;
+    if (!authorizationStillValid.getAsBoolean()) {
+      endFollowerDiagnostic();
+      return false;
+    }
+    return applyOutput
+        ? trySetpoint(
+            safeOutput,
+            ControlType.kDutyCycle,
+            true,
+            null,
+            authorizationStillValid)
+        : accepted;
   }
 
   /** Called only while OUTPUT_ORDER_LOCK is held. */

@@ -3,6 +3,7 @@ package frc.robot.subsystems;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.ManipulatorConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.utils.DashboardApplyGate;
@@ -50,15 +51,21 @@ public class ConveyorSubsystem extends SubsystemBase {
         return m_feederBelt.isReady();
     }
 
-    public boolean runDiagnostic(double requestedDuty) {
+    public boolean runDiagnostic(double requestedDuty, PulsePermit permit) {
         if (!DriverStation.isTestEnabled()
                 || DriverStation.isFMSAttached()
                 || !Double.isFinite(requestedDuty)
-                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE) {
+                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE
+                || permit == null
+                || !permit.isValidFor(requestedDuty)) {
             stop();
             return false;
         }
-        return m_feederBelt.setDutyCycle(requestedDuty);
+        return m_feederBelt.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
     }
 
     public Snapshot getDiagnosticSnapshot(boolean commandAccepted) {

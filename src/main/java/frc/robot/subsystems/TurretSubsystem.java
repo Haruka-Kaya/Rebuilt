@@ -7,6 +7,7 @@ import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.TurretConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
@@ -95,13 +96,17 @@ public class TurretSubsystem extends SubsystemBase {
     }
 
     /** Test-only low-output polarity evidence; this does not establish an angular reference. */
-    public boolean runUnhomedDiagnostic(double requestedDuty) {
-        if (!unhomedDiagnosticAllowed(requestedDuty)) {
+    public boolean runUnhomedDiagnostic(double requestedDuty, PulsePermit permit) {
+        if (!unhomedDiagnosticAllowed(requestedDuty, permit)) {
             stopUnhomedDiagnostic();
             return false;
         }
         unhomedDiagnosticActive = true;
-        boolean accepted = m_motor.setDutyCycle(requestedDuty);
+        boolean accepted = m_motor.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
         if (!accepted) {
             stopUnhomedDiagnostic();
         }
@@ -266,12 +271,15 @@ public class TurretSubsystem extends SubsystemBase {
         SmartDashboard.putBoolean("On target", isOnTarget());
     }
 
-    private static boolean unhomedDiagnosticAllowed(double requestedDuty) {
+    private static boolean unhomedDiagnosticAllowed(
+            double requestedDuty, PulsePermit permit) {
         return DriverStation.isTestEnabled()
             && !DriverStation.isFMSAttached()
             && Double.isFinite(requestedDuty)
             && Math.abs(requestedDuty)
-                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE;
+                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE
+            && permit != null
+            && permit.isValidFor(requestedDuty);
     }
 
     private void processDashboardTuning() {

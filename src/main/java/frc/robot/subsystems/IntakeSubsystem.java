@@ -5,6 +5,7 @@ import java.util.OptionalDouble;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.IntakeConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.utils.PositionReferenceGuard.Token;
@@ -113,15 +114,21 @@ public class IntakeSubsystem extends SubsystemBase {
         m_intakeRoller.stop();
     }
 
-    public boolean runRollerDiagnostic(double requestedDuty) {
+    public boolean runRollerDiagnostic(double requestedDuty, PulsePermit permit) {
         if (!DriverStation.isTestEnabled()
                 || DriverStation.isFMSAttached()
                 || !Double.isFinite(requestedDuty)
-                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE) {
+                || Math.abs(requestedDuty) > HardwareTestConstants.OPEN_LOOP_DUTY_CYCLE
+                || permit == null
+                || !permit.isValidFor(requestedDuty)) {
             stopRoller();
             return false;
         }
-        return m_intakeRoller.setDutyCycle(requestedDuty);
+        return m_intakeRoller.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
     }
 
     public Snapshot getRollerDiagnosticSnapshot(boolean commandAccepted) {
@@ -129,13 +136,18 @@ public class IntakeSubsystem extends SubsystemBase {
     }
 
     /** Test-only low-output polarity evidence; this does not establish a position reference. */
-    public boolean runUnhomedActuatorDiagnostic(double requestedDuty) {
-        if (!unhomedDiagnosticAllowed(requestedDuty)) {
+    public boolean runUnhomedActuatorDiagnostic(
+            double requestedDuty, PulsePermit permit) {
+        if (!unhomedDiagnosticAllowed(requestedDuty, permit)) {
             stopActuatorDiagnostic();
             return false;
         }
         actuatorDiagnosticActive = true;
-        boolean accepted = m_actuatorMotor.setDutyCycle(requestedDuty);
+        boolean accepted = m_actuatorMotor.setDutyCycleIfAuthorized(
+            requestedDuty,
+            () -> permit.isValidFor(requestedDuty)
+                && DriverStation.isTestEnabled()
+                && !DriverStation.isFMSAttached());
         if (!accepted) {
             stopActuatorDiagnostic();
         }
@@ -179,12 +191,15 @@ public class IntakeSubsystem extends SubsystemBase {
         processDashboardTuning();
     }
 
-    private static boolean unhomedDiagnosticAllowed(double requestedDuty) {
+    private static boolean unhomedDiagnosticAllowed(
+            double requestedDuty, PulsePermit permit) {
         return DriverStation.isTestEnabled()
             && !DriverStation.isFMSAttached()
             && Double.isFinite(requestedDuty)
             && Math.abs(requestedDuty)
-                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE;
+                <= HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE
+            && permit != null
+            && permit.isValidFor(requestedDuty);
     }
 
     private void processDashboardTuning() {

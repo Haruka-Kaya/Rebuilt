@@ -51,7 +51,9 @@ class SparkDeviceEvidenceArchitectureTest {
       throws IOException {
     String source = Files.readString(CONTAINER_SOURCE);
     String setpointMethod = between(
-        source, "private boolean trySetpoint(", "public boolean beginFollowerDiagnostic(");
+        source,
+        "private boolean trySetpoint(",
+        "public boolean beginFollowerDiagnosticIfAuthorized(");
     int successfulBranch = setpointMethod.indexOf("if (result.succeeded())");
     int outputEpochAdvance = setpointMethod.indexOf("outputEpoch++", successfulBranch);
     int acceptedEvidence = setpointMethod.indexOf("lastRequestAccepted = true", successfulBranch);
@@ -80,7 +82,9 @@ class SparkDeviceEvidenceArchitectureTest {
       throws IOException {
     String source = Files.readString(CONTAINER_SOURCE);
     String setpointMethod = between(
-        source, "private boolean trySetpoint(", "public boolean beginFollowerDiagnostic(");
+        source,
+        "private boolean trySetpoint(",
+        "public boolean beginFollowerDiagnosticIfAuthorized(");
 
     int outputLock = setpointMethod.indexOf("synchronized (OUTPUT_ORDER_LOCK)");
     int stateLock = setpointMethod.indexOf("synchronized (stateLock)", outputLock);
@@ -103,8 +107,11 @@ class SparkDeviceEvidenceArchitectureTest {
     String atomicCall = between(
         processSafety, "public static <T> AuthorizedCall<T> callIfAuthorized(",
         "/** Returns the current immutable authorization evidence.");
-    assertTrue(atomicCall.indexOf("synchronized (LOCK)")
+    assertTrue(atomicCall.contains("Snapshot admitted = STATE.get()"));
+    assertTrue(atomicCall.contains("vendorCall.get()"));
+    assertTrue(atomicCall.indexOf("Snapshot admitted = STATE.get()")
         < atomicCall.indexOf("vendorCall.get()"));
+    assertFalse(atomicCall.contains("synchronized"));
     assertTrue(setpointMethod.contains(
         "lastRequestReason = \"PROCESS_OUTPUT_HEARTBEAT_EXPIRED\""));
     assertTrue(setpointMethod.contains("outputGate.requireZero(now, false)"));
@@ -132,7 +139,7 @@ class SparkDeviceEvidenceArchitectureTest {
     String source = Files.readString(CONTAINER_SOURCE);
     String beginDiagnostic = between(
         source,
-        "public boolean beginFollowerDiagnostic(double output)",
+        "public boolean beginFollowerDiagnosticIfAuthorized(",
         "/** Called only while OUTPUT_ORDER_LOCK is held. */");
     String zeroWorker = between(
         source, "private static void runZeroWork(", "private void completeZeroLocked(");

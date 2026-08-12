@@ -2,6 +2,7 @@ package frc.robot.utils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -54,6 +55,15 @@ class RobotOutputSafetySupervisorTest {
 
     enabled.set(true);
     supervisor.heartbeat();
+    assertEquals(RobotOutputSafetySupervisor.Phase.READY_DISABLED,
+        supervisor.snapshot().phase());
+    assertEquals("SCHEDULER_COMPLETION_NOT_OBSERVED", supervisor.snapshot().reason());
+    assertFalse(ProcessOutputSafety.isOutputAuthorized());
+
+    enabled.set(false);
+    completeSchedulerRun();
+    enabled.set(true);
+    supervisor.heartbeat();
     assertEquals(RobotOutputSafetySupervisor.Phase.ARMED, supervisor.snapshot().phase());
     assertTrue(ProcessOutputSafety.isOutputAuthorized());
   }
@@ -64,6 +74,7 @@ class RobotOutputSafetySupervisorTest {
     supervisor.serviceOnceForTesting();
     stopSessions.get(0).confirmed = true;
     supervisor.serviceOnceForTesting();
+    completeSchedulerRun();
     enabled.set(true);
     supervisor.heartbeat();
     assertTrue(ProcessOutputSafety.isOutputAuthorized());
@@ -92,6 +103,7 @@ class RobotOutputSafetySupervisorTest {
     assertEquals(RobotOutputSafetySupervisor.Phase.READY_DISABLED,
         supervisor.snapshot().phase());
 
+    completeSchedulerRun();
     enabled.set(true);
     now.set(2.0);
     supervisor.heartbeat();
@@ -137,6 +149,7 @@ class RobotOutputSafetySupervisorTest {
     supervisor.serviceOnceForTesting();
     stopSessions.get(0).confirmed = true;
     supervisor.serviceOnceForTesting();
+    completeSchedulerRun();
     enabled.set(true);
     supervisor.heartbeat();
 
@@ -158,7 +171,74 @@ class RobotOutputSafetySupervisorTest {
   }
 
   @Test
-  void revokeWaitsForAnAuthorizedVendorCallAndBlocksEveryLaterCall() throws Exception {
+  void heartbeatCannotRenewAuthorizationWithoutANewCompletedSchedulerEpoch() {
+    supervisor = createSupervisor();
+    supervisor.serviceOnceForTesting();
+    stopSessions.get(0).confirmed = true;
+    supervisor.serviceOnceForTesting();
+    completeSchedulerRun();
+    enabled.set(true);
+
+    supervisor.heartbeat();
+    assertEquals(RobotOutputSafetySupervisor.Phase.ARMED, supervisor.snapshot().phase());
+    assertEquals(1.10, supervisor.snapshot().heartbeatDeadlineSeconds(), 1e-9);
+    assertTrue(ProcessOutputSafety.isOutputAuthorized());
+
+    // Starting the next scheduler pass is not completion evidence. Repeated heartbeat calls must
+    // leave the original deadline unchanged until that exact epoch returns normally.
+    long stalledSchedulerEpoch = supervisor.beginSchedulerRun();
+    now.set(1.05);
+    supervisor.heartbeat();
+    now.set(1.09);
+    supervisor.heartbeat();
+
+    assertEquals(1.10, supervisor.snapshot().heartbeatDeadlineSeconds(), 1e-9);
+    assertEquals("SCHEDULER_COMPLETION_NOT_OBSERVED", supervisor.snapshot().reason());
+    assertEquals(
+        "SCHEDULER_COMPLETION_NOT_OBSERVED", supervisor.snapshot().schedulerFaultReason());
+    assertTrue(ProcessOutputSafety.isOutputAuthorized(),
+        "the independent bounded deadline, not the caller, owns revocation timing");
+
+    now.set(1.101);
+    supervisor.serviceOnceForTesting();
+    assertFalse(ProcessOutputSafety.isOutputAuthorized());
+    assertEquals(RobotOutputSafetySupervisor.Phase.STOPPING, supervisor.snapshot().phase());
+
+    // Completion after expiry is recorded for diagnostics but cannot re-arm the enabled session.
+    supervisor.completeSchedulerRun(stalledSchedulerEpoch);
+    supervisor.heartbeat();
+    assertFalse(ProcessOutputSafety.isOutputAuthorized());
+  }
+
+  @Test
+  void onlyTheMatchingNormallyCompletedSchedulerEpochCanRenew() {
+    supervisor = createSupervisor();
+    supervisor.serviceOnceForTesting();
+    stopSessions.get(0).confirmed = true;
+    supervisor.serviceOnceForTesting();
+    completeSchedulerRun();
+    enabled.set(true);
+    supervisor.heartbeat();
+
+    long nextEpoch = supervisor.beginSchedulerRun();
+    supervisor.completeSchedulerRun(nextEpoch);
+    now.set(1.05);
+    supervisor.heartbeat();
+
+    assertEquals(1.15, supervisor.snapshot().heartbeatDeadlineSeconds(), 1e-9);
+    assertNull(supervisor.snapshot().schedulerFaultReason());
+    assertTrue(ProcessOutputSafety.isOutputAuthorized());
+
+    supervisor.completeSchedulerRun(nextEpoch);
+    assertFalse(ProcessOutputSafety.isOutputAuthorized(),
+        "a repeated or stale completion must fail closed");
+    assertEquals(
+        "SCHEDULER_COMPLETION_EPOCH_MISMATCH", supervisor.snapshot().schedulerFaultReason());
+  }
+
+  @Test
+  void revokeRemainsBoundedWhileAnAdmittedVendorCallIsBlockedAndRejectsLaterCalls()
+      throws Exception {
     long generation = ProcessOutputSafety.revoke("TEST_PREPARE");
     assertTrue(ProcessOutputSafety.authorize(generation));
     CountDownLatch vendorEntered = new CountDownLatch(1);
@@ -179,18 +259,91 @@ class RobotOutputSafetySupervisorTest {
       assertTrue(vendorEntered.await(2, TimeUnit.SECONDS));
       Future<Long> revoke = executor.submit(
           () -> ProcessOutputSafety.revoke("TEST_REVOKED"));
-      Thread.sleep(20L);
-      assertFalse(revoke.isDone(), "revoke returned before the in-flight vendor call completed");
-      releaseVendor.countDown();
-      assertTrue(vendorCall.get(2, TimeUnit.SECONDS).authorized());
-      revoke.get(2, TimeUnit.SECONDS);
+      assertTrue(revoke.get(200, TimeUnit.MILLISECONDS) > generation,
+          "a stalled vendor API must not block process-wide revocation");
       assertFalse(ProcessOutputSafety.isOutputAuthorized());
       assertFalse(ProcessOutputSafety.callIfAuthorized(() -> Boolean.TRUE).authorized());
+      releaseVendor.countDown();
+      assertTrue(vendorCall.get(2, TimeUnit.SECONDS).authorized());
     } finally {
       releaseVendor.countDown();
       executor.shutdownNow();
       assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS));
     }
+  }
+
+  @Test
+  void aLateHeartbeatCannotReviveAnExpiredGrantEvenWithFreshSchedulerCompletion() {
+    supervisor = createSupervisor();
+    supervisor.serviceOnceForTesting();
+    stopSessions.get(0).confirmed = true;
+    supervisor.serviceOnceForTesting();
+    completeSchedulerRun();
+    enabled.set(true);
+    supervisor.heartbeat();
+
+    completeSchedulerRun();
+    now.set(1.101);
+    supervisor.heartbeat();
+
+    assertFalse(ProcessOutputSafety.isOutputAuthorized());
+    assertEquals(RobotOutputSafetySupervisor.Phase.STOPPING, supervisor.snapshot().phase());
+    assertEquals("ROBOT_LOOP_HEARTBEAT_EXPIRED", supervisor.snapshot().reason());
+  }
+
+  @Test
+  void aCompletionProducedBeforeTripCannotRearmAfterDisabledStopProof() {
+    supervisor = createSupervisor();
+    supervisor.serviceOnceForTesting();
+    stopSessions.get(0).confirmed = true;
+    supervisor.serviceOnceForTesting();
+    completeSchedulerRun();
+    enabled.set(true);
+    supervisor.heartbeat();
+
+    completeSchedulerRun();
+    supervisor.forceTrip("ROBOT_LOOP_HEARTBEAT_EXPIRED");
+    enabled.set(false);
+    stopSessions.get(1).confirmed = true;
+    supervisor.serviceOnceForTesting();
+    enabled.set(true);
+    supervisor.heartbeat();
+
+    assertFalse(ProcessOutputSafety.isOutputAuthorized());
+    assertEquals(RobotOutputSafetySupervisor.Phase.READY_DISABLED, supervisor.snapshot().phase());
+    assertEquals("SCHEDULER_COMPLETION_NOT_OBSERVED", supervisor.snapshot().reason());
+
+    completeSchedulerRun();
+    supervisor.heartbeat();
+    assertTrue(ProcessOutputSafety.isOutputAuthorized());
+  }
+
+  @Test
+  void aSecondTripAlsoInvalidatesCompletionProducedDuringTheFirstStop() {
+    supervisor = createSupervisor();
+    supervisor.serviceOnceForTesting();
+    stopSessions.get(0).confirmed = true;
+    supervisor.serviceOnceForTesting();
+    completeSchedulerRun();
+    enabled.set(true);
+    supervisor.heartbeat();
+
+    supervisor.forceTrip("FIRST_TRIP");
+    completeSchedulerRun();
+    supervisor.forceTrip("SECOND_TRIP");
+    enabled.set(false);
+    stopSessions.get(1).confirmed = true;
+    supervisor.serviceOnceForTesting();
+    enabled.set(true);
+    supervisor.heartbeat();
+
+    assertFalse(ProcessOutputSafety.isOutputAuthorized());
+    assertEquals(RobotOutputSafetySupervisor.Phase.READY_DISABLED, supervisor.snapshot().phase());
+    assertEquals("SCHEDULER_COMPLETION_NOT_OBSERVED", supervisor.snapshot().reason());
+
+    completeSchedulerRun();
+    supervisor.heartbeat();
+    assertTrue(ProcessOutputSafety.isOutputAuthorized());
   }
 
   private RobotOutputSafetySupervisor createSupervisor() {
@@ -205,6 +358,11 @@ class RobotOutputSafetySupervisorTest {
         0.10,
         0.005,
         false);
+  }
+
+  private void completeSchedulerRun() {
+    long epoch = supervisor.beginSchedulerRun();
+    supervisor.completeSchedulerRun(epoch);
   }
 
   private static final class FakeStopSession

@@ -18,6 +18,7 @@ import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Target;
 import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.OneShotTimedArmGate;
 import frc.robot.utils.RuntimeSafetyLatch;
+import frc.robot.utils.RobotOutputSafetySupervisor;
 import frc.robot.utils.SparkMAXContainer;
 import frc.robot.utils.SparkDeviceEvidence;
 import frc.robot.utils.CtreDeviceEvidence;
@@ -35,6 +36,7 @@ import frc.robot.constants.ConfiguredMotorCapabilities;
 public class Robot extends TimedRobot {
   private Command m_autonomousCommand;
   private Command m_hardwareSelfTest;
+  private double m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
 
   private RobotContainer m_robotContainer;
   private double m_nextDiagnosticTimestamp;
@@ -105,10 +107,14 @@ public class Robot extends TimedRobot {
       SparkMAXContainer.serviceAll();
       m_robotContainer.updateTeleopSafetyState();
 
-      // Renew immediately before scheduler execution. If this call is not repeated within the
-      // bounded window, an independent Notifier revokes all later nonzero vendor calls and keeps
-      // retrying a globally confirmed stop without re-entering CommandScheduler.
+      // Renew immediately before scheduler execution, but only from the previous loop's normally
+      // completed scheduler epoch. Repeating robot-loop heartbeats without scheduler progress
+      // cannot extend the bounded authorization window.
       m_robotContainer.serviceOutputSafetyHeartbeat();
+
+      // testInit consumes the Disabled-only arm before Enabled output authorization exists. Start
+      // HST only after a later heartbeat has established the first live Test-mode grant.
+      startPendingHardwareSelfTestIfAuthorized();
 
       // TimedRobot calls autonomousPeriodic() before this common periodic block. Evaluate the
       // active-auto interlock only after this cycle's heartbeat has converted READY_DISABLED into
@@ -119,7 +125,11 @@ public class Robot extends TimedRobot {
       // commands, running already-scheduled commands, removing finished or interrupted commands,
       // and running subsystem periodic() methods.  This must be called from the robot's periodic
       // block in order for anything in the Command-based framework to work.
+      long schedulerRunEpoch = m_robotContainer.beginCommandSchedulerRun();
       CommandScheduler.getInstance().run();
+      // This is deliberately not in a finally block: an exceptional scheduler run is not progress
+      // evidence, and the outer runtime-fault latch revokes output before requesting global stop.
+      m_robotContainer.completeCommandSchedulerRun(schedulerRunEpoch);
       m_robotContainer.refreshAutonomousStatus();
 
       updateDiagnosticArmGates();
@@ -251,6 +261,7 @@ public class Robot extends TimedRobot {
         m_hardwareSelfTest.cancel();
         m_hardwareSelfTest = null;
       }
+      m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
       clearSelfTestArm();
       clearUnhomedDiagnosticArm();
       clearUnhomedDiagnosticVerifications();
@@ -266,6 +277,7 @@ public class Robot extends TimedRobot {
   public void autonomousInit() {
     runLifecycleSafely(() -> {
       clearSelfTestArm();
+      m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
       clearUnhomedDiagnosticArm();
       clearUnhomedDiagnosticVerifications();
       m_robotContainer.stopAll();
@@ -321,6 +333,7 @@ public class Robot extends TimedRobot {
         m_autonomousCommand.cancel();
         m_autonomousCommand = null;
       }
+      m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
       m_robotContainer.stopAll();
     });
   }
@@ -337,6 +350,7 @@ public class Robot extends TimedRobot {
         m_autonomousCommand = null;
       }
       clearSelfTestArm();
+      m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
       clearUnhomedDiagnosticArm();
       clearUnhomedDiagnosticVerifications();
       m_robotContainer.stopAll();
@@ -352,12 +366,14 @@ public class Robot extends TimedRobot {
     runLifecycleSafely(() -> {
       // Cancels all running commands at the start of test mode.
       CommandScheduler.getInstance().cancelAll();
+      m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
       boolean selfTestRequested = SmartDashboard.getBoolean(
           "Hardware Self-Test/Armed", false);
       boolean unhomedDiagnosticRequested = SmartDashboard.getBoolean(
           ManualUnhomedActuatorDiagnosticCommand.ARM_KEY, false);
       boolean conflictingArms = selfTestRequested && unhomedDiagnosticRequested;
       double now = Timer.getFPGATimestamp();
+      double selfTestExpiresAt = m_selfTestArmGate.expiresAtSeconds();
       boolean armAccepted = !conflictingArms
           && !DriverStation.isFMSAttached()
           && m_robotContainer.isOutputSafetyReadyForEnable()
@@ -402,8 +418,9 @@ public class Robot extends TimedRobot {
             "ARM_REJECTED_RELEASE_AND_RETRY_DISABLED");
       }
       if (armAccepted) {
-        m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand();
-        CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
+        m_pendingHardwareSelfTestExpiresAt = selfTestExpiresAt;
+        SmartDashboard.putString(
+            "Hardware Self-Test/Overall", "WAITING_FOR_ENABLED_OUTPUT_AUTHORIZATION");
       } else if (unhomedDiagnosticAccepted) {
         m_robotContainer.armUnhomedDiagnosticSession(
             diagnosticTarget, diagnosticDirection, diagnosticExpiresAt);
@@ -422,6 +439,7 @@ public class Robot extends TimedRobot {
         m_hardwareSelfTest.cancel();
         m_hardwareSelfTest = null;
       }
+      m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
       clearSelfTestArm();
       clearUnhomedDiagnosticArm();
       clearUnhomedDiagnosticVerifications();
@@ -433,6 +451,39 @@ public class Robot extends TimedRobot {
     SmartDashboard.putBoolean("Hardware Self-Test/Armed", false);
     SmartDashboard.putBoolean("Hardware Self-Test/Arm Valid", false);
     m_selfTestArmGate.requireRelease();
+  }
+
+  private void startPendingHardwareSelfTestIfAuthorized() {
+    double expiresAt = m_pendingHardwareSelfTestExpiresAt;
+    if (!Double.isFinite(expiresAt)) {
+      return;
+    }
+    double now;
+    try {
+      now = Timer.getFPGATimestamp();
+    } catch (RuntimeException exception) {
+      now = Double.NaN;
+    }
+    boolean requestStillValid = DriverStation.isTestEnabled()
+        && !DriverStation.isFMSAttached()
+        && Double.isFinite(now)
+        && now < expiresAt;
+    if (!requestStillValid) {
+      m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
+      m_robotContainer.tripOutputSafety("HST_PENDING_AUTHORIZATION_EXPIRED_OR_MODE_LOST");
+      SmartDashboard.putString("Hardware Self-Test/Overall", "REJECTED");
+      SmartDashboard.putString(
+          "Hardware Self-Test/Abort Reason", "PENDING_AUTHORIZATION_EXPIRED_OR_MODE_LOST");
+      return;
+    }
+    var outputSafety = m_robotContainer.getOutputSafetySnapshot();
+    if (outputSafety.phase() != RobotOutputSafetySupervisor.Phase.ARMED
+        || !outputSafety.processOutputSafety().outputAuthorized()) {
+      return;
+    }
+    m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY;
+    m_hardwareSelfTest = m_robotContainer.getHardwareSelfTestCommand(expiresAt);
+    CommandScheduler.getInstance().schedule(m_hardwareSelfTest);
   }
 
   private void clearUnhomedDiagnosticArm() {

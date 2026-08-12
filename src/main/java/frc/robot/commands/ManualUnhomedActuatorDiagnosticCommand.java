@@ -2,12 +2,15 @@ package frc.robot.commands;
 
 import java.util.Optional;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Subsystem;
+import frc.robot.DiagnosticOutputSession;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.constants.Constants.IntakeConstants;
@@ -138,8 +141,9 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
 
   private final Target target;
   private final double requestedDuty;
+  private final Supplier<DiagnosticOutputSession> outputSessionSupplier;
   private final BooleanSupplier interlocksHeld;
-  private final BooleanSupplier runAction;
+  private final Function<PulsePermit, Boolean> runAction;
   private final Runnable stopAction;
 
   private Phase phase = Phase.DONE;
@@ -151,10 +155,13 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
   private double pulseCommandCompletedAt = Double.NaN;
   private double lastEvaluatedSampleAt = Double.NEGATIVE_INFINITY;
   private long pulseOutputEpoch = -1;
+  private PulsePermit pulsePermit;
+  private DiagnosticOutputSession outputSession;
 
   public ManualUnhomedActuatorDiagnosticCommand(
       Target target,
       double requestedDuty,
+      Supplier<DiagnosticOutputSession> outputSessionSupplier,
       BooleanSupplier interlocksHeld,
       IntakeSubsystem intake,
       FeederSubsystem feeder,
@@ -171,6 +178,10 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     }
     this.target = target;
     this.requestedDuty = requestedDuty;
+    if (outputSessionSupplier == null) {
+      throw new IllegalArgumentException("diagnostic output session is required");
+    }
+    this.outputSessionSupplier = outputSessionSupplier;
     this.interlocksHeld = interlocksHeld;
     if (feederRetestLease == null) {
       throw new IllegalArgumentException("feeder retest lease supplier is required");
@@ -178,28 +189,28 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
 
     switch (target) {
       case INTAKE_ACTUATOR -> {
-        runAction = () -> intake.runUnhomedActuatorDiagnostic(requestedDuty);
+        runAction = permit -> intake.runUnhomedActuatorDiagnostic(requestedDuty, permit);
         stopAction = intake::stopActuatorDiagnostic;
       }
       case FEEDER -> {
-        runAction = () -> feeder.runManualControlledRetest(
-            feederRetestLease.get(), requestedDuty);
+        runAction = permit -> feeder.runManualControlledRetest(
+            feederRetestLease.get(), requestedDuty, permit);
         stopAction = feeder::stopDiagnosticOutput;
       }
       case CLIMBER_LEFT -> {
-        runAction = () -> climber.runLeftUnhomedDiagnostic(requestedDuty);
+        runAction = permit -> climber.runLeftUnhomedDiagnostic(requestedDuty, permit);
         stopAction = climber::stopUnhomedDiagnostic;
       }
       case CLIMBER_RIGHT -> {
-        runAction = () -> climber.runRightUnhomedDiagnostic(requestedDuty);
+        runAction = permit -> climber.runRightUnhomedDiagnostic(requestedDuty, permit);
         stopAction = climber::stopUnhomedDiagnostic;
       }
       case SHOOTER_ACTUATOR -> {
-        runAction = () -> shooter.runUnhomedActuatorDiagnostic(requestedDuty);
+        runAction = permit -> shooter.runUnhomedActuatorDiagnostic(requestedDuty, permit);
         stopAction = shooter::stopActuatorDiagnostic;
       }
       case TURRET -> {
-        runAction = () -> turret.runUnhomedDiagnostic(requestedDuty);
+        runAction = permit -> turret.runUnhomedDiagnostic(requestedDuty, permit);
         stopAction = turret::stopUnhomedDiagnostic;
       }
       default -> throw new IllegalStateException("unhandled diagnostic target " + target);
@@ -303,6 +314,19 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     pulseCommandCompletedAt = Double.NaN;
     lastEvaluatedSampleAt = Double.NEGATIVE_INFINITY;
     pulseOutputEpoch = -1;
+    revokePulsePermit();
+    try {
+      outputSession = outputSessionSupplier.get();
+    } catch (RuntimeException ignored) {
+      outputSession = null;
+    }
+    if (outputSession == null || !outputSession.isValid()) {
+      phase = Phase.DONE;
+      stopAction.run();
+      SparkMAXContainer.requestOutputStops(target.stopCanIds());
+      publish("OUTPUT_SESSION_MISSING", "STOP_REQUESTED");
+      return;
+    }
     stopAction.run();
     // No manual motor pulse may begin while another configured SPARK output remains active.
     stopBatch = SparkMAXContainer.requestOutputStops(ALL_SPARK_IDS);
@@ -345,7 +369,10 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
         beginPostStop(latestMotionResult.name());
         return;
       }
-      boolean accepted = runAction.getAsBoolean();
+      pulsePermit = outputSession.beginPulse(
+          requestedDuty,
+          HardwareTestConstants.UNHOMED_DIAGNOSTIC_PULSE_SECONDS).orElse(null);
+      boolean accepted = pulsePermit != null && runAction.apply(pulsePermit);
       if (!accepted) {
         latestMotionResult = MotionResult.FAIL_COMMAND_REJECTED;
         beginPostStop(latestMotionResult.name());
@@ -373,6 +400,11 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
   }
 
   private void executePulse(double now) {
+    if (pulsePermit == null || !pulsePermit.isValidFor(requestedDuty)) {
+      latestMotionResult = MotionResult.FAIL_COMMAND_REJECTED;
+      beginPostStop("DIAGNOSTIC_OUTPUT_PERMIT_EXPIRED_OR_REVOKED");
+      return;
+    }
     TimedDiagnosticSnapshot timed = timedSnapshot(true).orElse(null);
     if (timed == null || timed.currentOutputEpoch() != pulseOutputEpoch) {
       latestMotionResult = MotionResult.FAIL_NOT_READY;
@@ -448,6 +480,7 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     if (phase == Phase.POST_STOP || phase == Phase.DONE) {
       return;
     }
+    revokePulsePermit();
     stopAction.run();
     terminalStatus = result;
     stopBatch = SparkMAXContainer.requestOutputStops(target.stopCanIds());
@@ -468,6 +501,9 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
       return;
     }
     if (now >= phaseDeadlineSeconds) {
+      if (outputSession != null) {
+        outputSession.trip("MANUAL_DIAGNOSTIC_STOP_UNCONFIRMED_" + target.name());
+      }
       phase = Phase.DONE;
       publish(terminalStatus + "_STOP_UNCONFIRMED", "POST_STOP_UNCONFIRMED_"
           + stop.summary());
@@ -481,6 +517,14 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
 
   @Override
   public void end(boolean interrupted) {
+    revokePulsePermit();
+    if ((interrupted || phase != Phase.DONE) && outputSession != null) {
+      outputSession.trip("MANUAL_DIAGNOSTIC_INTERRUPTED_STOP_UNCONFIRMED_" + target.name());
+    }
+    if (outputSession != null) {
+      outputSession.close();
+      outputSession = null;
+    }
     stopAction.run();
     if (interrupted || phase != Phase.DONE) {
       SparkMAXContainer.requestOutputStops(target.stopCanIds());
@@ -488,6 +532,13 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
       publish("INTERRUPTED_STOP_REQUESTED", "STOP_REQUESTED");
       AsyncDiagnosticSink.log(
           "UNHOMED DIAGNOSTIC target=" + target.label() + " interrupted stop=REQUESTED");
+    }
+  }
+
+  private void revokePulsePermit() {
+    if (pulsePermit != null) {
+      pulsePermit.revoke();
+      pulsePermit = null;
     }
   }
 

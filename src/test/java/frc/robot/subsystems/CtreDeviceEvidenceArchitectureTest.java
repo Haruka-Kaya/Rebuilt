@@ -37,6 +37,7 @@ class CtreDeviceEvidenceArchitectureTest {
     assertTrue(source.contains("synchronized Snapshot captureDiagnosticNow(double now)"));
     assertTrue(source.contains("synchronized Snapshot captureOutputNow(double now)"));
     assertTrue(source.contains("synchronized Snapshot snapshot()"));
+    assertTrue(source.contains("public boolean areAllRequiredDeviceSignalsFresh()"));
     assertTrue(stopEvidence.contains("captureOutputNow"));
     assertTrue(stopEvidence.contains("postNeutralOutputReason"));
   }
@@ -60,6 +61,12 @@ class CtreDeviceEvidenceArchitectureTest {
     assertTrue(swerveStage.contains("captureSwerveDiagnosticBaseline"));
     assertTrue(swerveStage.contains("completeSwerveDiagnosticRequest"));
     assertTrue(swerveStage.contains("postCommandEvidenceReady"));
+    assertTrue(swerveStage.contains("areAllRequiredDeviceSignalsFresh"));
+    assertTrue(swerveStage.contains("WAITING_FOR_POST_COMMAND_SIGNALS"));
+    assertTrue(swerveStage.contains("action.apply(pulsePermit[0])"));
+    assertTrue(source.contains("outputSession.trip(\"HST_STOP_UNCONFIRMED_\" + name)"));
+    assertTrue(source.contains("boolean sessionInvalid = !outputSession.isValid()"));
+    assertTrue(source.contains("? \"DIAGNOSTIC_OUTPUT_SESSION_INVALID\""));
   }
 
   @Test
@@ -93,6 +100,10 @@ class CtreDeviceEvidenceArchitectureTest {
         "m_outputEpoch++",
         "this.setControl(request)");
     assertTrue(applyNonNeutral.contains("ControlResult.OUTPUT_AUTHORIZATION_REVOKED"));
+    assertTrue(applyNonNeutral.contains("additionalAuthorization.getAsBoolean()"));
+    assertTrue(source.contains("public ControlResult driveDiagnostic("));
+    assertTrue(source.contains("new DiagnosticLeaseAwareRequest("));
+    assertTrue(source.contains("authorization.getAsBoolean()"));
     int applicationLock = applyNonNeutral.indexOf("synchronized (m_outputApplicationLock)");
     int applicationOpenBrace = applyNonNeutral.indexOf('{', applicationLock);
     int applicationCloseBrace = matchingBrace(applyNonNeutral, applicationOpenBrace);

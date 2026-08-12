@@ -1,6 +1,7 @@
 package frc.robot.utils;
 
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -11,73 +12,67 @@ import java.util.function.Supplier;
  * API. Zero-output requests never depend on this authorization.
  */
 public final class ProcessOutputSafety {
-  private static final Object LOCK = new Object();
-
-  private static long generation;
-  private static boolean outputAuthorized;
-  private static String reason = "STARTUP_NOT_AUTHORIZED";
+  private static final AtomicReference<Snapshot> STATE = new AtomicReference<>(
+      new Snapshot(0L, false, "STARTUP_NOT_AUTHORIZED"));
 
   private ProcessOutputSafety() {}
 
   /** Returns the atomic process-wide decision used by SPARK and CTRE output boundaries. */
   public static boolean isOutputAuthorized() {
-    synchronized (LOCK) {
-      return outputAuthorized;
-    }
+    return STATE.get().outputAuthorized();
   }
 
   /**
-   * Runs a vendor call while holding the same lock used by revoke/authorize.
+   * Admits a vendor call from the current immutable process grant.
    *
-   * <p>This closes the check-then-call window: once revoke returns, no older nonzero call can
-   * start later. Callers must already hold their vendor-specific output-order lock, and this
-   * callback must never call back into the robot safety supervisor.
+   * <p>Revoke is intentionally nonblocking even if a vendor API hangs. Callers must already hold
+   * their vendor-specific output-order lock. A call admitted just before revoke is therefore
+   * ordered before that vendor's neutral request; any later admission is rejected. This callback
+   * must never call back into the robot safety supervisor.
    */
   public static <T> AuthorizedCall<T> callIfAuthorized(Supplier<T> vendorCall) {
     Objects.requireNonNull(vendorCall, "vendorCall");
-    synchronized (LOCK) {
-      if (!outputAuthorized) {
-        return new AuthorizedCall<>(false, null);
-      }
-      return new AuthorizedCall<>(true, vendorCall.get());
+    Snapshot admitted = STATE.get();
+    if (!admitted.outputAuthorized()) {
+      return new AuthorizedCall<>(false, null);
     }
+    return new AuthorizedCall<>(true, vendorCall.get());
   }
 
   /** Returns the current immutable authorization evidence. */
   public static Snapshot snapshot() {
-    synchronized (LOCK) {
-      return new Snapshot(generation, outputAuthorized, reason);
-    }
+    return STATE.get();
   }
 
   /** Revokes first and advances the generation so an older grant cannot be restored. */
   static long revoke(String requestedReason) {
-    synchronized (LOCK) {
-      generation++;
-      outputAuthorized = false;
-      reason = normalize(requestedReason);
-      return generation;
+    String normalized = normalize(requestedReason);
+    while (true) {
+      Snapshot current = STATE.get();
+      Snapshot revoked = new Snapshot(current.generation() + 1L, false, normalized);
+      if (STATE.compareAndSet(current, revoked)) {
+        return revoked.generation();
+      }
     }
   }
 
   /** Grants only if no newer revoke occurred after the supervisor captured the generation. */
   static boolean authorize(long expectedGeneration) {
-    synchronized (LOCK) {
-      if (generation != expectedGeneration) {
+    while (true) {
+      Snapshot current = STATE.get();
+      if (current.generation() != expectedGeneration) {
         return false;
       }
-      outputAuthorized = true;
-      reason = "AUTHORIZED_FRESH_ROBOT_LOOP_HEARTBEAT";
-      return true;
+      Snapshot authorized = new Snapshot(
+          current.generation(), true, "AUTHORIZED_FRESH_ROBOT_LOOP_HEARTBEAT");
+      if (STATE.compareAndSet(current, authorized)) {
+        return true;
+      }
     }
   }
 
   static void resetForTesting() {
-    synchronized (LOCK) {
-      generation = 0;
-      outputAuthorized = false;
-      reason = "STARTUP_NOT_AUTHORIZED";
-    }
+    STATE.set(new Snapshot(0L, false, "STARTUP_NOT_AUTHORIZED"));
   }
 
   private static String normalize(String value) {

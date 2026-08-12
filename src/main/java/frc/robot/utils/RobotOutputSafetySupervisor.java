@@ -52,6 +52,10 @@ public final class RobotOutputSafetySupervisor implements AutoCloseable {
   private double heartbeatDeadlineSeconds = Double.NEGATIVE_INFINITY;
   private long stopGeneration;
   private long authorizationGeneration;
+  private long nextSchedulerRunEpoch;
+  private long schedulerRunInFlightEpoch;
+  private long schedulerCompletionEpoch;
+  private long heartbeatSchedulerCompletionEpoch;
   private String reason = "STARTUP_STOP_REQUIRED";
   private String stopSummary = "NOT_REQUESTED";
   private String schedulerFaultReason;
@@ -95,7 +99,62 @@ public final class RobotOutputSafetySupervisor implements AutoCloseable {
   }
 
   /**
+   * Records the start of the one CommandScheduler run owned by the current robot loop.
+   *
+   * <p>The returned epoch must only be completed after {@code CommandScheduler.run()} returns
+   * normally. A repeated start or mismatched completion is an architecture fault and immediately
+   * revokes process output authorization.
+   */
+  public long beginSchedulerRun() {
+    long epoch = 0L;
+    String tripReason = null;
+    synchronized (lock) {
+      if (closed) {
+        return 0L;
+      }
+      if (schedulerRunInFlightEpoch != 0L) {
+        tripReason = "SCHEDULER_RUN_OVERLAP";
+      } else if (nextSchedulerRunEpoch == Long.MAX_VALUE) {
+        tripReason = "SCHEDULER_EPOCH_EXHAUSTED";
+      } else {
+        epoch = ++nextSchedulerRunEpoch;
+        schedulerRunInFlightEpoch = epoch;
+      }
+    }
+    if (tripReason != null) {
+      forceTrip(tripReason);
+    }
+    return epoch;
+  }
+
+  /**
+   * Records normal completion of the exact scheduler run epoch returned by {@link
+   * #beginSchedulerRun()}.
+   */
+  public void completeSchedulerRun(long schedulerRunEpoch) {
+    boolean mismatch = false;
+    synchronized (lock) {
+      if (closed) {
+        return;
+      }
+      if (schedulerRunEpoch <= 0L || schedulerRunEpoch != schedulerRunInFlightEpoch) {
+        mismatch = true;
+      } else {
+        schedulerRunInFlightEpoch = 0L;
+        schedulerCompletionEpoch = schedulerRunEpoch;
+      }
+    }
+    if (mismatch) {
+      forceTrip("SCHEDULER_COMPLETION_EPOCH_MISMATCH");
+    }
+  }
+
+  /**
    * Renews the main robot-loop heartbeat or arms a fresh enabled session after Disabled stop proof.
+   *
+   * <p>Every accepted enabled heartbeat consumes one new normally completed scheduler epoch. A
+   * heartbeat without scheduler progress is observable but cannot extend the authorization
+   * deadline, so the independent watchdog remains authoritative if scheduler progress stalls.
    */
   public void heartbeat() {
     final double now;
@@ -132,10 +191,13 @@ public final class RobotOutputSafetySupervisor implements AutoCloseable {
           revokeLocked(schedulerFaultReason);
           phase = Phase.STOPPING;
           startStop = true;
+        } else if (!freshSchedulerCompletionLocked()) {
+          recordMissingSchedulerCompletionLocked();
         } else {
           heartbeatDeadlineSeconds = now + heartbeatTimeoutSeconds;
           authorizationGeneration = ProcessOutputSafety.snapshot().generation();
           if (ProcessOutputSafety.authorize(authorizationGeneration)) {
+            acknowledgeSchedulerCompletionLocked();
             phase = Phase.ARMED;
             reason = "AUTHORIZED_FRESH_ROBOT_LOOP_HEARTBEAT";
             schedulerFaultReason = null;
@@ -147,7 +209,22 @@ public final class RobotOutputSafetySupervisor implements AutoCloseable {
           }
         }
       } else if (phase == Phase.ARMED) {
-        heartbeatDeadlineSeconds = now + heartbeatTimeoutSeconds;
+        if (!Double.isFinite(heartbeatDeadlineSeconds)
+            || now > heartbeatDeadlineSeconds) {
+          recordSchedulerFaultLocked("ROBOT_LOOP_HEARTBEAT_EXPIRED");
+          revokeLocked("ROBOT_LOOP_HEARTBEAT_EXPIRED");
+          phase = Phase.STOPPING;
+          startStop = true;
+        } else if (freshSchedulerCompletionLocked()) {
+          acknowledgeSchedulerCompletionLocked();
+          heartbeatDeadlineSeconds = now + heartbeatTimeoutSeconds;
+          reason = "AUTHORIZED_FRESH_ROBOT_LOOP_HEARTBEAT";
+          if (!irreversibleRuntimeFault) {
+            schedulerFaultReason = null;
+          }
+        } else {
+          recordMissingSchedulerCompletionLocked();
+        }
       }
     }
     if (startStop) {
@@ -164,6 +241,10 @@ public final class RobotOutputSafetySupervisor implements AutoCloseable {
         return;
       }
       recordSchedulerFaultLocked(tripReason);
+      // Even when a stop is already in progress, a newer trip invalidates every scheduler
+      // completion produced before it. Otherwise that stale completion could be replayed after
+      // Disabled stop proof to re-arm a later Enabled session.
+      heartbeatSchedulerCompletionEpoch = nextSchedulerRunEpoch;
       if (phase == Phase.STARTUP_STOPPING || phase == Phase.STOPPING) {
         reason = normalize(tripReason);
       } else if (phase == Phase.TRIPPED) {
@@ -336,9 +417,24 @@ public final class RobotOutputSafetySupervisor implements AutoCloseable {
     reason = normalize(revokeReason);
     heartbeatDeadlineSeconds = Double.NEGATIVE_INFINITY;
     authorizationGeneration = ProcessOutputSafety.revoke(reason);
+    // A completion produced before this revoke is not proof of progress in a later enable session.
+    heartbeatSchedulerCompletionEpoch = nextSchedulerRunEpoch;
     stopSession = null;
     stopSummary = "STOP_REQUEST_PENDING";
     stopGeneration++;
+  }
+
+  private boolean freshSchedulerCompletionLocked() {
+    return schedulerCompletionEpoch > heartbeatSchedulerCompletionEpoch;
+  }
+
+  private void acknowledgeSchedulerCompletionLocked() {
+    heartbeatSchedulerCompletionEpoch = schedulerCompletionEpoch;
+  }
+
+  private void recordMissingSchedulerCompletionLocked() {
+    reason = "SCHEDULER_COMPLETION_NOT_OBSERVED";
+    recordSchedulerFaultLocked(reason);
   }
 
   private void publishNoThrow() {
@@ -379,7 +475,8 @@ public final class RobotOutputSafetySupervisor implements AutoCloseable {
             || normalized.contains("HEARTBEAT_INPUT_EXCEPTION")
             || normalized.contains("HEARTBEAT_CLOCK_NONFINITE")
             || normalized.contains("WATCHDOG_")
-            || normalized.contains("AUTHORIZATION_GENERATION_CHANGED"))) {
+            || normalized.contains("AUTHORIZATION_GENERATION_CHANGED")
+            || normalized.startsWith("SCHEDULER_"))) {
       schedulerFaultReason = normalized;
     }
   }

@@ -75,9 +75,16 @@ class DeviceEvidenceLifecycleArchitectureTest {
         "private StopSession beginIndependentOutputStopSession()",
         "/** Releases process-owned simulation/native resources");
 
+    int heartbeat = periodic.indexOf("serviceOutputSafetyHeartbeat()");
+    int schedulerStart = periodic.indexOf("beginCommandSchedulerRun()");
+    int schedulerRun = periodic.indexOf("CommandScheduler.getInstance().run()");
+    int schedulerComplete = periodic.indexOf("completeCommandSchedulerRun(schedulerRunEpoch)");
     assertTrue(
-        periodic.indexOf("serviceOutputSafetyHeartbeat()")
-            < periodic.indexOf("CommandScheduler.getInstance().run()"));
+        heartbeat >= 0
+            && heartbeat < schedulerStart
+            && schedulerStart < schedulerRun
+            && schedulerRun < schedulerComplete,
+        "only a normally returned scheduler run may support the next heartbeat");
     assertTrue(
         latch.indexOf("tripOutputSafety") < latch.indexOf("enforceLatchedStop()"));
     assertTrue(
@@ -87,6 +94,44 @@ class DeviceEvidenceLifecycleArchitectureTest {
     assertTrue(globalStop.contains("SparkMAXContainer.serviceAll()"));
     assertTrue(globalStop.contains("drivetrain.getStopEvidence("));
     assertTrue(robot.contains("m_robotContainer.isOutputSafetyReadyForEnable()"));
+  }
+
+  @Test
+  void disabledHstArmIsDeferredUntilTheFirstAuthorizedTestHeartbeat() throws IOException {
+    String robot = Files.readString(ROBOT_SOURCE);
+    String testInit = between(robot, "public void testInit()", "public void testPeriodic()");
+    String periodic = between(robot, "public void robotPeriodic()", "public void disabledInit()");
+    String deferredStart = between(
+        robot,
+        "private void startPendingHardwareSelfTestIfAuthorized()",
+        "private void clearUnhomedDiagnosticArm()");
+    String hstSessionFactory = between(
+        Files.readString(ROBOT_CONTAINER_SOURCE),
+        "private DiagnosticOutputSession createHardwareSelfTestOutputSession(",
+        "private Command rejectedHardwareSelfTestCommand(");
+
+    assertTrue(testInit.contains("m_pendingHardwareSelfTestExpiresAt = selfTestExpiresAt"));
+    assertFalse(testInit.contains("getHardwareSelfTestCommand(selfTestExpiresAt)"));
+    assertTrue(periodic.contains("serviceOutputSafetyHeartbeat()"));
+    assertTrue(periodic.contains("startPendingHardwareSelfTestIfAuthorized()"));
+    assertTrue(periodic.contains("beginCommandSchedulerRun()"));
+    assertTrue(
+        periodic.indexOf("serviceOutputSafetyHeartbeat()")
+            < periodic.indexOf("startPendingHardwareSelfTestIfAuthorized()"));
+    assertTrue(
+        periodic.indexOf("startPendingHardwareSelfTestIfAuthorized()")
+            < periodic.indexOf("beginCommandSchedulerRun()"));
+    assertTrue(deferredStart.contains("Phase.ARMED"));
+    assertTrue(deferredStart.contains("processOutputSafety().outputAuthorized()"));
+    assertTrue(hstSessionFactory.contains("armExpiresAtSeconds <= now + HardwareTestConstants.ARM_LIFETIME_SECONDS"));
+    assertTrue(hstSessionFactory.contains("HARDWARE_SELF_TEST_SESSION_LIFETIME_SECONDS"));
+    assertTrue(deferredStart.contains(
+        "m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY"));
+    assertTrue(deferredStart.contains(
+        "CommandScheduler.getInstance().schedule(m_hardwareSelfTest)"));
+    assertTrue(
+        deferredStart.indexOf("m_pendingHardwareSelfTestExpiresAt = Double.NEGATIVE_INFINITY")
+            < deferredStart.indexOf("CommandScheduler.getInstance().schedule(m_hardwareSelfTest)"));
   }
 
   @Test
@@ -105,8 +150,17 @@ class DeviceEvidenceLifecycleArchitectureTest {
         robot, "public void robotPeriodic()", "public void disabledInit()");
     int heartbeat = robotPeriodic.indexOf("serviceOutputSafetyHeartbeat()");
     int abort = robotPeriodic.indexOf("abortActiveAutonomousIfUnsafe()");
+    int schedulerStart = robotPeriodic.indexOf("beginCommandSchedulerRun()");
     int scheduler = robotPeriodic.indexOf("CommandScheduler.getInstance().run()");
-    assertTrue(heartbeat >= 0 && heartbeat < abort && abort < scheduler);
+    int schedulerComplete =
+        robotPeriodic.indexOf("completeCommandSchedulerRun(schedulerRunEpoch)");
+    assertTrue(
+        heartbeat >= 0
+            && heartbeat < abort
+            && abort < schedulerStart
+            && schedulerStart < scheduler
+            && scheduler < schedulerComplete,
+        "active auto must see the prior completion-backed grant before this scheduler pass");
 
     String activeAutoGate = between(
         robot, "private void abortActiveAutonomousIfUnsafe()", "public void autonomousExit()");

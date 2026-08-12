@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.function.Consumer;
 
@@ -41,6 +42,7 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Subsystem;
 import frc.robot.constants.Constants.DebugConstants;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.AutoConstants;
 import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.ConfiguredCanHardware;
@@ -844,6 +846,39 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private final SwerveRequest.RobotCentric m_robotCentricDriveRequest = new SwerveRequest.RobotCentric();
 
     public ControlResult drive(double xSpeed, double ySpeed, double rot, boolean fieldRelative) {
+        return driveChecked(xSpeed, ySpeed, rot, fieldRelative, null, 0.0);
+    }
+
+    /**
+     * Applies one HST request whose exact normalized component is bound to a live pulse permit.
+     * The permit is checked both at setControl registration and from the odometry-thread request.
+     */
+    public ControlResult driveDiagnostic(
+            double xSpeed,
+            double ySpeed,
+            double rot,
+            boolean fieldRelative,
+            double authorizationDuty,
+            PulsePermit permit) {
+        if (fieldRelative
+                || permit == null
+                || !diagnosticVectorMatchesAuthorization(
+                    xSpeed, ySpeed, rot, authorizationDuty)
+                || !permit.isValidFor(authorizationDuty)) {
+            requestIdle();
+            return ControlResult.OUTPUT_AUTHORIZATION_REVOKED;
+        }
+        return driveChecked(
+            xSpeed, ySpeed, rot, false, permit, authorizationDuty);
+    }
+
+    private ControlResult driveChecked(
+            double xSpeed,
+            double ySpeed,
+            double rot,
+            boolean fieldRelative,
+            PulsePermit diagnosticPermit,
+            double diagnosticAuthorizationDuty) {
         if (!DebugConstants.ALLOW_SWERVE_OUTPUT) {
             requestIdle();
             return ControlResult.OUTPUT_DISABLED;
@@ -885,8 +920,35 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             m_robotCentricDriveRequest.VelocityX = limitedX * maxSpeed;
             m_robotCentricDriveRequest.VelocityY = limitedY * maxSpeed;
             m_robotCentricDriveRequest.RotationalRate = limitedRot;
-            return applyNonNeutralRequest(m_robotCentricDriveRequest);
+            if (diagnosticPermit == null) {
+                return applyNonNeutralRequest(m_robotCentricDriveRequest);
+            }
+            BooleanSupplier diagnosticAuthorization =
+                () -> diagnosticPermit.isValidFor(diagnosticAuthorizationDuty);
+            return applyNonNeutralRequest(
+                new DiagnosticLeaseAwareRequest(
+                    m_robotCentricDriveRequest, diagnosticAuthorization),
+                diagnosticAuthorization);
         }
+    }
+
+    private static boolean diagnosticVectorMatchesAuthorization(
+            double xSpeed, double ySpeed, double rot, double authorizationDuty) {
+        if (!Double.isFinite(authorizationDuty) || Math.abs(authorizationDuty) <= 1e-9) {
+            return false;
+        }
+        int exactComponents = 0;
+        exactComponents += Double.compare(xSpeed, authorizationDuty) == 0 ? 1 : 0;
+        exactComponents += Double.compare(ySpeed, authorizationDuty) == 0 ? 1 : 0;
+        exactComponents += Double.compare(rot, authorizationDuty) == 0 ? 1 : 0;
+        boolean otherComponentsZero =
+            (Double.compare(xSpeed, authorizationDuty) == 0
+                || Double.compare(xSpeed, 0.0) == 0)
+            && (Double.compare(ySpeed, authorizationDuty) == 0
+                || Double.compare(ySpeed, 0.0) == 0)
+            && (Double.compare(rot, authorizationDuty) == 0
+                || Double.compare(rot, 0.0) == 0);
+        return exactComponents == 1 && otherComponentsZero;
     }
 
     private final SwerveRequest.ApplyRobotSpeeds autoRequest = new SwerveRequest.ApplyRobotSpeeds();
@@ -923,6 +985,17 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     /** True only when every CTRE controller and sensor required for swerve motion is online. */
     public boolean areAllDevicesConnected() {
         return m_daqFresh && isGyroConnected() && areAllModulesConnected();
+    }
+
+    /**
+     * Returns only configured per-device signal freshness, excluding aggregate state/DAQ flags.
+     *
+     * <p>This distinction is used solely to classify Phoenix desktop aggregate transients. Normal
+     * output gates and every live-hardware HST path still require
+     * {@link #areAllDevicesConnected()}.
+     */
+    public boolean areAllRequiredDeviceSignalsFresh() {
+        return m_moduleSignalsFresh && m_gyroSignalsFresh;
     }
 
     /** Module-only health gate; teleop can still fall back to robot-centric if the gyro is absent. */
@@ -1513,20 +1586,68 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         }
     }
 
+    private static final class DiagnosticLeaseAwareRequest implements SwerveRequest {
+        private final SwerveRequest delegate;
+        private final BooleanSupplier authorization;
+        private final NeutralOut driveNeutral = new NeutralOut();
+        private final NeutralOut steerNeutral = new NeutralOut();
+
+        DiagnosticLeaseAwareRequest(SwerveRequest delegate, BooleanSupplier authorization) {
+            this.delegate = delegate;
+            this.authorization = authorization;
+        }
+
+        @Override
+        public StatusCode apply(
+                SwerveControlParameters parameters,
+                SwerveModule<?, ?, ?>... modulesToApply) {
+            boolean authorized;
+            try {
+                authorized = ProcessOutputSafety.isOutputAuthorized()
+                    && authorization.getAsBoolean();
+            } catch (RuntimeException exception) {
+                authorized = false;
+            }
+            if (authorized) {
+                return delegate.apply(parameters, modulesToApply);
+            }
+            if (modulesToApply == null) {
+                return StatusCode.GeneralError;
+            }
+            boolean succeeded = true;
+            for (SwerveModule<?, ?, ?> module : modulesToApply) {
+                try {
+                    module.apply(driveNeutral, steerNeutral);
+                } catch (RuntimeException exception) {
+                    succeeded = false;
+                }
+            }
+            return succeeded ? StatusCode.OK : StatusCode.GeneralError;
+        }
+    }
+
     private ControlResult applyNonNeutralRequest(SwerveRequest request) {
+        return applyNonNeutralRequest(request, () -> true);
+    }
+
+    private ControlResult applyNonNeutralRequest(
+            SwerveRequest request, BooleanSupplier additionalAuthorization) {
         boolean requestNeutral = false;
         ControlResult rejectedResult = ControlResult.REQUEST_EXCEPTION;
         synchronized (m_outputApplicationLock) {
             try {
                 ProcessOutputSafety.AuthorizedCall<Boolean> authorizedCall =
                     ProcessOutputSafety.callIfAuthorized(() -> {
+                        if (!additionalAuthorization.getAsBoolean()) {
+                            return Boolean.FALSE;
+                        }
                         synchronized (m_outputEvidenceLock) {
                             m_outputEpoch++;
                         }
                         this.setControl(request);
                         return Boolean.TRUE;
                     });
-                if (authorizedCall.authorized()) {
+                if (authorizedCall.authorized() && Boolean.TRUE.equals(authorizedCall.value())) {
                     return ControlResult.REQUEST_SUBMITTED;
                 }
                 rejectedResult = ControlResult.OUTPUT_AUTHORIZATION_REVOKED;

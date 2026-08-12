@@ -35,24 +35,30 @@ import frc.robot.utils.RobotOutputSafetySupervisor;
 public class DriveBaseContainer implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     public AutoContainer autoContainer;
-    public static double speedFactor = .05;
-    public static double rotationFactor = .05;
-    
+    private static final double SPEED_FACTOR = 0.05;
+    private static final double ROTATION_FACTOR = 0.05;
+
     static {
-        edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber("Speed Factor", speedFactor);
-        edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber("Rotation Factor", rotationFactor);
+        SmartDashboard.putString(
+            "Drive/Output Scale",
+            "FIXED_CODE_CONFIGURATION speedFactor=0.050 rotationFactor=0.050");
+        SmartDashboard.putString(
+            "Drive/Alignment Availability",
+            "UNAVAILABLE_PENDING_TARGET_DISTANCE_MODEL_AND_BINDING");
     }
 
-    public static DoubleSupplier MaxSpeed = () -> speedFactor * TunerConstants.kSpeedAt12Volts.in(MetersPerSecond); // kSpeedAt12Volts desired top speed
-    public static DoubleSupplier MaxAngularRate = () -> RotationsPerSecond.of(rotationFactor).in(RadiansPerSecond); // 3/4 of a rotation per second max angular velocity
+    private static final DoubleSupplier MAX_SPEED =
+        () -> SPEED_FACTOR * TunerConstants.kSpeedAt12Volts.in(MetersPerSecond);
+    private static final DoubleSupplier MAX_ANGULAR_RATE =
+        () -> RotationsPerSecond.of(ROTATION_FACTOR).in(RadiansPerSecond);
 
     /* Setting up bindings for necessary control of the swerve drive platform */
     private final SwerveRequest.FieldCentric drive = new SwerveRequest.FieldCentric()
-            .withDeadband(MaxSpeed.getAsDouble() * OIConstants.kDriveDeadband).withRotationalDeadband(MaxAngularRate.getAsDouble() * OIConstants.kDriveDeadband) // Add deadband
+            .withDeadband(MAX_SPEED.getAsDouble() * OIConstants.kDriveDeadband).withRotationalDeadband(MAX_ANGULAR_RATE.getAsDouble() * OIConstants.kDriveDeadband) // Add deadband
             .withDriveRequestType(DriveRequestType.OpenLoopVoltage); // Use open-loop control for drive motors
     private final SwerveRequest.RobotCentric robotCentricDrive = new SwerveRequest.RobotCentric()
-            .withDeadband(MaxSpeed.getAsDouble() * OIConstants.kDriveDeadband)
-            .withRotationalDeadband(MaxAngularRate.getAsDouble() * OIConstants.kDriveDeadband)
+            .withDeadband(MAX_SPEED.getAsDouble() * OIConstants.kDriveDeadband)
+            .withRotationalDeadband(MAX_ANGULAR_RATE.getAsDouble() * OIConstants.kDriveDeadband)
             .withDriveRequestType(DriveRequestType.OpenLoopVoltage);
     private final NeutralAfterEnableGate driveInputGate = new NeutralAfterEnableGate();
     private final OperatorActionEvidence actionEvidence;
@@ -63,7 +69,7 @@ public class DriveBaseContainer implements AutoCloseable {
     // private final SwerveRequest.SwerveDriveBrake brake = new SwerveRequest.SwerveDriveBrake();
     // private final SwerveRequest.PointWheelsAt point = new SwerveRequest.PointWheelsAt();
 
-    private final Telemetry logger = new Telemetry(MaxSpeed.getAsDouble());
+    private final Telemetry logger = new Telemetry(MAX_SPEED.getAsDouble());
     CommandPS5Controller joystick;
     public final CommandSwerveDrivetrain drivetrain = TunerConstants.createDrivetrain();
 
@@ -111,8 +117,8 @@ public class DriveBaseContainer implements AutoCloseable {
                 double axisX = availableAxis(1);
                 double axisY = availableAxis(0);
                 double axisRotation = availableAxis(2);
-                double maxSpeed = MaxSpeed.getAsDouble();
-                double maxAngularRate = MaxAngularRate.getAsDouble();
+                double maxSpeed = MAX_SPEED.getAsDouble();
+                double maxAngularRate = MAX_ANGULAR_RATE.getAsDouble();
                 if (!Double.isFinite(axisX)
                         || !Double.isFinite(axisY)
                         || !Double.isFinite(axisRotation)

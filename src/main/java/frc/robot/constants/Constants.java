@@ -129,6 +129,14 @@ public final class Constants {
 
   public static final class HardwareTestConstants {
     public static final double ARM_LIFETIME_SECONDS = 15.0;
+    /**
+     * Absolute upper bound for one already-authorized HST run.
+     *
+     * <p>The Disabled-only arm must still be consumed within {@link #ARM_LIFETIME_SECONDS}. The
+     * longer run bound covers every bounded motion stage plus every two-second stop-evidence
+     * barrier without extending the pre-start arm window.
+     */
+    public static final double HARDWARE_SELF_TEST_SESSION_LIFETIME_SECONDS = 30.0;
     public static final double OPEN_LOOP_DUTY_CYCLE = 0.03;
     public static final double OPEN_LOOP_STAGE_SECONDS = 0.40;
     public static final double UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE = 0.03;

@@ -15,6 +15,8 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.Subsystem;
+import frc.robot.DiagnosticOutputSession;
+import frc.robot.DiagnosticOutputSession.PulsePermit;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.Constants.IntakeConstants;
 import frc.robot.constants.Constants.ManipulatorConstants;
@@ -82,6 +84,7 @@ public final class HardwareSelfTestCommand {
     private HardwareSelfTestCommand() {}
 
     public static Command create(
+            DiagnosticOutputSession outputSession,
             CommandSwerveDrivetrain drivetrain,
             IntakeSubsystem intake,
             ConveyorSubsystem conveyor,
@@ -89,6 +92,9 @@ public final class HardwareSelfTestCommand {
             ShooterSubsystem shooter,
             TurretSubsystem turret,
             ClimberSubsystem climber) {
+        if (outputSession == null) {
+            throw new IllegalArgumentException("diagnostic output session is required");
+        }
         Map<String, MotionResult> results = new LinkedHashMap<>();
         Map<Integer, Boolean> sparkCanResults = new LinkedHashMap<>();
         Map<Integer, CanEvidenceResult> allCanResults = new LinkedHashMap<>();
@@ -155,11 +161,12 @@ public final class HardwareSelfTestCommand {
                 shooter,
                 turret,
                 climber,
+                outputSession,
                 runState),
             guardedStage(openLoopStage(
                 "SPARK_ID31_INTAKE_ROLLER",
                 () -> intake.getRollerDiagnosticSnapshot(false).ready(),
-                () -> intake.runRollerDiagnostic(duty),
+                permit -> intake.runRollerDiagnostic(duty, permit),
                 () -> true,
                 intake::stopRoller,
                 new int[] {IntakeConstants.INTAKE_ROLLER_CAN_ID},
@@ -171,12 +178,13 @@ public final class HardwareSelfTestCommand {
                 HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
                 results,
                 runState,
+                outputSession,
                 intake), runState),
             guardedStage(Commands.either(
                 openLoopStage(
                     "SPARK_ID32_FEEDER_CONTROLLED_RETEST",
                     () -> feeder.getDiagnosticSnapshot(false).ready(),
-                    () -> feeder.runControlledDiagnostic(duty),
+                    permit -> feeder.runControlledDiagnostic(duty, permit),
                     () -> true,
                     feeder::stop,
                     new int[] {ManipulatorConstants.FEEDER_CAN_ID},
@@ -188,13 +196,14 @@ public final class HardwareSelfTestCommand {
                     HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
                     results,
                     runState,
+                    outputSession,
                     feeder),
                 Commands.none(),
                 feeder::isControlledRetestEnabled), runState),
             guardedStage(openLoopStage(
                 "SPARK_ID33_CONVEYOR",
                 () -> conveyor.getDiagnosticSnapshot(false).ready(),
-                () -> conveyor.runDiagnostic(duty),
+                permit -> conveyor.runDiagnostic(duty, permit),
                 () -> true,
                 conveyor::stop,
                 new int[] {ManipulatorConstants.CONVEYOR_CAN_ID},
@@ -206,12 +215,13 @@ public final class HardwareSelfTestCommand {
                 HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
                 results,
                 runState,
+                outputSession,
                 conveyor), runState),
             guardedStage(openLoopStage(
                 "SPARK_ID36_37_FLYWHEEL_PAIR",
                 () -> shooter.getFlywheelLeaderDiagnosticSnapshot(false).ready()
                     && shooter.getFlywheelFollowerDiagnosticSnapshot(false).ready(),
-                () -> shooter.runFlywheelPairDiagnostic(duty),
+                permit -> shooter.runFlywheelPairDiagnostic(duty, permit),
                 () -> true,
                 shooter::stopFlywheelPairDiagnostic,
                 new int[] {
@@ -232,13 +242,14 @@ public final class HardwareSelfTestCommand {
                 HardwareTestConstants.OPEN_LOOP_STAGE_SECONDS,
                 results,
                 runState,
+                outputSession,
                 shooter), runState),
             guardedStage(openLoopStage(
                 "SPARK_ID37_FOLLOWER_ISOLATED",
                 () -> shooter.getFlywheelLeaderDiagnosticSnapshot(false).ready()
                     && shooter.getFlywheelFollowerDiagnosticSnapshot(false).ready(),
-                () -> {
-                    boolean accepted = shooter.runFollowerDiagnostic();
+                permit -> {
+                    boolean accepted = shooter.runFollowerDiagnostic(permit);
                     return accepted && shooter.isFollowerDiagnosticTransitionSafe();
                 },
                 shooter::isFollowerDiagnosticOutputSafe,
@@ -255,33 +266,40 @@ public final class HardwareSelfTestCommand {
                 FOLLOWER_DIAGNOSTIC_SECONDS,
                 results,
                 runState,
+                outputSession,
                 shooter), runState),
             guardedStage(swerveStage(
                 "SWERVE_FORWARD",
                 drivetrain,
-                () -> drivetrain.drive(0.015, 0, 0, false),
+                permit -> drivetrain.driveDiagnostic(0.015, 0, 0, false, 0.015, permit),
                 new edu.wpi.first.math.kinematics.ChassisSpeeds(
                     0.015 * TunerConstants.kSpeedAt12Volts.baseUnitMagnitude(), 0.0, 0.0),
+                0.015,
                 1.0,
                 results,
-                runState), runState),
+                runState,
+                outputSession), runState),
             guardedStage(swerveStage(
                 "SWERVE_STRAFE",
                 drivetrain,
-                () -> drivetrain.drive(0, 0.015, 0, false),
+                permit -> drivetrain.driveDiagnostic(0, 0.015, 0, false, 0.015, permit),
                 new edu.wpi.first.math.kinematics.ChassisSpeeds(
                     0.0, 0.015 * TunerConstants.kSpeedAt12Volts.baseUnitMagnitude(), 0.0),
+                0.015,
                 1.0,
                 results,
-                runState), runState),
+                runState,
+                outputSession), runState),
             guardedStage(swerveStage(
                 "SWERVE_ROTATE",
                 drivetrain,
-                () -> drivetrain.drive(0, 0, 0.12, false),
+                permit -> drivetrain.driveDiagnostic(0, 0, 0.12, false, 0.12, permit),
                 new edu.wpi.first.math.kinematics.ChassisSpeeds(0.0, 0.0, 0.12),
+                0.12,
                 1.0,
                 results,
-                runState), runState),
+                runState,
+                outputSession), runState),
             globalStopBarrier(
                 "GLOBAL_END",
                 drivetrain,
@@ -291,6 +309,7 @@ public final class HardwareSelfTestCommand {
                 shooter,
                 turret,
                 climber,
+                outputSession,
                 runState),
             Commands.runOnce(() -> {
                 captureCanResults(sparkCanResults, allCanResults, drivetrain);
@@ -298,8 +317,15 @@ public final class HardwareSelfTestCommand {
             }));
 
         return sequence
-            .until(() -> !testOutputsAllowed())
+            .until(() -> !testOutputsAllowed() || !outputSession.isValid())
             .finallyDo(interrupted -> {
+                boolean outputsAllowed = testOutputsAllowed();
+                boolean sessionInvalid = !outputSession.isValid();
+                boolean stoppedEarly = interrupted || !outputsAllowed || sessionInvalid;
+                if (stoppedEarly) {
+                    outputSession.trip("HST_INTERRUPTED_STOP_UNCONFIRMED");
+                }
+                outputSession.close();
                 drivetrain.requestIdle();
                 intake.stopAll();
                 conveyor.stop();
@@ -308,13 +334,15 @@ public final class HardwareSelfTestCommand {
                 turret.stop();
                 climber.stop();
                 SmartDashboard.putBoolean(RUNNING_KEY, false);
-                if (interrupted || !testOutputsAllowed()) {
+                if (stoppedEarly) {
                     captureCanResults(sparkCanResults, allCanResults, drivetrain);
                     SmartDashboard.putString(
                         "Hardware Self-Test/Overall", "INTERRUPTED_STOP_REQUESTED");
                     String abortReason = runState.abortReason();
                     if (abortReason.isBlank()) {
-                        abortReason = !testOutputsAllowed()
+                        abortReason = sessionInvalid
+                            ? "DIAGNOSTIC_OUTPUT_SESSION_INVALID"
+                            : !outputsAllowed
                             ? "INTERRUPTED_TEST_OUTPUTS_NOT_ALLOWED"
                             : "INTERRUPTED_COMMAND_CANCELED";
                     }
@@ -322,7 +350,7 @@ public final class HardwareSelfTestCommand {
                 }
                 SmartDashboard.putString("Hardware Self-Test/Results", results.toString());
                 log(
-                    interrupted ? "INTERRUPTED" : "END",
+                    stoppedEarly ? "INTERRUPTED" : "END",
                     "stop requested; confirmation requires a completed barrier results=" + results);
             })
             .withInterruptBehavior(Command.InterruptionBehavior.kCancelIncoming);
@@ -331,7 +359,7 @@ public final class HardwareSelfTestCommand {
     private static Command openLoopStage(
             String stageName,
             BooleanSupplier preflightReady,
-            BooleanSupplier action,
+            Function<PulsePermit, Boolean> action,
             BooleanSupplier outputSubmissionComplete,
             Runnable stop,
             int[] stopCanIds,
@@ -339,6 +367,7 @@ public final class HardwareSelfTestCommand {
             double durationSeconds,
             Map<String, MotionResult> report,
             SelfTestRunState runState,
+            DiagnosticOutputSession outputSession,
             Subsystem... requirements) {
         boolean[] eligible = {false};
         boolean[] attempted = {false};
@@ -347,6 +376,7 @@ public final class HardwareSelfTestCommand {
         Map<String, MotionResult> terminalResults = new LinkedHashMap<>();
         Map<String, MotionResult> latestResults = new LinkedHashMap<>();
         Map<String, TimedTargetState> timedTargets = new LinkedHashMap<>();
+        PulsePermit[] pulsePermit = {null};
 
         return Commands.sequence(
             Commands.runOnce(() -> {
@@ -356,6 +386,7 @@ public final class HardwareSelfTestCommand {
                 terminalResults.clear();
                 latestResults.clear();
                 timedTargets.clear();
+                revokePermit(pulsePermit);
                 eligible[0] = testOutputsAllowed() && preflightReady.getAsBoolean();
                 log(stageName + "_START", "eligible=" + eligible[0] + " " + formatTargets(targets, false));
             }),
@@ -368,7 +399,15 @@ public final class HardwareSelfTestCommand {
                         return;
                     }
                     if (!attempted[0]) {
-                        boolean commandAccepted = action.getAsBoolean();
+                        if (pulsePermit[0] == null) {
+                            pulsePermit[0] = outputSession.beginPulse(
+                                targets.get(0).requestedDuty(),
+                                durationSeconds + DiagnosticOutputSession.EVIDENCE_GRACE_SECONDS)
+                                .orElse(null);
+                        }
+                        boolean commandAccepted = pulsePermit[0] != null
+                            && pulsePermit[0].isValidFor(targets.get(0).requestedDuty())
+                            && action.apply(pulsePermit[0]);
                         accepted[0] = commandAccepted;
                         if (!commandAccepted) {
                             aborted[0] = true;
@@ -389,6 +428,16 @@ public final class HardwareSelfTestCommand {
                         aborted[0] = true;
                         for (DiagnosticTarget target : targets) {
                             terminalResults.put(target.name(), MotionResult.FAIL_NOT_READY);
+                        }
+                        stop.run();
+                        return;
+                    }
+                    if (pulsePermit[0] == null
+                            || !pulsePermit[0].isValidFor(targets.get(0).requestedDuty())) {
+                        aborted[0] = true;
+                        for (DiagnosticTarget target : targets) {
+                            terminalResults.put(
+                                target.name(), MotionResult.FAIL_COMMAND_REJECTED);
                         }
                         stop.run();
                         return;
@@ -420,6 +469,7 @@ public final class HardwareSelfTestCommand {
                         "results=" + latestResults
                             + " telemetry=" + formatTargets(targets, accepted[0]))))),
             Commands.runOnce(() -> {
+                revokePermit(pulsePermit);
                 Map<String, MotionResult> finalResults = new LinkedHashMap<>();
                 Map<String, MotionResult> currentResults = evaluateCurrentTimedTargets(
                     targets, timedTargets);
@@ -445,6 +495,7 @@ public final class HardwareSelfTestCommand {
                 stageName,
                 stop,
                 stopCanIds,
+                outputSession,
                 runState,
                 requirements));
     }
@@ -452,13 +503,16 @@ public final class HardwareSelfTestCommand {
     private static Command swerveStage(
             String name,
             CommandSwerveDrivetrain drivetrain,
-            java.util.function.Supplier<CommandSwerveDrivetrain.ControlResult> action,
+            Function<PulsePermit, CommandSwerveDrivetrain.ControlResult> action,
             edu.wpi.first.math.kinematics.ChassisSpeeds expectedSpeeds,
+            double expectedPermitDuty,
             double durationSeconds,
             Map<String, MotionResult> report,
-            SelfTestRunState runState) {
+            SelfTestRunState runState,
+            DiagnosticOutputSession outputSession) {
         boolean[] eligible = {false};
         boolean[] connectionLost = {false};
+        boolean[] desktopAggregateTransient = {false};
         boolean[] motionObserved = {false};
         boolean[] simulationCurrentIgnored = {false};
         MotionResult[] terminalResult = {null};
@@ -466,11 +520,17 @@ public final class HardwareSelfTestCommand {
         CommandSwerveDrivetrain.SwerveDiagnosticEvidence[] latestEvidence = {null};
         CommandSwerveDrivetrain.SwerveDiagnosticBaseline[] baseline = {null};
         CommandSwerveDrivetrain.SwerveDiagnosticToken[] token = {null};
+        PulsePermit[] pulsePermit = {null};
 
         return Commands.sequence(
+            // A confirmed neutral can overlap one Phoenix desktop DAQ refresh. Wait for the
+            // production three-sample health tracker to recover before taking the stage preflight
+            // snapshot; a persistent fault still times out and fails closed in the next step.
+            Commands.waitUntil(drivetrain::areAllDevicesConnected).withTimeout(0.50),
             Commands.runOnce(() -> {
                 eligible[0] = testOutputsAllowed() && drivetrain.areAllDevicesConnected();
                 connectionLost[0] = false;
+                desktopAggregateTransient[0] = false;
                 motionObserved[0] = false;
                 simulationCurrentIgnored[0] = false;
                 terminalResult[0] = null;
@@ -479,6 +539,17 @@ public final class HardwareSelfTestCommand {
                     : "INITIAL_DEVICE_READINESS_FAILED";
                 baseline[0] = drivetrain.captureSwerveDiagnosticBaseline();
                 token[0] = null;
+                revokePermit(pulsePermit);
+                pulsePermit[0] = eligible[0]
+                    ? outputSession.beginPulse(
+                        expectedPermitDuty,
+                        durationSeconds + DiagnosticOutputSession.EVIDENCE_GRACE_SECONDS)
+                        .orElse(null)
+                    : null;
+                if (eligible[0] && pulsePermit[0] == null) {
+                    eligible[0] = false;
+                    assessmentReason[0] = "DIAGNOSTIC_OUTPUT_PERMIT_REJECTED";
+                }
                 latestEvidence[0] = null;
                 log(name + "_START", "eligible=" + eligible[0] + " " + drivetrain.getDeviceHealthSummary());
             }),
@@ -487,23 +558,45 @@ public final class HardwareSelfTestCommand {
                 Commands.run(() -> {
                     boolean outputsAllowed = testOutputsAllowed();
                     boolean devicesConnected = drivetrain.areAllDevicesConnected();
+                    boolean permitValid = pulsePermit[0] != null
+                        && pulsePermit[0].isValidFor(expectedPermitDuty);
                     if (!eligible[0]
                             || connectionLost[0]
                             || terminalResult[0] != null
                             || !outputsAllowed
-                            || !devicesConnected) {
+                            || !permitValid) {
                         if (eligible[0] && !outputsAllowed) {
                             assessmentReason[0] = "TEST_OUTPUT_AUTHORIZATION_LOST_DURING_STAGE";
-                        } else if (eligible[0] && !devicesConnected) {
-                            assessmentReason[0] = "DEVICE_CONNECTIVITY_LOST_DURING_STAGE";
+                        } else if (eligible[0] && !permitValid) {
+                            assessmentReason[0] = "DIAGNOSTIC_OUTPUT_PERMIT_EXPIRED_OR_REVOKED";
                         }
                         connectionLost[0] |= eligible[0]
-                            && (!outputsAllowed || !devicesConnected);
+                            && (!outputsAllowed || !permitValid);
                         drivetrain.requestIdle();
                         return;
                     }
+                    if (!devicesConnected) {
+                        if (!RobotBase.isSimulation()
+                                || !drivetrain.areAllRequiredDeviceSignalsFresh()) {
+                            connectionLost[0] = true;
+                            assessmentReason[0] = "DEVICE_CONNECTIVITY_LOST_DURING_STAGE";
+                            drivetrain.requestIdle();
+                            return;
+                        }
+                        // Phoenix desktop can momentarily drop only its aggregate state/DAQ flag
+                        // while every per-device post-command signal remains fresh. Do not turn
+                        // that simulator-only bookkeeping gap into an early neutral before the
+                        // routing evidence can be observed. A missing/stale per-device frame,
+                        // persistent aggregate loss, or any live-hardware loss still fails closed.
+                        desktopAggregateTransient[0] = true;
+                        assessmentReason[0] = "DESKTOP_AGGREGATE_CONNECTIVITY_TRANSIENT";
+                        if (token[0] == null) {
+                            return;
+                        }
+                    }
                     if (token[0] == null) {
-                        CommandSwerveDrivetrain.ControlResult submission = action.get();
+                        CommandSwerveDrivetrain.ControlResult submission =
+                            action.apply(pulsePermit[0]);
                         token[0] = drivetrain.completeSwerveDiagnosticRequest(
                             baseline[0], submission);
                         if (submission != CommandSwerveDrivetrain.ControlResult.REQUEST_SUBMITTED) {
@@ -517,14 +610,28 @@ public final class HardwareSelfTestCommand {
                     latestEvidence[0] = getSwerveEvidence(
                         drivetrain, expectedSpeeds, token[0]);
                     if (!latestEvidence[0].postCommandEvidenceReady()) {
-                        if (latestEvidence[0].postCommandEvidenceTimedOut()) {
+                        boolean boundedInitialFrameWait = RobotBase.isSimulation()
+                            && latestEvidence[0].evidenceReason()
+                                .equals("WAITING_FOR_POST_COMMAND_SIGNALS")
+                            && !latestEvidence[0].postCommandEvidenceTimedOut();
+                        if (!boundedInitialFrameWait) {
                             connectionLost[0] = true;
-                            assessmentReason[0] = "POST_COMMAND_EVIDENCE_TIMEOUT";
+                            assessmentReason[0] = latestEvidence[0].postCommandEvidenceTimedOut()
+                                ? "POST_COMMAND_EVIDENCE_TIMEOUT"
+                                : "POST_COMMAND_EVIDENCE_" + latestEvidence[0].evidenceReason();
                             drivetrain.requestIdle();
                         }
                         return;
                     }
                     if (!latestEvidence[0].ready() || !latestEvidence[0].telemetryFinite()) {
+                        boolean toleratedDesktopAggregateTransient = RobotBase.isSimulation()
+                            && !devicesConnected
+                            && latestEvidence[0].telemetryFinite()
+                            && latestEvidence[0].postCommandEvidenceReady()
+                            && !latestEvidence[0].postCommandEvidenceTimedOut();
+                        if (toleratedDesktopAggregateTransient) {
+                            return;
+                        }
                         connectionLost[0] = true;
                         assessmentReason[0] = latestEvidence[0].ready()
                             ? "POST_COMMAND_TELEMETRY_NONFINITE"
@@ -569,18 +676,27 @@ public final class HardwareSelfTestCommand {
             Commands.runOnce(() -> {
                 latestEvidence[0] = getSwerveEvidence(
                     drivetrain, expectedSpeeds, token[0]);
+                boolean recoveredDesktopConnectivityTransient = RobotBase.isSimulation()
+                    && desktopAggregateTransient[0]
+                    && !connectionLost[0]
+                    && drivetrain.areAllDevicesConnected()
+                    && drivetrain.areAllRequiredDeviceSignalsFresh()
+                    && latestEvidence[0].ready()
+                    && latestEvidence[0].telemetryFinite()
+                    && latestEvidence[0].postCommandEvidenceReady()
+                    && !latestEvidence[0].postCommandEvidenceTimedOut();
+                if (recoveredDesktopConnectivityTransient) {
+                    // Phoenix desktop can transiently invalidate its aggregate status while every
+                    // per-device signal and the stage token later prove fresh again. This is never
+                    // applied to live hardware, persistent failures, or missing output evidence.
+                    connectionLost[0] = false;
+                    assessmentReason[0] = "DESKTOP_CONNECTIVITY_TRANSIENT_RECOVERED_WITH_FRESH_EVIDENCE";
+                }
                 MotionResult result;
                 if (terminalResult[0] != null) {
                     result = terminalResult[0];
                 } else if (!eligible[0] || connectionLost[0] || !latestEvidence[0].ready()) {
                     result = MotionResult.FAIL_NOT_READY;
-                    if (connectionLost[0]
-                            && assessmentReason[0].equals("DEVICE_CONNECTIVITY_LOST_DURING_STAGE")
-                            && drivetrain.areAllDevicesConnected()
-                            && latestEvidence[0].ready()) {
-                        assessmentReason[0] =
-                            "DEVICE_CONNECTIVITY_LOST_DURING_STAGE_RECOVERED_BEFORE_FINAL_ASSESSMENT";
-                    }
                 } else if (latestEvidence[0].motionObserved()
                         && !latestEvidence[0].steeringAligned()) {
                     result = MotionResult.FAIL_DIRECTION_MISMATCH;
@@ -592,7 +708,9 @@ public final class HardwareSelfTestCommand {
                     assessmentReason[0] = "POST_COMMAND_MOTION_AND_DIRECTION_OBSERVED";
                 } else {
                     result = MotionResult.INCONCLUSIVE_NO_MOTION;
-                    assessmentReason[0] = "POST_COMMAND_OUTPUT_EVIDENCE_WITHOUT_MOTION";
+                    if (!recoveredDesktopConnectivityTransient) {
+                        assessmentReason[0] = "POST_COMMAND_OUTPUT_EVIDENCE_WITHOUT_MOTION";
+                    }
                 }
                 publishResult(report, name, result);
                 SmartDashboard.putString(
@@ -602,18 +720,27 @@ public final class HardwareSelfTestCommand {
                     result + " reason=" + assessmentReason[0]
                         + " evidence=" + latestEvidence[0]
                         + " telemetry=" + drivetrain.getMotionDiagnosticSummary());
+                revokePermit(pulsePermit);
             }),
-            swerveStopBarrier(name, drivetrain, runState));
+            swerveStopBarrier(name, drivetrain, outputSession, runState));
     }
 
     private static Command guardedStage(Command stage, SelfTestRunState runState) {
         return Commands.either(stage, Commands.none(), runState::mayContinue);
     }
 
+    private static void revokePermit(PulsePermit[] permit) {
+        if (permit != null && permit.length > 0 && permit[0] != null) {
+            permit[0].revoke();
+            permit[0] = null;
+        }
+    }
+
     private static Command sparkStopBarrier(
             String stageName,
             Runnable stop,
             int[] canIds,
+            DiagnosticOutputSession outputSession,
             SelfTestRunState runState,
             Subsystem... requirements) {
         return stopBarrier(
@@ -627,6 +754,7 @@ public final class HardwareSelfTestCommand {
                     return new StopPoll(snapshot.confirmed(), snapshot.summary());
                 };
             },
+            outputSession,
             runState,
             requirements);
     }
@@ -634,6 +762,7 @@ public final class HardwareSelfTestCommand {
     private static Command swerveStopBarrier(
             String stageName,
             CommandSwerveDrivetrain drivetrain,
+            DiagnosticOutputSession outputSession,
             SelfTestRunState runState) {
         return stopBarrier(
             stageName + "_SWERVE_STOP",
@@ -647,6 +776,7 @@ public final class HardwareSelfTestCommand {
                     return new StopPoll(evidence.confirmed(), evidence.reason());
                 };
             },
+            outputSession,
             runState,
             drivetrain);
     }
@@ -660,6 +790,7 @@ public final class HardwareSelfTestCommand {
             ShooterSubsystem shooter,
             TurretSubsystem turret,
             ClimberSubsystem climber,
+            DiagnosticOutputSession outputSession,
             SelfTestRunState runState) {
         return stopBarrier(
             stageName,
@@ -686,6 +817,7 @@ public final class HardwareSelfTestCommand {
                         "spark=" + spark.summary() + " swerve=" + swerve.reason());
                 };
             },
+            outputSession,
             runState,
             drivetrain,
             intake,
@@ -699,6 +831,7 @@ public final class HardwareSelfTestCommand {
     private static Command stopBarrier(
             String name,
             Supplier<StopMonitor> request,
+            DiagnosticOutputSession outputSession,
             SelfTestRunState runState,
             Subsystem... requirements) {
         StopMonitor[] monitor = {null};
@@ -724,6 +857,7 @@ public final class HardwareSelfTestCommand {
                 } else {
                     String reason = name + " timeout " + latest[0].summary();
                     runState.abort(reason);
+                    outputSession.trip("HST_STOP_UNCONFIRMED_" + name);
                     SmartDashboard.putString(dashboardKey, "TIMEOUT " + latest[0].summary());
                     log(name + "_TIMEOUT", latest[0].summary());
                 }
