@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import frc.robot.constants.ConfiguredCanHardware;
+import frc.robot.constants.ConfiguredCanHardware.DeviceType;
+import frc.robot.constants.ConfiguredCanHardware.HardwareRole;
+import frc.robot.constants.ConfiguredCanHardware.Vendor;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,6 +39,46 @@ class ConfiguredCanHardwareTest {
     assertTrue(
         ConfiguredCanHardware.allDeviceIds().stream().allMatch(id -> id >= 0 && id <= 62),
         "CAN IDs must stay within the legal 0..62 range");
+  }
+
+  @Test
+  void everyConfiguredIdHasOneTypedOperatorFacingInventoryRecord() {
+    assertEquals(23, ConfiguredCanHardware.devices().size());
+    assertEquals(
+        ConfiguredCanHardware.allDeviceIds(),
+        ConfiguredCanHardware.devices().stream()
+            .map(ConfiguredCanHardware.Device::canId)
+            .toList());
+    assertEquals(
+        ConfiguredCanHardware.sparkDeviceIds(),
+        ConfiguredCanHardware.devices().stream()
+            .filter(device -> device.vendor() == Vendor.REV)
+            .map(ConfiguredCanHardware.Device::canId)
+            .toList());
+    assertEquals(
+        ConfiguredCanHardware.ctreDeviceIds(),
+        ConfiguredCanHardware.devices().stream()
+            .filter(device -> device.vendor() == Vendor.CTRE)
+            .map(ConfiguredCanHardware.Device::canId)
+            .toList());
+
+    var pigeon = ConfiguredCanHardware.byCanId(20).orElseThrow();
+    var encoder = ConfiguredCanHardware.byCanId(40).orElseThrow();
+    var drive = ConfiguredCanHardware.byCanId(51).orElseThrow();
+    assertEquals(DeviceType.GYRO, pigeon.type());
+    assertEquals(HardwareRole.SWERVE_GYRO, pigeon.role());
+    assertEquals(DeviceType.ABSOLUTE_ENCODER, encoder.type());
+    assertEquals(HardwareRole.SWERVE_ABSOLUTE_ENCODER, encoder.role());
+    assertEquals(DeviceType.MOTOR_CONTROLLER, drive.type());
+    assertEquals(HardwareRole.SWERVE_DRIVE_MOTOR, drive.role());
+    assertEquals(List.of(), drive.dependencyCanIds());
+    assertEquals(List.of(40), ConfiguredCanHardware.byCanId(50).orElseThrow().dependencyCanIds());
+    assertEquals(List.of(41), ConfiguredCanHardware.byCanId(52).orElseThrow().dependencyCanIds());
+    assertEquals(List.of(42), ConfiguredCanHardware.byCanId(54).orElseThrow().dependencyCanIds());
+    assertEquals(List.of(43), ConfiguredCanHardware.byCanId(56).orElseThrow().dependencyCanIds());
+    assertEquals(List.of(37), ConfiguredCanHardware.byCanId(36).orElseThrow().dependencyCanIds());
+    assertEquals(List.of(36), ConfiguredCanHardware.byCanId(37).orElseThrow().dependencyCanIds());
+    assertTrue(ConfiguredCanHardware.devices().stream().noneMatch(device -> device.label().isBlank()));
   }
 
   @Test

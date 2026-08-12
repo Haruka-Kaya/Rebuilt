@@ -114,6 +114,9 @@ public class SparkMAXContainer implements MotorContainer {
   private double lastZeroConfirmedAt = Double.NEGATIVE_INFINITY;
   private long outputEpoch;
   private long lastZeroedOutputEpoch = -1;
+  private long lastRequestEpoch = -1;
+  private boolean lastRequestAccepted;
+  private String lastRequestReason = "NO_SETPOINT_REQUEST";
   private volatile int firmwareVersion;
 
   private double cachedAppliedOutput;
@@ -1103,6 +1106,23 @@ public class SparkMAXContainer implements MotorContainer {
     return summary.toString();
   }
 
+  /**
+   * Returns one immutable, cached evidence snapshot for every registered SPARK controller.
+   *
+   * <p>No vendor call is made here. A successful request means only that the REV setpoint API
+   * returned {@code kOk}; current, velocity, and applied output remain timestamped observations
+   * rather than proof of physical motion.
+   */
+  public static List<DeviceEvidenceSnapshot> getDeviceEvidenceSnapshots() {
+    List<DeviceEvidenceSnapshot> snapshots = new ArrayList<>();
+    for (SparkMAXContainer device : DEVICES) {
+      snapshots.add(device.getDeviceEvidenceSnapshot());
+    }
+    return snapshots.stream()
+        .sorted(java.util.Comparator.comparingInt(DeviceEvidenceSnapshot::canId))
+        .toList();
+  }
+
   /** Cached readiness bit for each configured CAN ID, used to require release after recovery. */
   public static long getReadyCanIdMask() {
     long mask = 0L;
@@ -1222,6 +1242,125 @@ public class SparkMAXContainer implements MotorContainer {
     }
   }
 
+  /** Atomic cached controller evidence used by the manifest-driven dashboard publisher. */
+  public record DeviceEvidenceSnapshot(
+      int canId,
+      boolean ready,
+      String reason,
+      double appliedOutput,
+      double currentAmps,
+      double velocityRpm,
+      double sampleAgeSeconds,
+      long sampleOutputEpoch,
+      boolean sampleMatchesCurrentOutputEpoch,
+      boolean lastRequestAccepted,
+      long lastRequestEpoch,
+      String lastRequestReason,
+      long outputEpoch,
+      String stopState) {}
+
+  private DeviceEvidenceSnapshot getDeviceEvidenceSnapshot() {
+    double now = Timer.getFPGATimestamp();
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        boolean dependenciesReady = requiredFollowersReadyLocked(now);
+        double leaderStoppedAt = desiredFollower
+            ? getLeaderStoppedAtLocked(followerLeader, now)
+            : Double.NEGATIVE_INFINITY;
+        boolean leaderStopConfirmed = !desiredFollower
+            || (Double.isFinite(leaderStoppedAt)
+                && Double.isFinite(lastSampleAt)
+                && lastSampleAt >= leaderStoppedAt);
+        boolean ready = resetGuard.isArmed()
+            && followerDiagnosticMode == FollowerDiagnosticMode.NONE
+            && isBaseReadyLocked(now)
+            && dependenciesReady;
+        boolean sampleAvailable = Double.isFinite(lastSampleAt);
+        double sampleAge = sampleAvailable ? now - lastSampleAt : Double.NaN;
+        if (!Double.isFinite(sampleAge) || sampleAge < 0.0) {
+          sampleAge = Double.NaN;
+        }
+        boolean sampleValid = Double.isFinite(sampleAge)
+            && sampleAge <= STATUS_FRESHNESS_SECONDS;
+        boolean sampleMatchesCurrentOutputEpoch = sampleValid
+            && lastSampleOutputEpoch == outputEpoch;
+
+        var stopObservation = new SparkOutputStopEvaluator.Observation(
+            port,
+            outputEpoch,
+            outputEpoch,
+            lastZeroedOutputEpoch,
+            recoveryState.isConfigurationReady(),
+            zeroInFlight,
+            outputGate.isZeroRequired(),
+            outputGate.outputMayBeNonzero(),
+            lastZeroConfirmedAt,
+            lastSampleAt,
+            now,
+            sampleAvailable ? cachedAppliedOutput : Double.NaN,
+            encoder != null,
+            sampleAvailable && encoder != null ? cachedVelocity : Double.NaN,
+            desiredFollower,
+            followerDiagnosticMode == FollowerDiagnosticMode.NONE,
+            cachedFollower);
+        SparkOutputStopEvaluator.Status evaluatedStop =
+            SparkOutputStopEvaluator.evaluate(stopObservation, OUTPUT_STOP_LIMITS).status();
+
+        return new DeviceEvidenceSnapshot(
+            port,
+            ready,
+            readinessReasonLocked(now, dependenciesReady),
+            sampleValid ? cachedAppliedOutput : Double.NaN,
+            sampleValid ? cachedCurrent : Double.NaN,
+            sampleValid && encoder != null ? cachedVelocity : Double.NaN,
+            sampleAge,
+            lastSampleOutputEpoch,
+            sampleMatchesCurrentOutputEpoch,
+            lastRequestAccepted,
+            lastRequestEpoch,
+            lastRequestReason,
+            outputEpoch,
+            SparkDeviceEvidence.stopState(
+                evaluatedStop,
+                zeroInFlight,
+                outputGate.isZeroRequired(),
+                outputGate.outputMayBeNonzero(),
+                desiredFollower,
+                leaderStopConfirmed));
+      }
+    }
+  }
+
+  /** Called with OUTPUT_ORDER_LOCK and stateLock held. */
+  private String readinessReasonLocked(double now, boolean dependenciesReady) {
+    if (!recoveryState.isConfigurationReady()) {
+      return recoveryState.getSummary();
+    }
+    if (!resetGuard.isArmed()) {
+      return "RESET_BASELINE_PENDING";
+    }
+    if (!Double.isFinite(lastSampleAt)) {
+      return "STATUS_SAMPLE_MISSING";
+    }
+    double sampleAge = now - lastSampleAt;
+    if (!Double.isFinite(sampleAge) || sampleAge < 0.0 || sampleAge > STATUS_FRESHNESS_SECONDS) {
+      return "STATUS_STALE";
+    }
+    if (zeroInFlight) {
+      return "PROTECTIVE_ZERO_IN_FLIGHT";
+    }
+    if (outputGate.isZeroRequired()) {
+      return "PROTECTIVE_ZERO_REQUIRED";
+    }
+    if (followerDiagnosticMode != FollowerDiagnosticMode.NONE) {
+      return "FOLLOWER_DIAGNOSTIC_" + followerDiagnosticMode;
+    }
+    if (!dependenciesReady) {
+      return "REQUIRED_FOLLOWER_NOT_READY";
+    }
+    return "READY";
+  }
+
   private String getHealthSummary() {
     double now = Timer.getFPGATimestamp();
     synchronized (stateLock) {
@@ -1274,10 +1413,15 @@ public class SparkMAXContainer implements MotorContainer {
   public TimedDiagnosticSnapshot getTimedDiagnosticSnapshot(boolean commandAccepted) {
     double now = Timer.getFPGATimestamp();
     synchronized (OUTPUT_ORDER_LOCK) {
+      double leaderStoppedAt = desiredFollower
+          ? getLeaderStoppedAtLocked(followerLeader, now)
+          : Double.NEGATIVE_INFINITY;
       synchronized (stateLock) {
-        boolean ready = followerDiagnosticMode == FollowerDiagnosticMode.NONE
-            && isBaseReadyLocked(now)
-            && requiredFollowersReadyLocked(now);
+        boolean ready = followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE
+            ? desiredFollower && isBaseReadyLocked(now) && Double.isFinite(leaderStoppedAt)
+            : followerDiagnosticMode == FollowerDiagnosticMode.NONE
+                && isBaseReadyLocked(now)
+                && requiredFollowersReadyLocked(now);
         return new TimedDiagnosticSnapshot(
             new Snapshot(
                 port,
@@ -1688,7 +1832,7 @@ public class SparkMAXContainer implements MotorContainer {
 
   private boolean setDutyCycleInternal(double output, boolean diagnosticFollowerOutput) {
     if (!Double.isFinite(output)) {
-      requestZeroOutput();
+      rejectSetpointRequestAndRequestZero("NONFINITE_DUTY_CYCLE_REJECTED");
       return false;
     }
     double clampedOutput = Math.max(-1.0, Math.min(1.0, output));
@@ -1702,14 +1846,14 @@ public class SparkMAXContainer implements MotorContainer {
   @Override
   @Deprecated(forRemoval = false)
   public boolean goToPostion(double position) {
-    requestZeroOutput();
+    rejectSetpointRequestAndRequestZero("LEGACY_UNREFERENCED_POSITION_API_BLOCKED");
     return false;
   }
 
   @Override
   @Deprecated(forRemoval = false)
   public boolean goToPostion(double position, double deadband) {
-    requestZeroOutput();
+    rejectSetpointRequestAndRequestZero("LEGACY_UNREFERENCED_POSITION_API_BLOCKED");
     return false;
   }
 
@@ -1729,7 +1873,7 @@ public class SparkMAXContainer implements MotorContainer {
         || !Double.isFinite(deadband)
         || encoder == null
         || reference == null) {
-      requestZeroOutput();
+      rejectSetpointRequestAndRequestZero("INVALID_OR_UNREFERENCED_POSITION_REQUEST");
       return PositionCommandStatus.REJECTED;
     }
     if (!trySetpoint(position, ControlType.kPosition, false, reference)) {
@@ -1747,7 +1891,7 @@ public class SparkMAXContainer implements MotorContainer {
 
   public boolean setVelocity(double velocity) {
     if (!Double.isFinite(velocity)) {
-      requestZeroOutput();
+      rejectSetpointRequestAndRequestZero("NONFINITE_VELOCITY_REJECTED");
       return false;
     }
     if (Math.abs(velocity) <= 1e-9) {
@@ -1784,13 +1928,30 @@ public class SparkMAXContainer implements MotorContainer {
     }
   }
 
+  private void rejectSetpointRequestAndRequestZero(String reason) {
+    double now = Timer.getFPGATimestamp();
+    SparkMAXContainer leader;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        lastRequestEpoch++;
+        lastRequestAccepted = false;
+        lastRequestReason = reason;
+        if (outputGate.needsZeroCommand()) {
+          outputGate.requireZero(now, false);
+        }
+        leader = desiredFollower ? followerLeader : null;
+      }
+      requestLeaderZeroLocked(leader, now, false);
+    }
+  }
+
   private boolean trySetpoint(
       double value,
       ControlType controlType,
       boolean diagnosticFollowerOutput,
       PositionReferenceGuard.Token positionReference) {
     if (!Double.isFinite(value)) {
-      requestZeroOutput();
+      rejectSetpointRequestAndRequestZero("NONFINITE_SETPOINT_REJECTED");
       return false;
     }
     double now = Timer.getFPGATimestamp();
@@ -1800,6 +1961,9 @@ public class SparkMAXContainer implements MotorContainer {
     synchronized (OUTPUT_ORDER_LOCK) {
       boolean dependenciesReady = diagnosticFollowerOutput || requiredFollowersReadyLocked(now);
       synchronized (stateLock) {
+        lastRequestEpoch++;
+        lastRequestAccepted = false;
+        lastRequestReason = "SETPOINT_REQUEST_EVALUATING";
         if (isStatusStaleLocked(now)) {
           failure = "status stale";
           recordFailureLocked(now, failure, false);
@@ -1811,9 +1975,10 @@ public class SparkMAXContainer implements MotorContainer {
                 && followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE);
         boolean positionReferenceAllowed = controlType != ControlType.kPosition
             || positionReferenceGuard.isValid(positionReference);
+        boolean baseReady = failure == null && isBaseReadyLocked(now);
         if (failure == null
             && dependenciesReady
-            && isBaseReadyLocked(now)
+            && baseReady
             && followerOutputAllowed
             && positionReferenceAllowed) {
           SparkVendorCall.Result result = SparkVendorCall.execute(
@@ -1822,14 +1987,35 @@ public class SparkMAXContainer implements MotorContainer {
             outputGate.nonzeroSucceeded();
             outputEpoch++;
             accepted = true;
+            lastRequestAccepted = true;
+            lastRequestReason = "REV_API_RETURNED_K_OK_NOT_MOTION_PROOF";
           } else {
             failure = result.failure();
+            lastRequestReason = "REV_API_SETPOINT_FAILURE: " + failure;
             recordFailureLocked(now, failure, false);
             leader = desiredFollower ? followerLeader : null;
           }
-        } else if (!accepted && outputGate.needsZeroCommand()) {
-          outputGate.requireZero(now, false);
+        } else if (!accepted) {
+          if (failure != null) {
+            lastRequestReason = "CONTROLLER_STATUS_FAILURE: " + failure;
+          } else if (!dependenciesReady) {
+            lastRequestReason = "REQUIRED_FOLLOWER_NOT_READY";
+          } else if (!baseReady) {
+            lastRequestReason = "CONTROLLER_NOT_READY";
+          } else if (!followerOutputAllowed) {
+            lastRequestReason = "FOLLOWER_OUTPUT_NOT_ALLOWED";
+          } else if (!positionReferenceAllowed) {
+            lastRequestReason = "POSITION_REFERENCE_INVALID";
+          } else {
+            lastRequestReason = "SETPOINT_REQUEST_REJECTED";
+          }
+          if (outputGate.needsZeroCommand()) {
+            outputGate.requireZero(now, false);
+          }
         }
+      }
+      if (accepted && !diagnosticFollowerOutput) {
+        markRequiredFollowersExpectingNonzeroLocked();
       }
       revokeLeaderForDependentLocked(leader, port, failure, now, false);
     }
@@ -1837,6 +2023,29 @@ public class SparkMAXContainer implements MotorContainer {
       logState(failure + " zero=queued");
     }
     return accepted;
+  }
+
+  /**
+   * Called only with OUTPUT_ORDER_LOCK held after this leader's setpoint API returned kOk.
+   * A configured follower receives no direct setpoint call, but its output evidence epoch must
+   * still advance so a pre-leader sample cannot be mistaken for follower response.
+   */
+  private void markRequiredFollowersExpectingNonzeroLocked() {
+    for (SparkMAXContainer follower : requiredFollowers) {
+      synchronized (follower.stateLock) {
+        if (follower.followerLeader != this
+            || !follower.desiredFollower
+            || follower.followerDiagnosticMode != FollowerDiagnosticMode.NONE) {
+          continue;
+        }
+        follower.outputGate.nonzeroSucceeded();
+        follower.outputEpoch++;
+        follower.lastRequestEpoch++;
+        follower.lastRequestAccepted = false;
+        follower.lastRequestReason =
+            "FOLLOWER_OUTPUT_EXPECTED_FROM_LEADER_NOT_DIRECT_API_ACCEPTANCE";
+      }
+    }
   }
 
   /** Pauses configured follower mode and applies a diagnostic output capped at 10%. */

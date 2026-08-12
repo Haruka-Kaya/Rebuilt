@@ -662,6 +662,11 @@ public class RobotContainer implements AutoCloseable {
     return drivetrain.getDeviceHealthSummary();
   }
 
+  public java.util.List<frc.robot.utils.CtreDeviceEvidence.Snapshot>
+      getSwerveDeviceEvidenceSnapshots() {
+    return drivetrain.getDeviceEvidenceSnapshots();
+  }
+
   public String getSparkDeviceHealthSummary() {
     return SparkMAXContainer.getDeviceAvailabilitySummary();
   }

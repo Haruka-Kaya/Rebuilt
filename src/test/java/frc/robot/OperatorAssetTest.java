@@ -96,6 +96,12 @@ class OperatorAssetTest {
           "/SmartDashboard/Hardware/CTRE Health",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
+          "/SmartDashboard/Hardware/Device Evidence Scope",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
+          "/SmartDashboard/Hardware/Device Evidence Summary",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
           "/SmartDashboard/Hardware Self-Test/GLOBAL_START/Stop Result",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(

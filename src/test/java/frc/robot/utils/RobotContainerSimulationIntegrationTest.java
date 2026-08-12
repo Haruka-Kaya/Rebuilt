@@ -65,10 +65,28 @@ class RobotContainerSimulationIntegrationTest {
 
       enableTeleop(false);
       pump(activeContainer, 3);
+      long followerEpochBeforeRev = SparkMAXContainer.getDeviceEvidenceSnapshots().stream()
+          .filter(snapshot -> snapshot.canId() == SHOOTER_FOLLOWER_ID)
+          .findFirst()
+          .orElseThrow()
+          .outputEpoch();
       setDriverButton(ConfiguredOperatorControls.DRIVER_REV, true);
 
       assertTrue(await(3.0, activeContainer, () -> pairEchoesRequestedVelocity(500.0)),
           () -> pairSummary("initial rev binding did not reach the SPARK pair"));
+      var followerEvidence = SparkMAXContainer.getDeviceEvidenceSnapshots().stream()
+          .filter(snapshot -> snapshot.canId() == SHOOTER_FOLLOWER_ID)
+          .findFirst()
+          .orElseThrow();
+      assertFalse(
+          followerEvidence.lastRequestAccepted(),
+          "a follower observation must not be reported as a direct setpoint API acceptance");
+      assertEquals(
+          "FOLLOWER_OUTPUT_EXPECTED_FROM_LEADER_NOT_DIRECT_API_ACCEPTANCE",
+          followerEvidence.lastRequestReason());
+      assertTrue(
+          followerEvidence.outputEpoch() > followerEpochBeforeRev,
+          "the follower evidence epoch must advance with the accepted leader request");
       assertEquals(
           "ACTIVE",
           SmartDashboard.getString(OperatorActionEvidence.stateKey(Action.REV), "MISSING"));

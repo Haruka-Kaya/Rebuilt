@@ -150,6 +150,7 @@ public final class HardwareSelfTestCommand {
                 "SPARK_ID31_INTAKE_ROLLER",
                 () -> intake.getRollerDiagnosticSnapshot(false).ready(),
                 () -> intake.runRollerDiagnostic(duty),
+                () -> true,
                 intake::stopRoller,
                 new int[] {IntakeConstants.INTAKE_ROLLER_CAN_ID},
                 List.of(new DiagnosticTarget(
@@ -166,6 +167,7 @@ public final class HardwareSelfTestCommand {
                     "SPARK_ID32_FEEDER_CONTROLLED_RETEST",
                     () -> feeder.getDiagnosticSnapshot(false).ready(),
                     () -> feeder.runControlledDiagnostic(duty),
+                    () -> true,
                     feeder::stop,
                     new int[] {ManipulatorConstants.FEEDER_CAN_ID},
                     List.of(new DiagnosticTarget(
@@ -183,6 +185,7 @@ public final class HardwareSelfTestCommand {
                 "SPARK_ID33_CONVEYOR",
                 () -> conveyor.getDiagnosticSnapshot(false).ready(),
                 () -> conveyor.runDiagnostic(duty),
+                () -> true,
                 conveyor::stop,
                 new int[] {ManipulatorConstants.CONVEYOR_CAN_ID},
                 List.of(new DiagnosticTarget(
@@ -199,6 +202,7 @@ public final class HardwareSelfTestCommand {
                 () -> shooter.getFlywheelLeaderDiagnosticSnapshot(false).ready()
                     && shooter.getFlywheelFollowerDiagnosticSnapshot(false).ready(),
                 () -> shooter.runFlywheelPairDiagnostic(duty),
+                () -> true,
                 shooter::stopFlywheelPairDiagnostic,
                 new int[] {
                     ShooterConstants.SHOOTER_1_CAN_ID,
@@ -227,6 +231,7 @@ public final class HardwareSelfTestCommand {
                     boolean accepted = shooter.runFollowerDiagnostic();
                     return accepted && shooter.isFollowerDiagnosticTransitionSafe();
                 },
+                shooter::isFollowerDiagnosticOutputSafe,
                 shooter::stopFollowerDiagnostic,
                 new int[] {
                     ShooterConstants.SHOOTER_1_CAN_ID,
@@ -317,6 +322,7 @@ public final class HardwareSelfTestCommand {
             String stageName,
             BooleanSupplier preflightReady,
             BooleanSupplier action,
+            BooleanSupplier outputSubmissionComplete,
             Runnable stop,
             int[] stopCanIds,
             List<DiagnosticTarget> targets,
@@ -329,6 +335,8 @@ public final class HardwareSelfTestCommand {
         boolean[] accepted = {false};
         boolean[] aborted = {false};
         Map<String, MotionResult> terminalResults = new LinkedHashMap<>();
+        Map<String, MotionResult> latestResults = new LinkedHashMap<>();
+        Map<String, TimedTargetState> timedTargets = new LinkedHashMap<>();
 
         return Commands.sequence(
             Commands.runOnce(() -> {
@@ -336,6 +344,8 @@ public final class HardwareSelfTestCommand {
                 accepted[0] = false;
                 aborted[0] = false;
                 terminalResults.clear();
+                latestResults.clear();
+                timedTargets.clear();
                 eligible[0] = testOutputsAllowed() && preflightReady.getAsBoolean();
                 log(stageName + "_START", "eligible=" + eligible[0] + " " + formatTargets(targets, false));
             }),
@@ -347,19 +357,44 @@ public final class HardwareSelfTestCommand {
                         aborted[0] = aborted[0] || !testOutputsAllowed();
                         return;
                     }
-                    boolean commandAccepted = action.getAsBoolean();
-                    attempted[0] = true;
-                    accepted[0] = commandAccepted;
-                    if (!commandAccepted) {
+                    if (!attempted[0]) {
+                        boolean commandAccepted = action.getAsBoolean();
+                        accepted[0] = commandAccepted;
+                        if (!commandAccepted) {
+                            aborted[0] = true;
+                            for (DiagnosticTarget target : targets) {
+                                terminalResults.put(
+                                    target.name(), MotionResult.FAIL_COMMAND_REJECTED);
+                            }
+                            stop.run();
+                            return;
+                        }
+                        if (!outputSubmissionComplete.getAsBoolean()) {
+                            return;
+                        }
+                        captureTimedTargetStates(targets, timedTargets);
+                        attempted[0] = true;
+                    }
+                    if (timedTargets.size() != targets.size()) {
                         aborted[0] = true;
                         for (DiagnosticTarget target : targets) {
-                            terminalResults.put(target.name(), MotionResult.FAIL_COMMAND_REJECTED);
+                            terminalResults.put(target.name(), MotionResult.FAIL_NOT_READY);
+                        }
+                        stop.run();
+                        return;
+                    }
+                    if (!timedTargetsStillReady(timedTargets)) {
+                        aborted[0] = true;
+                        for (DiagnosticTarget target : targets) {
+                            terminalResults.put(target.name(), MotionResult.FAIL_NOT_READY);
                         }
                         stop.run();
                         return;
                     }
 
-                    Map<String, MotionResult> liveResults = evaluateTargets(targets, true);
+                    Map<String, MotionResult> liveResults = evaluateFreshTimedTargets(
+                        targets, timedTargets);
+                    latestResults.putAll(liveResults);
                     if (liveResults.containsValue(MotionResult.STALL_SUSPECTED)
                             || liveResults.containsValue(MotionResult.FAIL_DIRECTION_MISMATCH)) {
                         terminalResults.putAll(liveResults);
@@ -372,22 +407,26 @@ public final class HardwareSelfTestCommand {
                     Commands.waitSeconds(durationSeconds / 2.0),
                     Commands.runOnce(() -> log(
                         stageName + "_SAMPLE",
-                        "results=" + evaluateTargets(targets, accepted[0])
+                        "results=" + latestResults
                             + " telemetry=" + formatTargets(targets, accepted[0]))))),
             Commands.runOnce(() -> {
                 Map<String, MotionResult> finalResults = new LinkedHashMap<>();
+                Map<String, MotionResult> currentResults = evaluateCurrentTimedTargets(
+                    targets, timedTargets);
                 if (!eligible[0]) {
                     for (DiagnosticTarget target : targets) {
                         finalResults.put(target.name(), MotionResult.FAIL_NOT_READY);
                     }
                 } else if (!terminalResults.isEmpty()) {
                     finalResults.putAll(terminalResults);
-                } else if (!attempted[0] || !accepted[0]) {
+                } else if (!attempted[0]
+                        || !accepted[0]
+                        || currentResults.size() != targets.size()) {
                     for (DiagnosticTarget target : targets) {
-                        finalResults.put(target.name(), MotionResult.FAIL_COMMAND_REJECTED);
+                        finalResults.put(target.name(), MotionResult.FAIL_NOT_READY);
                     }
                 } else {
-                    finalResults.putAll(evaluateTargets(targets, true));
+                    finalResults.putAll(currentResults);
                 }
                 finalResults.forEach((name, result) -> publishResult(report, name, result));
                 log(stageName + "_RESULT", finalResults.toString());
@@ -403,7 +442,7 @@ public final class HardwareSelfTestCommand {
     private static Command swerveStage(
             String name,
             CommandSwerveDrivetrain drivetrain,
-            Runnable action,
+            java.util.function.Supplier<CommandSwerveDrivetrain.ControlResult> action,
             edu.wpi.first.math.kinematics.ChassisSpeeds expectedSpeeds,
             double durationSeconds,
             Map<String, MotionResult> report,
@@ -413,6 +452,8 @@ public final class HardwareSelfTestCommand {
         boolean[] motionObserved = {false};
         MotionResult[] terminalResult = {null};
         CommandSwerveDrivetrain.SwerveDiagnosticEvidence[] latestEvidence = {null};
+        CommandSwerveDrivetrain.SwerveDiagnosticBaseline[] baseline = {null};
+        CommandSwerveDrivetrain.SwerveDiagnosticToken[] token = {null};
 
         return Commands.sequence(
             Commands.runOnce(() -> {
@@ -420,7 +461,9 @@ public final class HardwareSelfTestCommand {
                 connectionLost[0] = false;
                 motionObserved[0] = false;
                 terminalResult[0] = null;
-                latestEvidence[0] = getSwerveEvidence(drivetrain, expectedSpeeds);
+                baseline[0] = drivetrain.captureSwerveDiagnosticBaseline();
+                token[0] = null;
+                latestEvidence[0] = null;
                 log(name + "_START", "eligible=" + eligible[0] + " " + drivetrain.getDeviceHealthSummary());
             }),
             Commands.deadline(
@@ -436,8 +479,26 @@ public final class HardwareSelfTestCommand {
                         drivetrain.requestIdle();
                         return;
                     }
-                    action.run();
-                    latestEvidence[0] = getSwerveEvidence(drivetrain, expectedSpeeds);
+                    if (token[0] == null) {
+                        CommandSwerveDrivetrain.ControlResult submission = action.get();
+                        token[0] = drivetrain.completeSwerveDiagnosticRequest(
+                            baseline[0], submission);
+                        if (submission != CommandSwerveDrivetrain.ControlResult.REQUEST_SUBMITTED) {
+                            connectionLost[0] = true;
+                            drivetrain.requestIdle();
+                            log(name + "_ABORT", "control submission=" + submission);
+                            return;
+                        }
+                    }
+                    latestEvidence[0] = getSwerveEvidence(
+                        drivetrain, expectedSpeeds, token[0]);
+                    if (!latestEvidence[0].postCommandEvidenceReady()) {
+                        if (latestEvidence[0].postCommandEvidenceTimedOut()) {
+                            connectionLost[0] = true;
+                            drivetrain.requestIdle();
+                        }
+                        return;
+                    }
                     if (!latestEvidence[0].ready() || !latestEvidence[0].telemetryFinite()) {
                         connectionLost[0] = true;
                         drivetrain.requestIdle();
@@ -464,7 +525,8 @@ public final class HardwareSelfTestCommand {
                     Commands.waitSeconds(durationSeconds / 2.0),
                     Commands.runOnce(() -> log(name + "_SAMPLE", drivetrain.getMotionDiagnosticSummary())))),
             Commands.runOnce(() -> {
-                latestEvidence[0] = getSwerveEvidence(drivetrain, expectedSpeeds);
+                latestEvidence[0] = getSwerveEvidence(
+                    drivetrain, expectedSpeeds, token[0]);
                 MotionResult result;
                 if (terminalResult[0] != null) {
                     result = terminalResult[0];
@@ -628,12 +690,20 @@ public final class HardwareSelfTestCommand {
     private static CommandSwerveDrivetrain.SwerveDiagnosticEvidence getSwerveEvidence(
             CommandSwerveDrivetrain drivetrain,
             edu.wpi.first.math.kinematics.ChassisSpeeds expectedSpeeds) {
+        return getSwerveEvidence(drivetrain, expectedSpeeds, null);
+    }
+
+    private static CommandSwerveDrivetrain.SwerveDiagnosticEvidence getSwerveEvidence(
+            CommandSwerveDrivetrain drivetrain,
+            edu.wpi.first.math.kinematics.ChassisSpeeds expectedSpeeds,
+            CommandSwerveDrivetrain.SwerveDiagnosticToken token) {
         return drivetrain.getSwerveDiagnosticEvidence(
             expectedSpeeds,
             HardwareTestConstants.MIN_SWERVE_MODULE_SPEED_METERS_PER_SECOND,
             HardwareTestConstants.MAX_SWERVE_VECTOR_ERROR_DEGREES,
             HardwareTestConstants.MAX_SWERVE_DIAGNOSTIC_DRIVE_CURRENT_AMPS,
-            HardwareTestConstants.MAX_SWERVE_DIAGNOSTIC_STEER_CURRENT_AMPS);
+            HardwareTestConstants.MAX_SWERVE_DIAGNOSTIC_STEER_CURRENT_AMPS,
+            token);
     }
 
     private static Map<String, MotionResult> evaluateTargets(
@@ -645,6 +715,106 @@ public final class HardwareSelfTestCommand {
                 target.name(),
                 HardwareDiagnosticEvaluator.evaluateOpenLoop(
                     snapshot, target.requestedDuty(), target.currentLimitAmps()));
+        }
+        return results;
+    }
+
+    private static void captureTimedTargetStates(
+            List<DiagnosticTarget> targets,
+            Map<String, TimedTargetState> states) {
+        Map<String, Long> epochs = new LinkedHashMap<>();
+        Map<String, Integer> canIds = new LinkedHashMap<>();
+        for (DiagnosticTarget target : targets) {
+            int canId = target.snapshot().apply(false).id();
+            var timed = SparkMAXContainer.getTimedDiagnosticSnapshotForId(canId, true).orElse(null);
+            if (timed == null) {
+                continue;
+            }
+            canIds.put(target.name(), canId);
+            epochs.put(target.name(), timed.currentOutputEpoch());
+        }
+        double commandCompletedAt = Timer.getFPGATimestamp();
+        for (DiagnosticTarget target : targets) {
+            Integer canId = canIds.get(target.name());
+            Long epoch = epochs.get(target.name());
+            if (canId != null && epoch != null) {
+                states.put(
+                    target.name(),
+                    new TimedTargetState(canId, epoch, commandCompletedAt));
+            }
+        }
+    }
+
+    private static Map<String, MotionResult> evaluateFreshTimedTargets(
+            List<DiagnosticTarget> targets,
+            Map<String, TimedTargetState> states) {
+        Map<String, MotionResult> results = new LinkedHashMap<>();
+        for (DiagnosticTarget target : targets) {
+            TimedTargetState state = states.get(target.name());
+            if (state == null) {
+                continue;
+            }
+            var timed = SparkMAXContainer.getTimedDiagnosticSnapshotForId(
+                state.canId, true).orElse(null);
+            if (!ManualUnhomedActuatorDiagnosticCommand.isCurrentPostCommandSample(
+                    timed,
+                    state.outputEpoch,
+                    state.commandCompletedAtSeconds,
+                    state.lastEvaluatedSampleAt)) {
+                continue;
+            }
+            state.lastEvaluatedSampleAt = timed.sampledAtSeconds();
+            // Evaluate the exact atomic sample whose epoch/timestamp passed the post-command gate.
+            // Re-reading the subsystem cache here could race the worker and classify a different
+            // frame than the one validated above.
+            Snapshot snapshot = timed.snapshot();
+            results.put(
+                target.name(),
+                HardwareDiagnosticEvaluator.evaluateOpenLoop(
+                    snapshot, target.requestedDuty(), target.currentLimitAmps()));
+        }
+        return results;
+    }
+
+    private static boolean timedTargetsStillReady(Map<String, TimedTargetState> states) {
+        if (states.isEmpty()) {
+            return false;
+        }
+        for (TimedTargetState state : states.values()) {
+            var timed = SparkMAXContainer.getTimedDiagnosticSnapshotForId(
+                state.canId, true).orElse(null);
+            if (timed == null
+                    || timed.currentOutputEpoch() != state.outputEpoch
+                    || !timed.snapshot().ready()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Map<String, MotionResult> evaluateCurrentTimedTargets(
+            List<DiagnosticTarget> targets,
+            Map<String, TimedTargetState> states) {
+        Map<String, MotionResult> results = new LinkedHashMap<>();
+        for (DiagnosticTarget target : targets) {
+            TimedTargetState state = states.get(target.name());
+            if (state == null) {
+                continue;
+            }
+            var timed = SparkMAXContainer.getTimedDiagnosticSnapshotForId(
+                state.canId, true).orElse(null);
+            if (timed == null
+                    || !timed.snapshot().ready()
+                    || timed.sampleOutputEpoch() != state.outputEpoch
+                    || timed.currentOutputEpoch() != state.outputEpoch
+                    || !Double.isFinite(timed.sampledAtSeconds())
+                    || timed.sampledAtSeconds() <= state.commandCompletedAtSeconds) {
+                continue;
+            }
+            results.put(
+                target.name(),
+                HardwareDiagnosticEvaluator.evaluateOpenLoop(
+                    timed.snapshot(), target.requestedDuty(), target.currentLimitAmps()));
         }
         return results;
     }
@@ -745,6 +915,19 @@ public final class HardwareSelfTestCommand {
         double requestedDuty,
         double currentLimitAmps,
         Function<Boolean, Snapshot> snapshot) {}
+
+    private static final class TimedTargetState {
+        final int canId;
+        final long outputEpoch;
+        final double commandCompletedAtSeconds;
+        double lastEvaluatedSampleAt = Double.NEGATIVE_INFINITY;
+
+        TimedTargetState(int canId, long outputEpoch, double commandCompletedAtSeconds) {
+            this.canId = canId;
+            this.outputEpoch = outputEpoch;
+            this.commandCompletedAtSeconds = commandCompletedAtSeconds;
+        }
+    }
 
     @FunctionalInterface
     private interface StopMonitor {

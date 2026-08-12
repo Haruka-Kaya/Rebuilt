@@ -19,6 +19,9 @@ import frc.robot.utils.AsyncDiagnosticSink;
 import frc.robot.utils.OneShotTimedArmGate;
 import frc.robot.utils.RuntimeSafetyLatch;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.SparkDeviceEvidence;
+import frc.robot.utils.CtreDeviceEvidence;
+import frc.robot.utils.CanDeviceEvidenceSummary;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.constants.ConfiguredCanHardware;
 import frc.robot.constants.ConfiguredMotorCapabilities;
@@ -35,8 +38,11 @@ public class Robot extends TimedRobot {
 
   private RobotContainer m_robotContainer;
   private double m_nextDiagnosticTimestamp;
+  private double m_nextDeviceEvidenceTimestamp;
   private double m_nextOperatorStatusTimestamp;
   private boolean m_hardwareHealthSuppressedForFms;
+  private boolean m_deviceEvidenceSuppressedForFms;
+  private boolean m_deviceEvidenceUnavailableForRuntimeFault;
   private final RuntimeSafetyLatch m_runtimeSafetyLatch = new RuntimeSafetyLatch();
   private final OneShotTimedArmGate m_selfTestArmGate = new OneShotTimedArmGate(
       HardwareTestConstants.ARM_LIFETIME_SECONDS);
@@ -72,6 +78,10 @@ public class Robot extends TimedRobot {
         "Hardware/Motor Blockers", ConfiguredMotorCapabilities.blockedSummary());
     SmartDashboard.putString("Hardware/SPARK Health", "WAITING_FOR_SAMPLE");
     SmartDashboard.putString("Hardware/CTRE Health", "WAITING_FOR_SAMPLE");
+    SmartDashboard.putString(
+        CanDeviceEvidenceSummary.SCOPE_KEY, CanDeviceEvidenceSummary.SCOPE);
+    SmartDashboard.putString(
+        CanDeviceEvidenceSummary.SUMMARY_KEY, "WAITING_FOR_DEVICE_EVIDENCE");
   }
 
   /**
@@ -83,7 +93,9 @@ public class Robot extends TimedRobot {
    */
   @Override
   public void robotPeriodic() {
+    suppressHardwareEvidenceForFmsNoThrow();
     if (!m_runtimeSafetyLatch.healthy()) {
+      publishRuntimeFaultEvidenceUnavailableNoThrow();
       enforceLatchedStop();
       return;
     }
@@ -109,6 +121,10 @@ public class Robot extends TimedRobot {
       }
 
       if (!DriverStation.isFMSAttached() && now >= m_nextDiagnosticTimestamp) {
+        // Invalidate the prior FMS-suppressed latch before the first live write. If any later
+        // publisher throws and the runtime latch trips, a subsequent FMS attach must still retry
+        // suppression rather than preserving a partial live update.
+        m_hardwareHealthSuppressedForFms = false;
         var canStatus = RobotController.getCANStatus();
         String sparkHealth = m_robotContainer.getSparkDeviceHealthSummary();
         String ctreHealth = m_robotContainer.getSwerveDeviceHealthSummary();
@@ -129,16 +145,91 @@ public class Robot extends TimedRobot {
             DriverStation.getStickButtonCount(2),
             sparkHealth,
             ctreHealth));
-        m_hardwareHealthSuppressedForFms = false;
         m_nextDiagnosticTimestamp = now + 5.0;
-      } else if (DriverStation.isFMSAttached() && !m_hardwareHealthSuppressedForFms) {
-        SmartDashboard.putString("Hardware/SPARK Health", "SUPPRESSED_FMS");
-        SmartDashboard.putString("Hardware/CTRE Health", "SUPPRESSED_FMS");
-        m_hardwareHealthSuppressedForFms = true;
+      }
+      if (!DriverStation.isFMSAttached() && now >= m_nextDeviceEvidenceTimestamp) {
+        m_deviceEvidenceSuppressedForFms = false;
+        var sparkEvidence = SparkMAXContainer.getDeviceEvidenceSnapshots();
+        var ctreEvidence = m_robotContainer.getSwerveDeviceEvidenceSnapshots();
+        SparkDeviceEvidence.publish(sparkEvidence);
+        CtreDeviceEvidence.publish(ctreEvidence);
+        CanDeviceEvidenceSummary.publish(sparkEvidence, ctreEvidence);
+        m_nextDeviceEvidenceTimestamp = now + 0.5;
       }
     } catch (RuntimeException exception) {
       latchRuntimeFault(exception);
     }
+  }
+
+  private void suppressHardwareEvidenceForFmsNoThrow() {
+    boolean fmsAttached;
+    try {
+      fmsAttached = DriverStation.isFMSAttached();
+    } catch (RuntimeException exception) {
+      return;
+    }
+    if (!fmsAttached) {
+      return;
+    }
+    // A later detach while the runtime latch remains active must republish RUNTIME_FAULT rather
+    // than leaving SUPPRESSED_FMS frozen indefinitely.
+    m_deviceEvidenceUnavailableForRuntimeFault = false;
+    if (!m_hardwareHealthSuppressedForFms) {
+      boolean sparkSuppressed = dashboardWriteNoThrow(
+          () -> SmartDashboard.putString("Hardware/SPARK Health", "SUPPRESSED_FMS"));
+      boolean ctreSuppressed = dashboardWriteNoThrow(
+          () -> SmartDashboard.putString("Hardware/CTRE Health", "SUPPRESSED_FMS"));
+      m_hardwareHealthSuppressedForFms = sparkSuppressed && ctreSuppressed;
+    }
+    if (!m_deviceEvidenceSuppressedForFms) {
+      boolean sparkSuppressed = dashboardWriteNoThrow(SparkDeviceEvidence::publishSuppressedForFms);
+      boolean ctreSuppressed = dashboardWriteNoThrow(CtreDeviceEvidence::publishSuppressedForFms);
+      boolean summarySuppressed = dashboardWriteNoThrow(
+          CanDeviceEvidenceSummary::publishSuppressedForFms);
+      m_deviceEvidenceSuppressedForFms =
+          sparkSuppressed && ctreSuppressed && summarySuppressed;
+    }
+  }
+
+  private static boolean dashboardWriteNoThrow(Runnable write) {
+    try {
+      write.run();
+      return true;
+    } catch (RuntimeException exception) {
+      return false;
+    }
+  }
+
+  private void publishRuntimeFaultEvidenceUnavailableNoThrow() {
+    boolean fmsAttached;
+    try {
+      fmsAttached = DriverStation.isFMSAttached();
+    } catch (RuntimeException exception) {
+      return;
+    }
+    if (fmsAttached || m_deviceEvidenceUnavailableForRuntimeFault) {
+      return;
+    }
+    // Clear the FMS latch before the first write so a partial failure still forces the next attach
+    // to retry complete suppression.
+    m_deviceEvidenceSuppressedForFms = false;
+    m_hardwareHealthSuppressedForFms = false;
+    boolean sparkHealthUnavailable = dashboardWriteNoThrow(
+        () -> SmartDashboard.putString("Hardware/SPARK Health", "RUNTIME_FAULT"));
+    boolean ctreHealthUnavailable = dashboardWriteNoThrow(
+        () -> SmartDashboard.putString("Hardware/CTRE Health", "RUNTIME_FAULT"));
+    boolean sparkUnavailable = dashboardWriteNoThrow(
+        () -> SparkDeviceEvidence.publishUnavailable("RUNTIME_FAULT"));
+    boolean ctreUnavailable = dashboardWriteNoThrow(
+        () -> CtreDeviceEvidence.publishUnavailable("RUNTIME_FAULT"));
+    boolean summaryUnavailable = dashboardWriteNoThrow(
+        () -> CanDeviceEvidenceSummary.publishUnavailable("RUNTIME_FAULT"));
+    m_deviceEvidenceUnavailableForRuntimeFault =
+        sparkHealthUnavailable
+            && ctreHealthUnavailable
+            && sparkUnavailable
+            && ctreUnavailable
+            && summaryUnavailable;
   }
 
   /** This function is called once each time the robot enters Disabled mode. */

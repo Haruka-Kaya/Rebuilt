@@ -926,6 +926,32 @@
               "period": 0.06,
               "data_type": "string"
             }
+          },
+          {
+            "title": "CAN Device Evidence Scope",
+            "x": 0.0,
+            "y": 2304.0,
+            "width": 1152.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware/Device Evidence Scope",
+              "period": 0.5,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "All 23 CAN Device Evidence",
+            "x": 0.0,
+            "y": 2432.0,
+            "width": 1152.0,
+            "height": 768.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Hardware/Device Evidence Summary",
+              "period": 0.5,
+              "data_type": "string"
+            }
           }
         ]
       }

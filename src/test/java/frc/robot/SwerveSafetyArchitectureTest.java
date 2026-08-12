@@ -63,12 +63,12 @@ class SwerveSafetyArchitectureTest {
   void criticalSignalHealthUsesNonblockingSilentRefreshes() throws IOException {
     String drivetrain = Files.readString(DRIVETRAIN_SOURCE);
 
-    assertTrue(drivetrain.contains("getDriveMotor().getPosition(false)"));
-    assertTrue(drivetrain.contains("getDriveMotor().getVelocity(false)"));
-    assertTrue(drivetrain.contains("getSteerMotor().getPosition(false)"));
-    assertTrue(drivetrain.contains("getSteerMotor().getVelocity(false)"));
-    assertTrue(drivetrain.contains("getEncoder().getPosition(false)"));
-    assertTrue(drivetrain.contains("getEncoder().getAbsolutePosition(false)"));
+    assertTrue(drivetrain.contains("drive.getPosition(false)"));
+    assertTrue(drivetrain.contains("drive.getVelocity(false)"));
+    assertTrue(drivetrain.contains("steer.getPosition(false)"));
+    assertTrue(drivetrain.contains("steer.getVelocity(false)"));
+    assertTrue(drivetrain.contains("encoder.getPosition(false)"));
+    assertTrue(drivetrain.contains("encoder.getAbsolutePosition(false)"));
     assertTrue(drivetrain.contains("getPigeon2().getYaw(false)"));
     assertTrue(drivetrain.contains("getPigeon2().getAngularVelocityZWorld(false)"));
     assertTrue(drivetrain.contains("refresh(false)"));

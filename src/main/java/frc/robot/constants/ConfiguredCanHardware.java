@@ -1,7 +1,8 @@
 package frc.robot.constants;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Single source of truth for the CAN IDs configured by this software.
@@ -10,6 +11,58 @@ import java.util.List;
  * against the wiring/CAD and live device discovery before calibrated motion is enabled.
  */
 public final class ConfiguredCanHardware {
+  public enum Vendor {
+    REV,
+    CTRE
+  }
+
+  public enum DeviceType {
+    MOTOR_CONTROLLER,
+    GYRO,
+    ABSOLUTE_ENCODER
+  }
+
+  public enum HardwareRole {
+    MECHANISM_MOTOR,
+    SWERVE_DRIVE_MOTOR,
+    SWERVE_STEER_MOTOR,
+    SWERVE_ABSOLUTE_ENCODER,
+    SWERVE_GYRO
+  }
+
+  /**
+   * Static software inventory only; live device evidence is published separately.
+   *
+   * <p>{@code dependencyCanIds} lists controllers or sensors whose configured relationship gates
+   * this device's software role. The shooter pair is intentionally mutual: ID37 follows ID36,
+   * while ID36 output is refused unless its required follower ID37 is ready.
+   */
+  public record Device(
+      int canId,
+      String label,
+      Vendor vendor,
+      DeviceType type,
+      HardwareRole role,
+      List<Integer> dependencyCanIds) {
+    public Device {
+      if (canId < 0 || canId > 62) {
+        throw new IllegalArgumentException("CAN ID must be within 0..62");
+      }
+      Objects.requireNonNull(label, "label");
+      if (label.isBlank()) {
+        throw new IllegalArgumentException("label must not be blank");
+      }
+      Objects.requireNonNull(vendor, "vendor");
+      Objects.requireNonNull(type, "type");
+      Objects.requireNonNull(role, "role");
+      dependencyCanIds = List.copyOf(dependencyCanIds);
+      if (dependencyCanIds.stream().anyMatch(id -> id < 0 || id > 62 || id == canId)
+          || dependencyCanIds.stream().distinct().count() != dependencyCanIds.size()) {
+        throw new IllegalArgumentException("dependency CAN IDs must be unique, legal, and external");
+      }
+    }
+  }
+
   public static final int PIGEON_ID = 20;
 
   public static final int INTAKE_ACTUATOR_ID = 30;
@@ -37,43 +90,82 @@ public final class ConfiguredCanHardware {
   public static final int BACK_RIGHT_STEER_ID = 56;
   public static final int BACK_RIGHT_DRIVE_ID = 57;
 
-  private static final List<Integer> SPARK_DEVICE_IDS = List.of(
-      INTAKE_ACTUATOR_ID,
-      INTAKE_ROLLER_ID,
-      FEEDER_ID,
-      CONVEYOR_ID,
-      CLIMBER_LEFT_ID,
-      CLIMBER_RIGHT_ID,
-      SHOOTER_LEADER_ID,
-      SHOOTER_FOLLOWER_ID,
-      SHOOTER_ACTUATOR_ID,
-      TURRET_ID);
+  private static final List<Device> DEVICES = List.of(
+      device(
+          PIGEON_ID,
+          "swerve pigeon",
+          Vendor.CTRE,
+          DeviceType.GYRO,
+          HardwareRole.SWERVE_GYRO),
+      mechanismMotor(INTAKE_ACTUATOR_ID, "intake actuator"),
+      mechanismMotor(INTAKE_ROLLER_ID, "intake roller"),
+      mechanismMotor(FEEDER_ID, "feeder"),
+      mechanismMotor(CONVEYOR_ID, "conveyor"),
+      mechanismMotor(CLIMBER_LEFT_ID, "climber left"),
+      mechanismMotor(CLIMBER_RIGHT_ID, "climber right"),
+      mechanismMotor(
+          SHOOTER_LEADER_ID, "shooter flywheel leader", SHOOTER_FOLLOWER_ID),
+      mechanismMotor(
+          SHOOTER_FOLLOWER_ID, "shooter flywheel follower", SHOOTER_LEADER_ID),
+      mechanismMotor(SHOOTER_ACTUATOR_ID, "shooter actuator"),
+      mechanismMotor(TURRET_ID, "turret"),
+      swerveEncoder(FRONT_LEFT_ENCODER_ID, "front-left encoder"),
+      swerveEncoder(FRONT_RIGHT_ENCODER_ID, "front-right encoder"),
+      swerveEncoder(BACK_LEFT_ENCODER_ID, "back-left encoder"),
+      swerveEncoder(BACK_RIGHT_ENCODER_ID, "back-right encoder"),
+      swerveMotor(
+          FRONT_LEFT_STEER_ID,
+          "front-left steer",
+          HardwareRole.SWERVE_STEER_MOTOR,
+          FRONT_LEFT_ENCODER_ID),
+      swerveMotor(FRONT_LEFT_DRIVE_ID, "front-left drive", HardwareRole.SWERVE_DRIVE_MOTOR),
+      swerveMotor(
+          FRONT_RIGHT_STEER_ID,
+          "front-right steer",
+          HardwareRole.SWERVE_STEER_MOTOR,
+          FRONT_RIGHT_ENCODER_ID),
+      swerveMotor(FRONT_RIGHT_DRIVE_ID, "front-right drive", HardwareRole.SWERVE_DRIVE_MOTOR),
+      swerveMotor(
+          BACK_LEFT_STEER_ID,
+          "back-left steer",
+          HardwareRole.SWERVE_STEER_MOTOR,
+          BACK_LEFT_ENCODER_ID),
+      swerveMotor(BACK_LEFT_DRIVE_ID, "back-left drive", HardwareRole.SWERVE_DRIVE_MOTOR),
+      swerveMotor(
+          BACK_RIGHT_STEER_ID,
+          "back-right steer",
+          HardwareRole.SWERVE_STEER_MOTOR,
+          BACK_RIGHT_ENCODER_ID),
+      swerveMotor(BACK_RIGHT_DRIVE_ID, "back-right drive", HardwareRole.SWERVE_DRIVE_MOTOR));
 
-  private static final List<Integer> SWERVE_ENCODER_IDS = List.of(
-      FRONT_LEFT_ENCODER_ID,
-      FRONT_RIGHT_ENCODER_ID,
-      BACK_LEFT_ENCODER_ID,
-      BACK_RIGHT_ENCODER_ID);
+  private static final List<Integer> SPARK_DEVICE_IDS = idsWhere(
+      device -> device.vendor() == Vendor.REV);
+  private static final List<Integer> SWERVE_ENCODER_IDS = idsWhere(
+      device -> device.role() == HardwareRole.SWERVE_ABSOLUTE_ENCODER);
+  private static final List<Integer> SWERVE_STEER_IDS = idsWhere(
+      device -> device.role() == HardwareRole.SWERVE_STEER_MOTOR);
+  private static final List<Integer> SWERVE_DRIVE_IDS = idsWhere(
+      device -> device.role() == HardwareRole.SWERVE_DRIVE_MOTOR);
+  private static final List<Integer> CTRE_DEVICE_IDS = idsWhere(
+      device -> device.vendor() == Vendor.CTRE);
+  private static final List<Integer> ALL_DEVICE_IDS = DEVICES.stream().map(Device::canId).toList();
 
-  private static final List<Integer> SWERVE_STEER_IDS = List.of(
-      FRONT_LEFT_STEER_ID,
-      FRONT_RIGHT_STEER_ID,
-      BACK_LEFT_STEER_ID,
-      BACK_RIGHT_STEER_ID);
-
-  private static final List<Integer> SWERVE_DRIVE_IDS = List.of(
-      FRONT_LEFT_DRIVE_ID,
-      FRONT_RIGHT_DRIVE_ID,
-      BACK_LEFT_DRIVE_ID,
-      BACK_RIGHT_DRIVE_ID);
-
-  private static final List<Integer> CTRE_DEVICE_IDS = concatenate(
-      List.of(PIGEON_ID), SWERVE_ENCODER_IDS, SWERVE_STEER_IDS, SWERVE_DRIVE_IDS);
-
-  private static final List<Integer> ALL_DEVICE_IDS = concatenate(
-      SPARK_DEVICE_IDS, CTRE_DEVICE_IDS);
+  static {
+    List<Integer> ids = DEVICES.stream().map(Device::canId).toList();
+    if (!ids.equals(ids.stream().sorted().toList()) || ids.stream().distinct().count() != ids.size()) {
+      throw new IllegalStateException("configured CAN devices must be unique and sorted");
+    }
+  }
 
   private ConfiguredCanHardware() {}
+
+  public static List<Device> devices() {
+    return DEVICES;
+  }
+
+  public static Optional<Device> byCanId(int canId) {
+    return DEVICES.stream().filter(device -> device.canId() == canId).findFirst();
+  }
 
   public static List<Integer> sparkDeviceIds() {
     return SPARK_DEVICE_IDS;
@@ -110,14 +202,52 @@ public final class ConfiguredCanHardware {
         + "; PHYSICAL_INVENTORY_UNVERIFIED";
   }
 
-  @SafeVarargs
-  private static List<Integer> concatenate(List<Integer>... groups) {
-    List<Integer> result = new ArrayList<>();
-    for (List<Integer> group : groups) {
-      result.addAll(group);
-    }
-    // Keep duplicates so the manifest test can detect an accidental CAN-ID collision.
-    return result.stream().sorted().toList();
+  private static Device mechanismMotor(int canId, String label) {
+    return device(
+        canId, label, Vendor.REV, DeviceType.MOTOR_CONTROLLER, HardwareRole.MECHANISM_MOTOR);
+  }
+
+  private static Device mechanismMotor(int canId, String label, int dependencyCanId) {
+    return new Device(
+        canId,
+        label,
+        Vendor.REV,
+        DeviceType.MOTOR_CONTROLLER,
+        HardwareRole.MECHANISM_MOTOR,
+        List.of(dependencyCanId));
+  }
+
+  private static Device swerveEncoder(int canId, String label) {
+    return device(
+        canId,
+        label,
+        Vendor.CTRE,
+        DeviceType.ABSOLUTE_ENCODER,
+        HardwareRole.SWERVE_ABSOLUTE_ENCODER);
+  }
+
+  private static Device swerveMotor(int canId, String label, HardwareRole role) {
+    return device(canId, label, Vendor.CTRE, DeviceType.MOTOR_CONTROLLER, role);
+  }
+
+  private static Device swerveMotor(
+      int canId, String label, HardwareRole role, int dependencyCanId) {
+    return new Device(
+        canId,
+        label,
+        Vendor.CTRE,
+        DeviceType.MOTOR_CONTROLLER,
+        role,
+        List.of(dependencyCanId));
+  }
+
+  private static Device device(
+      int canId, String label, Vendor vendor, DeviceType type, HardwareRole role) {
+    return new Device(canId, label, vendor, type, role, List.of());
+  }
+
+  private static List<Integer> idsWhere(java.util.function.Predicate<Device> predicate) {
+    return DEVICES.stream().filter(predicate).map(Device::canId).toList();
   }
 
   private static String compactRanges(List<Integer> ids) {
