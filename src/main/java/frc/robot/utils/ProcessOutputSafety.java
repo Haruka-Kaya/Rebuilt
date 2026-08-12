@@ -1,8 +1,9 @@
 package frc.robot.utils;
 
 import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Supplier;
 
 /**
  * Process-wide, fail-closed authorization boundary for every nonzero motor request.
@@ -23,20 +24,33 @@ public final class ProcessOutputSafety {
   }
 
   /**
-   * Admits a vendor call from the current immutable process grant.
+   * Captures the current process grant for a prospective nonzero output transaction.
    *
-   * <p>Revoke is intentionally nonblocking even if a vendor API hangs. Callers must already hold
-   * their vendor-specific output-order lock. A call admitted just before revoke is therefore
-   * ordered before that vendor's neutral request; any later admission is rejected. This callback
-   * must never call back into the robot safety supervisor.
+   * <p>The returned permit has no authority until {@link #claimIfCurrent(NonzeroPermit)} succeeds
+   * inside the vendor-specific ordered-output lane. No vendor callback is accepted here, so a
+   * process-wide revoke never waits for a vendor API or a device lock.
    */
-  public static <T> AuthorizedCall<T> callIfAuthorized(Supplier<T> vendorCall) {
-    Objects.requireNonNull(vendorCall, "vendorCall");
+  public static Optional<NonzeroPermit> acquireNonzeroPermit() {
     Snapshot admitted = STATE.get();
-    if (!admitted.outputAuthorized()) {
-      return new AuthorizedCall<>(false, null);
+    return admitted.outputAuthorized()
+        ? Optional.of(new NonzeroPermit(admitted))
+        : Optional.empty();
+  }
+
+  /**
+   * Atomically consumes a permit if and only if its exact immutable grant remains current.
+   *
+   * <p>Callers must claim under their own ordered-output lane immediately before reserving the
+   * nonzero transaction. After a successful claim, a concurrent revoke may return before the
+   * already-reserved vendor call completes; that lane must retain a pending zero barrier behind
+   * the admitted transaction. A permit is one-shot even when the claim fails.
+   */
+  public static boolean claimIfCurrent(NonzeroPermit permit) {
+    if (permit == null || !permit.claimed.compareAndSet(false, true)) {
+      return false;
     }
-    return new AuthorizedCall<>(true, vendorCall.get());
+    Snapshot current = STATE.get();
+    return current == permit.admitted && current.outputAuthorized();
   }
 
   /** Returns the current immutable authorization evidence. */
@@ -89,6 +103,13 @@ public final class ProcessOutputSafety {
     }
   }
 
-  /** Result of an atomically authorized vendor call. Value is null when authorization was absent. */
-  public record AuthorizedCall<T>(boolean authorized, T value) {}
+  /** Opaque, one-shot capability tied by identity to one immutable process authorization grant. */
+  public static final class NonzeroPermit {
+    private final Snapshot admitted;
+    private final AtomicBoolean claimed = new AtomicBoolean();
+
+    private NonzeroPermit(Snapshot admitted) {
+      this.admitted = Objects.requireNonNull(admitted, "admitted");
+    }
+  }
 }

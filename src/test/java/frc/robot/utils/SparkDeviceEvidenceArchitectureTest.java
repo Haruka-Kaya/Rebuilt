@@ -54,22 +54,30 @@ class SparkDeviceEvidenceArchitectureTest {
         source,
         "private boolean trySetpoint(",
         "public boolean beginFollowerDiagnosticIfAuthorized(");
-    int successfulBranch = setpointMethod.indexOf("if (result.succeeded())");
+    int successfulBranch = setpointMethod.indexOf("if (vendorResult.succeeded())");
     int outputEpochAdvance = setpointMethod.indexOf("outputEpoch++", successfulBranch);
     int acceptedEvidence = setpointMethod.indexOf("lastRequestAccepted = true", successfulBranch);
     int failureBranch = setpointMethod.indexOf("} else {", successfulBranch);
-    int outputLock = setpointMethod.indexOf("synchronized (OUTPUT_ORDER_LOCK)");
-    int authorizationCheck = setpointMethod.indexOf(
-        "authorizationStillValid.getAsBoolean()", outputLock);
+    int firstOutputLock = setpointMethod.indexOf("synchronized (OUTPUT_ORDER_LOCK)");
+    int firstOutputLockEnd = matchingBrace(
+        setpointMethod, setpointMethod.indexOf('{', firstOutputLock));
+    int authorizationCheck = setpointMethod.indexOf("authorizationAllows(authorizationStillValid)");
+    int outputLock = setpointMethod.indexOf("synchronized (OUTPUT_ORDER_LOCK)", authorizationCheck);
+    int stopSequenceRecheck = setpointMethod.indexOf(
+        "outputLane.stopSequence() == authorizationStopSequence", outputLock);
     int processAuthorizationCheck = setpointMethod.indexOf(
-        "ProcessOutputSafety.callIfAuthorized", authorizationCheck);
+        "ProcessOutputSafety.claimIfCurrent", stopSequenceRecheck);
     int vendorSetpoint = setpointMethod.indexOf(
         "sendSetpointTracked(value, controlType)", processAuthorizationCheck);
 
     assertTrue(successfulBranch >= 0);
+    assertTrue(firstOutputLock >= 0);
+    assertTrue(authorizationCheck >= 0);
     assertTrue(outputLock >= 0);
-    assertTrue(authorizationCheck > outputLock);
-    assertTrue(processAuthorizationCheck > authorizationCheck);
+    assertTrue(authorizationCheck > firstOutputLockEnd);
+    assertTrue(authorizationCheck < outputLock);
+    assertTrue(stopSequenceRecheck > outputLock);
+    assertTrue(processAuthorizationCheck > stopSequenceRecheck);
     assertTrue(vendorSetpoint > processAuthorizationCheck);
     assertTrue(outputEpochAdvance > successfulBranch && outputEpochAdvance < failureBranch);
     assertTrue(acceptedEvidence > successfulBranch && acceptedEvidence < failureBranch);
@@ -78,7 +86,7 @@ class SparkDeviceEvidenceArchitectureTest {
   }
 
   @Test
-  void processHeartbeatIsCheckedInsideBothOutputLocksImmediatelyBeforeNonzeroVendorApi()
+  void nonzeroJniRunsOutsideApplicationLocksBehindAnAtomicLaneReservation()
       throws IOException {
     String source = Files.readString(CONTAINER_SOURCE);
     String setpointMethod = between(
@@ -86,35 +94,41 @@ class SparkDeviceEvidenceArchitectureTest {
         "private boolean trySetpoint(",
         "public boolean beginFollowerDiagnosticIfAuthorized(");
 
-    int outputLock = setpointMethod.indexOf("synchronized (OUTPUT_ORDER_LOCK)");
-    int stateLock = setpointMethod.indexOf("synchronized (stateLock)", outputLock);
     int processAuthorizationCheck = setpointMethod.indexOf(
-        "ProcessOutputSafety.callIfAuthorized", stateLock);
+        "ProcessOutputSafety.claimIfCurrent");
+    int outputLock = setpointMethod.lastIndexOf(
+        "synchronized (OUTPUT_ORDER_LOCK)", processAuthorizationCheck);
+    int stateLock = setpointMethod.indexOf("synchronized (stateLock)", outputLock);
+    int laneReservation = setpointMethod.indexOf("outputLane.reserveNonzero()", processAuthorizationCheck);
     int vendorSetpoint = setpointMethod.indexOf(
-        "sendSetpointTracked(value, controlType)", processAuthorizationCheck);
+        "sendSetpointTracked(value, controlType)", laneReservation);
     int outputLockEnd = matchingBrace(setpointMethod, setpointMethod.indexOf('{', outputLock));
     int stateLockEnd = matchingBrace(setpointMethod, setpointMethod.indexOf('{', stateLock));
 
     assertTrue(outputLock >= 0);
     assertTrue(stateLock > outputLock);
     assertTrue(processAuthorizationCheck > stateLock);
-    assertTrue(vendorSetpoint > processAuthorizationCheck);
-    assertTrue(vendorSetpoint < stateLockEnd);
-    assertTrue(vendorSetpoint < outputLockEnd);
-    assertTrue(setpointMethod.substring(processAuthorizationCheck, vendorSetpoint)
+    assertTrue(laneReservation > processAuthorizationCheck);
+    assertTrue(vendorSetpoint > stateLockEnd);
+    assertTrue(vendorSetpoint > outputLockEnd);
+    assertTrue(setpointMethod.substring(outputLockEnd, vendorSetpoint)
         .contains("SparkVendorCall.execute"));
     String processSafety = Files.readString(PROCESS_SAFETY_SOURCE);
-    String atomicCall = between(
-        processSafety, "public static <T> AuthorizedCall<T> callIfAuthorized(",
+    String atomicClaim = between(
+        processSafety, "public static boolean claimIfCurrent(",
         "/** Returns the current immutable authorization evidence.");
-    assertTrue(atomicCall.contains("Snapshot admitted = STATE.get()"));
-    assertTrue(atomicCall.contains("vendorCall.get()"));
-    assertTrue(atomicCall.indexOf("Snapshot admitted = STATE.get()")
-        < atomicCall.indexOf("vendorCall.get()"));
-    assertFalse(atomicCall.contains("synchronized"));
+    assertTrue(atomicClaim.contains("STATE.get()"));
+    assertFalse(atomicClaim.contains("vendorCall"));
+    assertFalse(atomicClaim.contains("synchronized"));
+    assertTrue(setpointMethod.contains("reserveRequiredFollowerLanesLocked(now)"));
+    assertTrue(setpointMethod.contains("completeRequiredFollowerLanesLocked("));
+    assertTrue(setpointMethod.contains("outputLane.completeNonzero(laneReservation)"));
+    assertTrue(setpointMethod.contains("outputGate.requireZero(now, true)"));
     assertTrue(setpointMethod.contains(
         "lastRequestReason = \"PROCESS_OUTPUT_HEARTBEAT_EXPIRED\""));
     assertTrue(setpointMethod.contains("outputGate.requireZero(now, false)"));
+    assertFalse(setpointMethod.substring(outputLock, outputLockEnd)
+        .contains("authorizationStillValid.getAsBoolean()"));
   }
 
   @Test
@@ -146,15 +160,80 @@ class SparkDeviceEvidenceArchitectureTest {
 
     int simulationPauseBranch = beginDiagnostic.indexOf("if (simulationHandle != null)");
     int nativePause = beginDiagnostic.indexOf("motor::pauseFollowerModeAsync");
+    int activeOutputBranch = beginDiagnostic.indexOf("if (applyOutput)");
+    int activeTrySetpoint = beginDiagnostic.indexOf("return trySetpoint(", activeOutputBranch);
+    int transitionAuthorization = beginDiagnostic.indexOf(
+        "if (!authorizationAllows(authorizationStillValid))", activeTrySetpoint);
     int simulationResumeBranch = zeroWorker.indexOf("if (device.simulationHandle != null)");
     int nativeResume = zeroWorker.indexOf("device.motor::resumeFollowerMode");
 
     assertTrue(simulationPauseBranch >= 0 && simulationPauseBranch < nativePause);
     assertTrue(beginDiagnostic.substring(simulationPauseBranch, nativePause)
         .contains("FollowerDiagnosticMode.PAUSE_PENDING"));
+    assertTrue(activeOutputBranch >= 0 && activeTrySetpoint > activeOutputBranch);
+    assertTrue(transitionAuthorization > activeTrySetpoint,
+        "ACTIVE output must use trySetpoint's sole stop-sequence-bound authorization sample");
     assertTrue(simulationResumeBranch >= 0 && simulationResumeBranch < nativeResume);
     assertTrue(zeroWorker.substring(simulationResumeBranch, nativeResume)
         .contains("resumeResult = REVLibError.kOk"));
+  }
+
+  @Test
+  void followerPauseJniAndSetpointJniNeverRunUnderSparkApplicationLocks() throws IOException {
+    String source = Files.readString(CONTAINER_SOURCE);
+    String beginDiagnostic = between(
+        source,
+        "public boolean beginFollowerDiagnosticIfAuthorized(",
+        "/** Called only while OUTPUT_ORDER_LOCK is held. */");
+    int outputLock = beginDiagnostic.indexOf("synchronized (OUTPUT_ORDER_LOCK)");
+    int outputLockEnd = matchingBrace(beginDiagnostic, beginDiagnostic.indexOf('{', outputLock));
+    int nativePause = beginDiagnostic.indexOf("motor::pauseFollowerModeAsync");
+    assertTrue(nativePause > outputLockEnd);
+    assertTrue(beginDiagnostic.substring(0, nativePause).contains("outputLane.reserveNonzero()"));
+
+    String endDiagnostic = between(
+        source,
+        "public void endFollowerDiagnostic()",
+        "public boolean isFollowerDiagnosticActive()");
+    assertTrue(endDiagnostic.contains("FollowerDiagnosticMode.RESUME_ZERO_PENDING"));
+    assertTrue(endDiagnostic.contains("outputLane.requestZero()"));
+    assertTrue(endDiagnostic.contains("outputGate.requireZero(now, false)"));
+
+    String cleanup = between(
+        source,
+        "static boolean cleanupSimulationDevicesForTesting()",
+        "private Snapshot getControllerTelemetrySnapshot()");
+    assertTrue(cleanup.contains("device.outputLane.nonzeroInFlight()"));
+    int cleanupOutputLock = cleanup.indexOf("synchronized (OUTPUT_ORDER_LOCK)");
+    int cleanupOutputLockEnd = matchingBrace(
+        cleanup, cleanup.indexOf('{', cleanupOutputLock));
+    assertTrue(cleanup.indexOf("device.closedForTesting = true") < cleanupOutputLockEnd);
+    assertTrue(cleanup.indexOf("device.motor.close()") > cleanupOutputLockEnd);
+    assertTrue(cleanup.contains("catch (RuntimeException exception)"));
+
+    String serviceAll = between(
+        source, "public static void serviceAll()", "private static SampleWork selectSampleWork");
+    assertTrue(serviceAll.contains("synchronized (OUTPUT_ORDER_LOCK)"));
+    assertTrue(serviceAll.contains("serviceAllLocked()"));
+    String sampleReservation = between(
+        source, "private SampleWork beginSampleWork(double now)",
+        "private static void runConfigurationWork(");
+    assertTrue(sampleReservation.contains("synchronized (OUTPUT_ORDER_LOCK)"));
+    assertTrue(sampleReservation.contains("closedForTesting"));
+
+    String configurationAdmission = between(
+        source,
+        "private boolean hasConfigurationWork(double now)",
+        "private SampleWork beginSampleWork(double now)");
+    assertTrue(configurationAdmission.contains("outputLane.canReserveZero()"));
+    assertTrue(configurationAdmission.contains("!outputGate.needsZeroCommand()"));
+
+    String stopSnapshot = between(
+        source,
+        "public static final class OutputStopBatch",
+        "public record OutputStopSnapshot(");
+    assertTrue(stopSnapshot.contains("outputLane.zeroCompletedFor("));
+    assertTrue(stopSnapshot.contains("lastZeroedLaneGeneration"));
   }
 
   private static String between(String source, String start, String end) {

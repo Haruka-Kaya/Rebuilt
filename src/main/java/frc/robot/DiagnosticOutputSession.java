@@ -14,8 +14,9 @@ import java.util.function.DoubleSupplier;
  * Opaque authority for one bounded diagnostic-output session.
  *
  * <p>Only code in {@code frc.robot} can create a session. Subsystems receive only a pulse permit,
- * whose expected duty, absolute deadline, live interlock, and generation are checked again inside
- * the ordered SPARK output lock immediately before the vendor call.
+ * whose expected duty, absolute deadline, live interlock, and generation are checked outside the
+ * ordered vendor lock. The motor lane then rejects that result if any stop was requested before it
+ * atomically claims the process grant and reserves the vendor transaction.
  */
 public final class DiagnosticOutputSession implements AutoCloseable {
   /** Longest individual pulse used by the isolated follower hardware test. */
@@ -300,7 +301,7 @@ public final class DiagnosticOutputSession implements AutoCloseable {
       this.absolutePulseExpiresAtSeconds = absolutePulseExpiresAtSeconds;
     }
 
-    /** Side-effect-free authorization check intended for a motor vendor-call supplier. */
+    /** Side-effect-free check evaluated before the motor lane's final stop-sequence comparison. */
     public boolean isValidFor(double requestedDuty) {
       return !revoked.get()
           && owner.permitAllowsOutput(

@@ -237,39 +237,55 @@ class RobotOutputSafetySupervisorTest {
   }
 
   @Test
-  void revokeRemainsBoundedWhileAnAdmittedVendorCallIsBlockedAndRejectsLaterCalls()
+  void revokeRemainsBoundedAfterAClaimedTransactionAndRejectsEveryLaterPermit()
       throws Exception {
     long generation = ProcessOutputSafety.revoke("TEST_PREPARE");
     assertTrue(ProcessOutputSafety.authorize(generation));
+    ProcessOutputSafety.NonzeroPermit admitted =
+        ProcessOutputSafety.acquireNonzeroPermit().orElseThrow();
+    assertTrue(ProcessOutputSafety.claimIfCurrent(admitted));
+    assertFalse(ProcessOutputSafety.claimIfCurrent(admitted), "a permit must be one-shot");
     CountDownLatch vendorEntered = new CountDownLatch(1);
     CountDownLatch releaseVendor = new CountDownLatch(1);
     ExecutorService executor = Executors.newFixedThreadPool(2);
     try {
-      Future<ProcessOutputSafety.AuthorizedCall<Boolean>> vendorCall = executor.submit(
-          () -> ProcessOutputSafety.callIfAuthorized(() -> {
-            vendorEntered.countDown();
-            try {
-              assertTrue(releaseVendor.await(2, TimeUnit.SECONDS));
-            } catch (InterruptedException exception) {
-              Thread.currentThread().interrupt();
-              throw new IllegalStateException(exception);
-            }
-            return Boolean.TRUE;
-          }));
+      Future<Boolean> vendorCall = executor.submit(() -> {
+        vendorEntered.countDown();
+        try {
+          assertTrue(releaseVendor.await(2, TimeUnit.SECONDS));
+        } catch (InterruptedException exception) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException(exception);
+        }
+        return Boolean.TRUE;
+      });
       assertTrue(vendorEntered.await(2, TimeUnit.SECONDS));
       Future<Long> revoke = executor.submit(
           () -> ProcessOutputSafety.revoke("TEST_REVOKED"));
       assertTrue(revoke.get(200, TimeUnit.MILLISECONDS) > generation,
           "a stalled vendor API must not block process-wide revocation");
       assertFalse(ProcessOutputSafety.isOutputAuthorized());
-      assertFalse(ProcessOutputSafety.callIfAuthorized(() -> Boolean.TRUE).authorized());
+      assertTrue(ProcessOutputSafety.acquireNonzeroPermit().isEmpty());
       releaseVendor.countDown();
-      assertTrue(vendorCall.get(2, TimeUnit.SECONDS).authorized());
+      assertTrue(vendorCall.get(2, TimeUnit.SECONDS));
     } finally {
       releaseVendor.countDown();
       executor.shutdownNow();
       assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS));
     }
+  }
+
+  @Test
+  void aPermitCapturedBeforeRevokeCannotBeClaimedAfterward() {
+    long generation = ProcessOutputSafety.revoke("TEST_PREPARE");
+    assertTrue(ProcessOutputSafety.authorize(generation));
+    ProcessOutputSafety.NonzeroPermit stale =
+        ProcessOutputSafety.acquireNonzeroPermit().orElseThrow();
+
+    ProcessOutputSafety.revoke("TEST_REVOKED");
+
+    assertFalse(ProcessOutputSafety.claimIfCurrent(stale));
+    assertFalse(ProcessOutputSafety.claimIfCurrent(stale), "a failed claim also consumes the permit");
   }
 
   @Test

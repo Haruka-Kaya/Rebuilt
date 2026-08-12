@@ -5,6 +5,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
@@ -66,7 +70,6 @@ import frc.robot.utils.SwerveStateFreshnessTracker;
  * https://v6.docs.ctr-electronics.com/en/stable/docs/tuner/tuner-swerve/index.html
  */
 public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Subsystem {
-    private final AtomicBoolean m_closed = new AtomicBoolean();
     private static final double kSimLoopPeriod = 0.004; // 4 ms
     private static final double kSingleTagMaxTranslationResidualMeters = 1.0;
     private static final double kMultiTagMaxTranslationResidualMeters = 1.0;
@@ -83,12 +86,27 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private final SafeNeutralRequest m_safeNeutralRequest = new SafeNeutralRequest();
     private final NeutralOut m_directDriveNeutral = new NeutralOut();
     private final NeutralOut m_directSteerNeutral = new NeutralOut();
-    // Lock order is application -> evidence. Evidence-only readers must never acquire application.
+    // Lock order is application -> evidence. No CTRE/Phoenix API may run while either lock is held.
     private final Object m_outputApplicationLock = new Object();
     private final Object m_outputEvidenceLock = new Object();
+    private final ScheduledExecutorService m_neutralOutputExecutor =
+        Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "ctre-swerve-neutral-lane");
+            thread.setDaemon(true);
+            return thread;
+        });
+    private final AtomicBoolean m_neutralWorkerQueued = new AtomicBoolean();
+    private final OutputLaneBarrierTracker m_outputLaneBarrier = new OutputLaneBarrierTracker();
+    private long m_activeNonzeroRegistrationTicket = -1;
+    private boolean m_neutralAttemptInFlight;
+    private int m_inFlightNeutralApplies;
+    private boolean m_simNotifierDrained = true;
+    private long m_stopRequestSequence;
+    private final OutputLaneLifecycleTracker m_outputLaneLifecycle =
+        new OutputLaneLifecycleTracker();
     private long m_outputEpoch;
     private long m_lastNeutralizedOutputEpoch = -1;
-    private long m_lastNeutralAttemptedOutputEpoch = -1;
+    private long m_lastNeutralizedBarrierGeneration = -1;
     private double m_nextNeutralAttemptAt = Double.NEGATIVE_INFINITY;
     private double m_lastNeutralCommandStateTimestamp = Double.NEGATIVE_INFINITY;
     private int m_lastNeutralCommandSuccessfulDaqs = -1;
@@ -500,67 +518,193 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
     /** Immediately replaces any latched drive request with neutral output. */
     public void requestIdle() {
-        try {
-            requestIdleChecked();
-        } catch (RuntimeException exception) {
-            emergencyNeutralNoThrow();
-        }
+        reserveNeutralBarrier();
     }
 
-    private void requestIdleChecked() {
+    /**
+     * Reserves neutral in the ordered output lane without waiting for Phoenix/JNI.
+     *
+     * <p>The reservation invalidates the currently registered nonzero request before returning.
+     * The independent worker sends the certifying neutral only after every ticket at or before the
+     * barrier cutoff has returned. A late completion releases (but can never consume or erase) the
+     * zero requirement, so the final vendor action in that ordered prefix is always neutral.
+     */
+    private SwerveStopToken reserveNeutralBarrier() {
+        double now = outputLaneMonotonicSeconds();
+        SwerveStopToken token;
+        boolean scheduleWorker = false;
         synchronized (m_outputApplicationLock) {
-            double now = safePhoenixTimeSeconds();
+            if (m_stopRequestSequence != Long.MAX_VALUE) {
+                m_stopRequestSequence++;
+            }
             long outputEpoch;
             synchronized (m_outputEvidenceLock) {
                 outputEpoch = m_outputEpoch;
-                if (m_lastNeutralAttemptedOutputEpoch == outputEpoch
-                        && Double.isFinite(now)
-                        && Double.isFinite(m_nextNeutralAttemptAt)
-                        && now < m_nextNeutralAttemptAt) {
-                    return;
-                }
-                // Reserve this attempt before any vendor call so concurrent fail-closed paths cannot
-                // multiply CAN traffic. A newer nonzero output epoch always bypasses the retry delay.
-                m_lastNeutralAttemptedOutputEpoch = outputEpoch;
-                m_nextNeutralAttemptAt = Double.isFinite(now)
-                    ? now + kNeutralRetryPeriodSeconds : Double.NEGATIVE_INFINITY;
             }
-            double baselineTimestamp = Double.NaN;
-            int baselineSuccessfulDaqs = -1;
-            Map<Integer, Map<String, Double>> outputProgressBaseline =
-                captureMotorOutputProgressBaselinesNoThrow();
-            try {
-                var baseline = getStateCopy();
-                baselineTimestamp = baseline.Timestamp;
-                baselineSuccessfulDaqs = baseline.SuccessfulDaqs;
-            } catch (RuntimeException exception) {
-                // Continue issuing direct neutral requests; the stop token will remain unconfirmed.
+            if (m_outputLaneLifecycle.isClosed()) {
+                return new SwerveStopToken(
+                    outputEpoch, m_outputLaneBarrier.barrierGeneration());
             }
-            boolean commandSucceeded = true;
-            m_safeNeutralRequest.arm(outputEpoch);
-            try {
-                this.setControl(m_safeNeutralRequest);
-            } catch (RuntimeException exception) {
-                commandSucceeded = false;
+            boolean newBarrier = m_outputLaneBarrier.barrierOutputEpoch() != outputEpoch;
+            OutputLaneBarrierTracker.Barrier barrier =
+                m_outputLaneBarrier.reserveBarrier(outputEpoch);
+            if (newBarrier) {
+                m_activeNonzeroRegistrationTicket = -1;
+                m_nextNeutralAttemptAt = Double.NEGATIVE_INFINITY;
             }
-            commandSucceeded &= issueDirectNeutralNoThrow();
-            // SwerveDriveState.Timestamp uses the same Phoenix current-time epoch. Recording this only
-            // after every neutral API returns prevents an odometry update from the send window from
-            // being mistaken for post-neutral evidence.
-            double commandCompletedAt = safePhoenixTimeSeconds();
+            // Revoke the request identity even when callers coalesce onto an existing barrier.
+            m_activeNonzeroRegistrationTicket = -1;
+            token = new SwerveStopToken(outputEpoch, barrier.generation());
+            if (!m_neutralAttemptInFlight
+                    && (!Double.isFinite(now)
+                        || !Double.isFinite(m_nextNeutralAttemptAt)
+                        || now >= m_nextNeutralAttemptAt)) {
+                scheduleWorker = true;
+            }
+        }
+        if (scheduleWorker) {
+            scheduleNeutralWorker();
+        }
+        return token;
+    }
 
-            if (commandSucceeded) {
+    private void scheduleNeutralWorker() {
+        long delayMillis;
+        double now = outputLaneMonotonicSeconds();
+        synchronized (m_outputApplicationLock) {
+            if (m_outputLaneLifecycle.isClosed()
+                    || m_neutralAttemptInFlight
+                    || !m_outputLaneBarrier.hasBarrier()
+                    || !m_outputLaneBarrier.neutralRequired()
+                    || hasPreBarrierNonzeroInFlightLocked()) {
+                return;
+            }
+            double delaySeconds = Double.isFinite(now) && Double.isFinite(m_nextNeutralAttemptAt)
+                ? Math.max(0.0, m_nextNeutralAttemptAt - now) : 0.0;
+            delayMillis = Math.max(0L, (long) Math.ceil(delaySeconds * 1000.0));
+        }
+        if (!m_neutralWorkerQueued.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            m_neutralOutputExecutor.schedule(this::runNeutralWorker, delayMillis, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException exception) {
+            m_neutralWorkerQueued.set(false);
+        }
+    }
+
+    private void runNeutralWorker() {
+        try {
+            NeutralLaneAttempt attempt = beginNeutralLaneAttempt();
+            if (attempt == null) {
+                return;
+            }
+            NeutralCommandOutcome outcome = issueNeutralForBarrier(attempt);
+            completeNeutralLaneAttempt(attempt, outcome);
+        } finally {
+            m_neutralWorkerQueued.set(false);
+            if (neutralWorkRemainsWithoutPreBarrierNonzero()) {
+                scheduleNeutralWorker();
+            }
+            scheduleNativeCloseCheck();
+        }
+    }
+
+    private NeutralLaneAttempt beginNeutralLaneAttempt() {
+        double now = outputLaneMonotonicSeconds();
+        synchronized (m_outputApplicationLock) {
+            if (m_outputLaneLifecycle.isClosed() || m_neutralAttemptInFlight
+                    || !m_outputLaneBarrier.hasBarrier()
+                    || hasPreBarrierNonzeroInFlightLocked()) {
+                return null;
+            }
+            if (Double.isFinite(now)
+                    && Double.isFinite(m_nextNeutralAttemptAt)
+                    && now < m_nextNeutralAttemptAt) {
+                return null;
+            }
+            m_neutralAttemptInFlight = true;
+            m_nextNeutralAttemptAt = Double.isFinite(now)
+                ? now + kNeutralRetryPeriodSeconds : Double.NEGATIVE_INFINITY;
+            return new NeutralLaneAttempt(
+                m_outputLaneBarrier.barrierGeneration(),
+                m_outputLaneBarrier.barrierOutputEpoch());
+        }
+    }
+
+    private NeutralCommandOutcome issueNeutralForBarrier(NeutralLaneAttempt attempt) {
+        double baselineTimestamp = Double.NaN;
+        int baselineSuccessfulDaqs = -1;
+        Map<Integer, Map<String, Double>> outputProgressBaseline =
+            captureMotorOutputProgressBaselinesNoThrow();
+        try {
+            var baseline = getStateCopy();
+            baselineTimestamp = baseline.Timestamp;
+            baselineSuccessfulDaqs = baseline.SuccessfulDaqs;
+        } catch (RuntimeException exception) {
+            // Continue issuing direct neutral requests; the stop token will remain unconfirmed.
+        }
+        boolean commandSucceeded = true;
+        m_safeNeutralRequest.arm(attempt.barrierGeneration());
+        try {
+            // Never hold the application/evidence lock across a potentially blocking JNI call.
+            this.setControl(m_safeNeutralRequest);
+        } catch (RuntimeException exception) {
+            commandSucceeded = false;
+        }
+        commandSucceeded &= issueDirectNeutralNoThrow();
+        return new NeutralCommandOutcome(
+            commandSucceeded,
+            baselineTimestamp,
+            baselineSuccessfulDaqs,
+            safePhoenixTimeSeconds(),
+            outputProgressBaseline);
+    }
+
+    private void completeNeutralLaneAttempt(
+            NeutralLaneAttempt attempt, NeutralCommandOutcome outcome) {
+        boolean newerBarrierWaiting;
+        synchronized (m_outputApplicationLock) {
+            m_neutralAttemptInFlight = false;
+            boolean currentBarrier = m_outputLaneBarrier.matches(
+                attempt.barrierGeneration(), attempt.outputEpoch());
+            boolean olderNonzeroStillInFlight = m_outputLaneBarrier.hasPreBarrierInFlight();
+            if (currentBarrier && outcome.succeeded() && !olderNonzeroStillInFlight) {
+                m_outputLaneBarrier.markNeutralCompleted(
+                    attempt.barrierGeneration(), attempt.outputEpoch());
                 synchronized (m_outputEvidenceLock) {
-                    if (m_outputEpoch == outputEpoch) {
-                        m_lastNeutralizedOutputEpoch = outputEpoch;
-                        m_lastNeutralCommandStateTimestamp = baselineTimestamp;
-                        m_lastNeutralCommandSuccessfulDaqs = baselineSuccessfulDaqs;
-                        m_lastNeutralCommandSentAt = commandCompletedAt;
-                        m_lastNeutralOutputProgressTimestamps = outputProgressBaseline;
+                    if (m_outputEpoch == attempt.outputEpoch()) {
+                        m_lastNeutralizedOutputEpoch = attempt.outputEpoch();
+                        m_lastNeutralizedBarrierGeneration = attempt.barrierGeneration();
+                        m_lastNeutralCommandStateTimestamp = outcome.baselineTimestamp();
+                        m_lastNeutralCommandSuccessfulDaqs = outcome.baselineSuccessfulDaqs();
+                        m_lastNeutralCommandSentAt = outcome.commandCompletedAt();
+                        m_lastNeutralOutputProgressTimestamps = outcome.outputProgressBaseline();
                     }
                 }
             }
+            newerBarrierWaiting = !currentBarrier;
+            if (newerBarrierWaiting) {
+                m_nextNeutralAttemptAt = Double.NEGATIVE_INFINITY;
+            }
         }
+        if (newerBarrierWaiting) {
+            scheduleNeutralWorker();
+        }
+    }
+
+    private boolean neutralWorkRemainsWithoutPreBarrierNonzero() {
+        synchronized (m_outputApplicationLock) {
+            return !m_outputLaneLifecycle.isClosed()
+                && !m_neutralAttemptInFlight
+                && m_outputLaneBarrier.hasBarrier()
+                && !hasPreBarrierNonzeroInFlightLocked()
+                && m_outputLaneBarrier.neutralRequired();
+        }
+    }
+
+    private boolean hasPreBarrierNonzeroInFlightLocked() {
+        return m_outputLaneBarrier.hasPreBarrierInFlight();
     }
 
     private boolean issueDirectNeutralNoThrow() {
@@ -586,28 +730,17 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         return succeeded;
     }
 
-    private void emergencyNeutralNoThrow() {
-        synchronized (m_outputApplicationLock) {
-            long outputEpoch;
-            synchronized (m_outputEvidenceLock) {
-                outputEpoch = m_outputEpoch;
-            }
-            m_safeNeutralRequest.arm(outputEpoch);
-            try {
-                this.setControl(m_safeNeutralRequest);
-            } catch (RuntimeException exception) {
-                // Continue to the per-controller neutral commands below.
-            }
-            issueDirectNeutralNoThrow();
-        }
-    }
-
     private static double safePhoenixTimeSeconds() {
         try {
             return Utils.getCurrentTimeSeconds();
         } catch (RuntimeException exception) {
             return Double.NaN;
         }
+    }
+
+    /** Pure-Java lane clock; stop reservation never depends on Phoenix/JNI availability. */
+    private static double outputLaneMonotonicSeconds() {
+        return System.nanoTime() * 1.0e-9;
     }
 
     /** Returns the active neutral request for command suppliers that cannot emit a drive request. */
@@ -617,10 +750,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
     /** Requests active neutral and returns a token that a later fresh odometry sample can verify. */
     public SwerveStopToken requestIdleWithToken() {
-        requestIdle();
-        synchronized (m_outputEvidenceLock) {
-            return new SwerveStopToken(m_outputEpoch);
-        }
+        return reserveNeutralBarrier();
     }
 
     private Map<Integer, Map<String, Double>> captureMotorOutputProgressBaselinesNoThrow() {
@@ -645,15 +775,31 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
     /** Retries a failed neutral command without invalidating its output-epoch token. */
     public void retryIdleIfNeeded(SwerveStopToken token) {
-        boolean retry;
-        synchronized (m_outputEvidenceLock) {
-            retry = token != null
-                && token.outputEpoch() == m_outputEpoch
-                && (m_lastNeutralizedOutputEpoch != token.outputEpoch()
-                    || !Double.isFinite(m_lastNeutralCommandSentAt));
+        boolean retry = false;
+        synchronized (m_outputApplicationLock) {
+            synchronized (m_outputEvidenceLock) {
+                boolean samePendingStop = token != null
+                    && token.outputEpoch() == m_outputEpoch
+                    && m_outputLaneBarrier.matches(
+                        token.barrierGeneration(), token.outputEpoch())
+                    && (m_lastNeutralizedOutputEpoch != token.outputEpoch()
+                        || m_lastNeutralizedBarrierGeneration != token.barrierGeneration()
+                        || !Double.isFinite(m_lastNeutralCommandSentAt));
+                if (samePendingStop) {
+                    if (m_stopRequestSequence != Long.MAX_VALUE) {
+                        m_stopRequestSequence++;
+                    }
+                    m_activeNonzeroRegistrationTicket = -1;
+                    retry = m_outputLaneBarrier.requireNeutralRetry(
+                        token.barrierGeneration(), token.outputEpoch());
+                    if (retry) {
+                        m_nextNeutralAttemptAt = Double.NEGATIVE_INFINITY;
+                    }
+                }
+            }
         }
         if (retry) {
-            requestIdle();
+            scheduleNeutralWorker();
         }
     }
 
@@ -670,17 +816,24 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         int baselineDaqs;
         double neutralCommandCompletedAt;
         Map<Integer, Map<String, Double>> outputProgressBaseline;
-        synchronized (m_outputEvidenceLock) {
-            if (token.outputEpoch() != m_outputEpoch) {
-                return new SwerveStopEvidence(false, "NEWER_OUTPUT_REQUESTED");
+        synchronized (m_outputApplicationLock) {
+            synchronized (m_outputEvidenceLock) {
+                if (token.outputEpoch() != m_outputEpoch) {
+                    return new SwerveStopEvidence(false, "NEWER_OUTPUT_REQUESTED");
+                }
+                if (!m_outputLaneBarrier.matches(
+                        token.barrierGeneration(), token.outputEpoch())) {
+                    return new SwerveStopEvidence(false, "NEWER_NEUTRAL_BARRIER_REQUESTED");
+                }
+                if (m_lastNeutralizedOutputEpoch != token.outputEpoch()
+                        || m_lastNeutralizedBarrierGeneration != token.barrierGeneration()) {
+                    return new SwerveStopEvidence(false, "NEUTRAL_COMMAND_PENDING");
+                }
+                baselineTimestamp = m_lastNeutralCommandStateTimestamp;
+                baselineDaqs = m_lastNeutralCommandSuccessfulDaqs;
+                neutralCommandCompletedAt = m_lastNeutralCommandSentAt;
+                outputProgressBaseline = m_lastNeutralOutputProgressTimestamps;
             }
-            if (m_lastNeutralizedOutputEpoch != token.outputEpoch()) {
-                return new SwerveStopEvidence(false, "NEUTRAL_COMMAND_PENDING");
-            }
-            baselineTimestamp = m_lastNeutralCommandStateTimestamp;
-            baselineDaqs = m_lastNeutralCommandSuccessfulDaqs;
-            neutralCommandCompletedAt = m_lastNeutralCommandSentAt;
-            outputProgressBaseline = m_lastNeutralOutputProgressTimestamps;
         }
 
         SwerveDriveState state;
@@ -720,10 +873,16 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
                     false, "ID" + probe.canId() + "/" + outputReason);
             }
         }
-        synchronized (m_outputEvidenceLock) {
-            if (token.outputEpoch() != m_outputEpoch
-                    || m_lastNeutralizedOutputEpoch != token.outputEpoch()) {
-                return new SwerveStopEvidence(false, "OUTPUT_EPOCH_CHANGED_DURING_EVIDENCE");
+        synchronized (m_outputApplicationLock) {
+            synchronized (m_outputEvidenceLock) {
+                if (token.outputEpoch() != m_outputEpoch
+                        || !m_outputLaneBarrier.matches(
+                            token.barrierGeneration(), token.outputEpoch())
+                        || m_lastNeutralizedOutputEpoch != token.outputEpoch()
+                        || m_lastNeutralizedBarrierGeneration != token.barrierGeneration()) {
+                    return new SwerveStopEvidence(
+                        false, "OUTPUT_OR_BARRIER_CHANGED_DURING_EVIDENCE");
+                }
             }
         }
         return new SwerveStopEvidence(true, "CONFIRMED");
@@ -763,6 +922,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
     private void startSimThread() {
         m_lastSimTime = Utils.getCurrentTimeSeconds();
+        m_simNotifierDrained = false;
 
         /* Run simulation at a faster rate so PID gains behave more reasonably */
         m_simNotifier = new Notifier(() -> {
@@ -776,19 +936,87 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         m_simNotifier.startPeriodic(kSimLoopPeriod);
     }
 
-    /** Stops simulation-owned threads before releasing Phoenix native resources. */
+    /**
+     * Starts fail-closed teardown without destroying Phoenix resources under an in-flight JNI call.
+     *
+     * <p>If a vendor call never returns, this object intentionally remains in {@code CLOSING};
+     * leaking native resources is safer than allowing a use-after-close from that late call.
+     */
     @Override
     public void close() {
-        if (!m_closed.compareAndSet(false, true)) {
-            return;
-        }
-        Notifier simNotifier = m_simNotifier;
-        m_simNotifier = null;
-        try {
-            if (simNotifier != null) {
-                simNotifier.close();
+        Notifier simNotifier;
+        synchronized (m_outputApplicationLock) {
+            if (!m_outputLaneLifecycle.requestClose()) {
+                return;
             }
-        } finally {
+            m_activeNonzeroRegistrationTicket = -1;
+            simNotifier = m_simNotifier;
+            m_simNotifier = null;
+        }
+        // Publish the stop barrier before any potentially blocking Notifier teardown. This lets
+        // concurrent registration/apply paths observe CLOSING plus the advanced stop sequence
+        // immediately, even if the simulation callback does not return promptly.
+        reserveNeutralBarrier();
+        if (simNotifier == null) {
+            synchronized (m_outputApplicationLock) {
+                m_simNotifierDrained = true;
+            }
+        } else {
+            Thread notifierDrain = new Thread(() -> {
+                boolean drained = false;
+                try {
+                    simNotifier.close();
+                    drained = true;
+                } catch (RuntimeException ignored) {
+                    // Leave CLOSING latched. Leaking native state is safer than racing this callback.
+                }
+                if (drained) {
+                    synchronized (m_outputApplicationLock) {
+                        m_simNotifierDrained = true;
+                    }
+                    scheduleNativeCloseCheck();
+                }
+            }, "ctre-swerve-sim-drain");
+            notifierDrain.setDaemon(true);
+            try {
+                notifierDrain.start();
+            } catch (RuntimeException ignored) {
+                // No proof that the callback drained: intentionally remain CLOSING.
+            }
+        }
+        scheduleNativeCloseCheck();
+    }
+
+    private void scheduleNativeCloseCheck() {
+        synchronized (m_outputApplicationLock) {
+            if (!m_outputLaneLifecycle.isClosing()) {
+                return;
+            }
+        }
+        try {
+            m_neutralOutputExecutor.execute(this::tryFinalizeNativeCloseAfterLaneDrain);
+        } catch (RejectedExecutionException ignored) {
+            // CLOSED already owns native destruction, or the executor is no longer usable.
+        }
+    }
+
+    private void tryFinalizeNativeCloseAfterLaneDrain() {
+        boolean destroyNative = false;
+        synchronized (m_outputApplicationLock) {
+            boolean neutralCompleted = m_outputLaneBarrier.hasBarrier()
+                && !m_outputLaneBarrier.neutralRequired()
+                && m_lastNeutralizedOutputEpoch == m_outputLaneBarrier.barrierOutputEpoch()
+                && m_lastNeutralizedBarrierGeneration
+                    == m_outputLaneBarrier.barrierGeneration();
+            boolean laneDrained = !m_outputLaneBarrier.hasInFlightNonzero()
+                && !m_neutralAttemptInFlight
+                && m_inFlightNeutralApplies == 0
+                && m_simNotifierDrained;
+            destroyNative = m_outputLaneLifecycle.tryBeginNativeClose(
+                laneDrained, neutralCompleted);
+        }
+        if (destroyNative) {
+            m_neutralOutputExecutor.shutdown();
             super.close();
         }
     }
@@ -846,7 +1074,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private final SwerveRequest.RobotCentric m_robotCentricDriveRequest = new SwerveRequest.RobotCentric();
 
     public ControlResult drive(double xSpeed, double ySpeed, double rot, boolean fieldRelative) {
-        return driveChecked(xSpeed, ySpeed, rot, fieldRelative, null, 0.0);
+        return driveChecked(xSpeed, ySpeed, rot, fieldRelative, null);
     }
 
     /**
@@ -869,7 +1097,11 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             return ControlResult.OUTPUT_AUTHORIZATION_REVOKED;
         }
         return driveChecked(
-            xSpeed, ySpeed, rot, false, permit, authorizationDuty);
+            xSpeed,
+            ySpeed,
+            rot,
+            false,
+            () -> permit.isValidFor(authorizationDuty));
     }
 
     private ControlResult driveChecked(
@@ -877,8 +1109,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             double ySpeed,
             double rot,
             boolean fieldRelative,
-            PulsePermit diagnosticPermit,
-            double diagnosticAuthorizationDuty) {
+            BooleanSupplier diagnosticAuthorization) {
         if (!DebugConstants.ALLOW_SWERVE_OUTPUT) {
             requestIdle();
             return ControlResult.OUTPUT_DISABLED;
@@ -920,15 +1151,10 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             m_robotCentricDriveRequest.VelocityX = limitedX * maxSpeed;
             m_robotCentricDriveRequest.VelocityY = limitedY * maxSpeed;
             m_robotCentricDriveRequest.RotationalRate = limitedRot;
-            if (diagnosticPermit == null) {
+            if (diagnosticAuthorization == null) {
                 return applyNonNeutralRequest(m_robotCentricDriveRequest);
             }
-            BooleanSupplier diagnosticAuthorization =
-                () -> diagnosticPermit.isValidFor(diagnosticAuthorizationDuty);
-            return applyNonNeutralRequest(
-                new DiagnosticLeaseAwareRequest(
-                    m_robotCentricDriveRequest, diagnosticAuthorization),
-                diagnosticAuthorization);
+            return applyNonNeutralRequest(m_robotCentricDriveRequest, diagnosticAuthorization);
         }
     }
 
@@ -1070,14 +1296,24 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             SwerveDiagnosticBaseline baseline,
             ControlResult submissionResult) {
         long outputEpoch;
-        synchronized (m_outputEvidenceLock) {
-            outputEpoch = m_outputEpoch;
+        ControlResult sealedSubmission = submissionResult == null
+            ? ControlResult.REQUEST_EXCEPTION : submissionResult;
+        synchronized (m_outputApplicationLock) {
+            synchronized (m_outputEvidenceLock) {
+                outputEpoch = m_outputEpoch;
+            }
+            if (sealedSubmission == ControlResult.REQUEST_SUBMITTED
+                    && (m_activeNonzeroRegistrationTicket < 0
+                        || !m_outputLaneLifecycle.isOpen()
+                        || m_outputLaneBarrier.barrierOutputEpoch() == outputEpoch)) {
+                sealedSubmission = ControlResult.OUTPUT_AUTHORIZATION_REVOKED;
+            }
         }
         return new SwerveDiagnosticToken(
             outputEpoch,
             safePhoenixTimeSeconds(),
             baseline == null ? Map.of() : baseline.progressTimestampsByCanId(),
-            submissionResult == null ? ControlResult.REQUEST_EXCEPTION : submissionResult);
+            sealedSubmission);
     }
 
     /** HST overload that accepts only post-command, same-output-epoch diagnostic frames. */
@@ -1547,7 +1783,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
      * unchanged. This request actively replaces both Talon outputs once for each new output epoch;
      * direct NeutralOut commands provide the immediate, status-checked stop path.
      */
-    private static final class SafeNeutralRequest implements SwerveRequest {
+    private final class SafeNeutralRequest implements SwerveRequest {
         private final NeutralOut driveNeutral = new NeutralOut();
         private final NeutralOut steerNeutral = new NeutralOut();
         private final AtomicLong requestedGeneration = new AtomicLong(-1);
@@ -1568,62 +1804,67 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             if (appliedGeneration.get() == generation) {
                 return StatusCode.OK;
             }
-            boolean succeeded = true;
-            for (SwerveModule<?, ?, ?> module : modulesToApply) {
-                try {
-                    module.apply(driveNeutral, steerNeutral);
-                } catch (RuntimeException exception) {
-                    succeeded = false;
+            synchronized (m_outputApplicationLock) {
+                if (m_outputLaneLifecycle.isClosed()) {
+                    return StatusCode.GeneralError;
                 }
+                m_inFlightNeutralApplies++;
             }
-            // Each output epoch needs one odometry-thread application, not a new pair of control
-            // frames for every 100 Hz odometry update. Immediate direct NeutralOut commands and
-            // their bounded retry path remain the authoritative stop evidence.
-            if (requestedGeneration.get() == generation) {
-                appliedGeneration.set(generation);
+            boolean succeeded = true;
+            try {
+                for (SwerveModule<?, ?, ?> module : modulesToApply) {
+                    try {
+                        module.apply(driveNeutral, steerNeutral);
+                    } catch (RuntimeException exception) {
+                        succeeded = false;
+                    }
+                }
+                // Each barrier needs one odometry-thread application, not repeated control frames.
+                if (requestedGeneration.get() == generation) {
+                    appliedGeneration.set(generation);
+                }
+            } finally {
+                synchronized (m_outputApplicationLock) {
+                    m_inFlightNeutralApplies--;
+                }
+                scheduleNativeCloseCheck();
             }
             return succeeded ? StatusCode.OK : StatusCode.GeneralError;
         }
     }
 
-    private static final class DiagnosticLeaseAwareRequest implements SwerveRequest {
+    /**
+     * Rechecks process/additional authorization on the odometry thread and orders the actual
+     * module-output JNI call through the same ticket/barrier lane as setControl registration.
+     */
+    private final class OrderedNonzeroRequest implements SwerveRequest {
         private final SwerveRequest delegate;
-        private final BooleanSupplier authorization;
-        private final NeutralOut driveNeutral = new NeutralOut();
-        private final NeutralOut steerNeutral = new NeutralOut();
+        private final NonzeroRegistration registration;
 
-        DiagnosticLeaseAwareRequest(SwerveRequest delegate, BooleanSupplier authorization) {
+        OrderedNonzeroRequest(SwerveRequest delegate, NonzeroRegistration registration) {
             this.delegate = delegate;
-            this.authorization = authorization;
+            this.registration = registration;
         }
 
         @Override
         public StatusCode apply(
                 SwerveControlParameters parameters,
                 SwerveModule<?, ?, ?>... modulesToApply) {
-            boolean authorized;
-            try {
-                authorized = ProcessOutputSafety.isOutputAuthorized()
-                    && authorization.getAsBoolean();
-            } catch (RuntimeException exception) {
-                authorized = false;
-            }
-            if (authorized) {
-                return delegate.apply(parameters, modulesToApply);
-            }
-            if (modulesToApply == null) {
-                return StatusCode.GeneralError;
-            }
-            boolean succeeded = true;
-            for (SwerveModule<?, ?, ?> module : modulesToApply) {
-                try {
-                    module.apply(driveNeutral, steerNeutral);
-                } catch (RuntimeException exception) {
-                    succeeded = false;
-                }
-            }
-            return succeeded ? StatusCode.OK : StatusCode.GeneralError;
+            return OutputLaneApplyExecutor.apply(
+                () -> {
+                    NonzeroApplyAttempt attempt = beginNonzeroApply(registration);
+                    return attempt == null ? -1L : attempt.ticket();
+                },
+                () -> {
+                    // The actual nonzero vendor output is outside application/evidence locks. A
+                    // revoke can publish its barrier immediately and waits only to certify neutral
+                    // behind this already-admitted ticket.
+                    return delegate.apply(parameters, modulesToApply);
+                },
+                CommandSwerveDrivetrain.this::completeNonzeroLaneAction,
+                CommandSwerveDrivetrain.this::reserveNeutralBarrier);
         }
+
     }
 
     private ControlResult applyNonNeutralRequest(SwerveRequest request) {
@@ -1632,34 +1873,141 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
 
     private ControlResult applyNonNeutralRequest(
             SwerveRequest request, BooleanSupplier additionalAuthorization) {
-        boolean requestNeutral = false;
-        ControlResult rejectedResult = ControlResult.REQUEST_EXCEPTION;
+        if (request == null || additionalAuthorization == null) {
+            requestIdle();
+            return ControlResult.REQUEST_EXCEPTION;
+        }
+        ProcessOutputSafety.NonzeroPermit processPermit =
+            ProcessOutputSafety.acquireNonzeroPermit().orElse(null);
+        long stopSequenceSnapshot;
+        synchronized (m_outputApplicationLock) {
+            stopSequenceSnapshot = m_stopRequestSequence;
+        }
+        boolean additionalAuthorizationValid = authorizationAllows(additionalAuthorization);
+        // The supplier is sampled outside the lane lock. The request retains it so the odometry
+        // thread can recheck a diagnostic pulse on every actual module-output application.
+        NonzeroRegistration registration = null;
         synchronized (m_outputApplicationLock) {
             try {
-                ProcessOutputSafety.AuthorizedCall<Boolean> authorizedCall =
-                    ProcessOutputSafety.callIfAuthorized(() -> {
-                        if (!additionalAuthorization.getAsBoolean()) {
-                            return Boolean.FALSE;
+                if (!m_outputLaneLifecycle.isOpen()
+                        || m_neutralAttemptInFlight
+                        || m_inFlightNeutralApplies > 0
+                        || m_stopRequestSequence == Long.MAX_VALUE
+                        || stopSequenceSnapshot != m_stopRequestSequence
+                        || !m_outputLaneBarrier.canStartNewOutput()
+                        || !additionalAuthorizationValid
+                        || !ProcessOutputSafety.claimIfCurrent(processPermit)) {
+                    registration = null;
+                } else {
+                    long outputEpoch;
+                    synchronized (m_outputEvidenceLock) {
+                        if (m_outputEpoch == Long.MAX_VALUE) {
+                            throw new IllegalStateException("CTRE output epoch exhausted");
                         }
-                        synchronized (m_outputEvidenceLock) {
-                            m_outputEpoch++;
-                        }
-                        this.setControl(request);
-                        return Boolean.TRUE;
-                    });
-                if (authorizedCall.authorized() && Boolean.TRUE.equals(authorizedCall.value())) {
-                    return ControlResult.REQUEST_SUBMITTED;
+                        outputEpoch = ++m_outputEpoch;
+                    }
+                    // A newer nonzero epoch supersedes any completed/scheduled older stop token.
+                    m_outputLaneBarrier.clearBarrierForNewOutputEpoch();
+                    long ticket = OutputLaneReservation.reserveNonzero(
+                        m_outputLaneBarrier,
+                        true,
+                        additionalAuthorizationValid,
+                        true,
+                        stopSequenceSnapshot,
+                        m_stopRequestSequence);
+                    if (ticket < 0) {
+                        throw new IllegalStateException("CTRE output registration rejected");
+                    }
+                    m_activeNonzeroRegistrationTicket = ticket;
+                    registration = new NonzeroRegistration(
+                        ticket, outputEpoch, additionalAuthorization);
                 }
-                rejectedResult = ControlResult.OUTPUT_AUTHORIZATION_REVOKED;
-                requestNeutral = true;
             } catch (RuntimeException exception) {
-                requestNeutral = true;
+                registration = null;
             }
         }
-        if (requestNeutral) {
+        if (registration == null) {
             requestIdle();
+            return processPermit == null
+                ? ControlResult.OUTPUT_AUTHORIZATION_REVOKED
+                : ControlResult.REQUEST_EXCEPTION;
         }
-        return rejectedResult;
+
+        StatusCode registrationStatus = StatusCode.GeneralError;
+        try {
+            // setControl only registers the request. It is intentionally outside both lane locks.
+            this.setControl(new OrderedNonzeroRequest(request, registration));
+            registrationStatus = StatusCode.OK;
+        } catch (RuntimeException exception) {
+            registrationStatus = StatusCode.GeneralError;
+        } finally {
+            completeNonzeroLaneAction(registration.ticket());
+        }
+        if (!registrationStatus.isOK()) {
+            requestIdle();
+            return ControlResult.REQUEST_EXCEPTION;
+        }
+        return ControlResult.REQUEST_SUBMITTED;
+    }
+
+    private NonzeroApplyAttempt beginNonzeroApply(NonzeroRegistration registration) {
+        ProcessOutputSafety.NonzeroPermit applyPermit =
+            ProcessOutputSafety.acquireNonzeroPermit().orElse(null);
+        long stopSequenceSnapshot;
+        synchronized (m_outputApplicationLock) {
+            stopSequenceSnapshot = m_stopRequestSequence;
+        }
+        boolean additionalAuthorizationValid = registration != null
+            && authorizationAllows(registration.additionalAuthorization());
+        synchronized (m_outputApplicationLock) {
+            boolean registrationCurrent = m_outputLaneLifecycle.isOpen()
+                && registration != null
+                && !m_neutralAttemptInFlight
+                && m_inFlightNeutralApplies == 0
+                && m_stopRequestSequence != Long.MAX_VALUE
+                && stopSequenceSnapshot == m_stopRequestSequence
+                && registration.ticket() == m_activeNonzeroRegistrationTicket
+                && registration.outputEpoch() == m_outputEpoch
+                && m_outputLaneBarrier.barrierOutputEpoch() != registration.outputEpoch();
+            boolean processAuthorizationClaimed = registrationCurrent
+                && additionalAuthorizationValid
+                && ProcessOutputSafety.claimIfCurrent(applyPermit);
+            long ticket = OutputLaneReservation.reserveNonzero(
+                m_outputLaneBarrier,
+                registrationCurrent,
+                additionalAuthorizationValid,
+                processAuthorizationClaimed,
+                stopSequenceSnapshot,
+                m_stopRequestSequence);
+            if (ticket < 0) {
+                return null;
+            }
+            return new NonzeroApplyAttempt(ticket);
+        }
+    }
+
+    private static boolean authorizationAllows(BooleanSupplier authorization) {
+        try {
+            return authorization != null && authorization.getAsBoolean();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private void completeNonzeroLaneAction(long ticket) {
+        boolean barrierNeedsWorker;
+        synchronized (m_outputApplicationLock) {
+            barrierNeedsWorker = m_outputLaneBarrier.completeNonzero(ticket);
+            if (barrierNeedsWorker) {
+                // A late pre-barrier completion invalidates any earlier best-effort neutral.
+                m_lastNeutralizedBarrierGeneration = -1;
+                m_nextNeutralAttemptAt = Double.NEGATIVE_INFINITY;
+            }
+        }
+        if (barrierNeedsWorker) {
+            scheduleNeutralWorker();
+        }
+        scheduleNativeCloseCheck();
     }
 
     public enum ControlResult {
@@ -1672,7 +2020,25 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         REQUEST_EXCEPTION
     }
 
-    public record SwerveStopToken(long outputEpoch) {}
+    private record NonzeroRegistration(
+        long ticket,
+        long outputEpoch,
+        BooleanSupplier additionalAuthorization) {}
+
+    private record NonzeroApplyAttempt(long ticket) {}
+
+    private record NeutralLaneAttempt(
+        long barrierGeneration,
+        long outputEpoch) {}
+
+    private record NeutralCommandOutcome(
+        boolean succeeded,
+        double baselineTimestamp,
+        int baselineSuccessfulDaqs,
+        double commandCompletedAt,
+        Map<Integer, Map<String, Double>> outputProgressBaseline) {}
+
+    public record SwerveStopToken(long outputEpoch, long barrierGeneration) {}
 
     public record SwerveStopEvidence(boolean confirmed, String reason) {}
 

@@ -70,49 +70,123 @@ class CtreDeviceEvidenceArchitectureTest {
   }
 
   @Test
-  void swerveOutputApplicationSerializesAuthorizationAndNeutralRequests() throws IOException {
+  void swerveOutputLaneReservesUnderLockButRunsPhoenixOutsideLocks() throws IOException {
     String source = Files.readString(SOURCE);
-    String requestIdleChecked = between(
-        source, "private void requestIdleChecked()", "private boolean issueDirectNeutralNoThrow()");
-    String emergencyNeutral = between(
-        source, "private void emergencyNeutralNoThrow()", "private static double safePhoenixTimeSeconds()");
+    String reserveNeutral = between(
+        source, "private SwerveStopToken reserveNeutralBarrier()", "private void scheduleNeutralWorker()");
+    String scheduleNeutral = between(
+        source, "private void scheduleNeutralWorker()", "private void runNeutralWorker()");
+    String beginNeutral = between(
+        source, "private NeutralLaneAttempt beginNeutralLaneAttempt(",
+        "private NeutralCommandOutcome issueNeutralForBarrier(");
+    String neutralVendorCall = between(
+        source, "private NeutralCommandOutcome issueNeutralForBarrier(",
+        "private void completeNeutralLaneAttempt(");
     String applyNonNeutral = between(
         source, "private ControlResult applyNonNeutralRequest(", "public enum ControlResult");
+    String orderedApply = between(
+        source, "private final class OrderedNonzeroRequest", "private ControlResult applyNonNeutralRequest(");
+    String beginNonzeroApply = between(
+        source, "private NonzeroApplyAttempt beginNonzeroApply(",
+        "private static boolean authorizationAllows(");
+    String close = between(
+        source, "public void close()", "private void scheduleNativeCloseCheck()");
 
     assertTrue(source.contains("private final Object m_outputApplicationLock = new Object()"));
     assertOrdered(
-        requestIdleChecked,
+        reserveNeutral,
         "synchronized (m_outputApplicationLock)",
         "synchronized (m_outputEvidenceLock)",
+        "m_outputLaneBarrier.reserveBarrier(outputEpoch)");
+    assertFalse(reserveNeutral.contains("this.setControl("));
+    assertFalse(reserveNeutral.contains("issueDirectNeutralNoThrow()"));
+    assertTrue(reserveNeutral.contains("outputLaneMonotonicSeconds()"));
+    assertFalse(reserveNeutral.contains("safePhoenixTimeSeconds()"));
+    assertTrue(scheduleNeutral.contains("outputLaneMonotonicSeconds()"));
+    assertFalse(scheduleNeutral.contains("safePhoenixTimeSeconds()"));
+    assertTrue(beginNeutral.contains("outputLaneMonotonicSeconds()"));
+    assertFalse(beginNeutral.contains("safePhoenixTimeSeconds()"));
+    assertOrdered(
+        neutralVendorCall,
         "this.setControl(m_safeNeutralRequest)",
         "issueDirectNeutralNoThrow()");
-    assertOrdered(
-        emergencyNeutral,
-        "synchronized (m_outputApplicationLock)",
-        "synchronized (m_outputEvidenceLock)",
-        "this.setControl(m_safeNeutralRequest)",
-        "issueDirectNeutralNoThrow()");
-    assertOrdered(
-        applyNonNeutral,
-        "synchronized (m_outputApplicationLock)",
-        "ProcessOutputSafety.callIfAuthorized",
-        "synchronized (m_outputEvidenceLock)",
-        "m_outputEpoch++",
-        "this.setControl(request)");
+    int permitAcquisition = applyNonNeutral.indexOf("ProcessOutputSafety.acquireNonzeroPermit()");
+    int sequenceCaptureLock = applyNonNeutral.indexOf("synchronized (m_outputApplicationLock)");
+    int sequenceCapture = applyNonNeutral.indexOf(
+        "stopSequenceSnapshot = m_stopRequestSequence", sequenceCaptureLock);
+    int liveRegistrationAuthorization = applyNonNeutral.indexOf(
+        "authorizationAllows(additionalAuthorization)", sequenceCapture);
+    int finalRegistrationLock = applyNonNeutral.indexOf(
+        "synchronized (m_outputApplicationLock)", liveRegistrationAuthorization);
+    int finalRegistrationClaim = applyNonNeutral.indexOf(
+        "ProcessOutputSafety.claimIfCurrent(processPermit)", finalRegistrationLock);
+    int evidenceLock = applyNonNeutral.indexOf(
+        "synchronized (m_outputEvidenceLock)", finalRegistrationClaim);
+    int outputEpochAdvance = applyNonNeutral.indexOf(
+        "outputEpoch = ++m_outputEpoch", evidenceLock);
+    int registrationReservation = applyNonNeutral.indexOf(
+        "OutputLaneReservation.reserveNonzero(", outputEpochAdvance);
+    int registrationVendorCall = applyNonNeutral.indexOf(
+        "this.setControl(new OrderedNonzeroRequest(request, registration))", registrationReservation);
+    assertTrue(permitAcquisition >= 0);
+    assertTrue(sequenceCaptureLock > permitAcquisition);
+    assertTrue(sequenceCapture > sequenceCaptureLock);
+    assertTrue(liveRegistrationAuthorization > sequenceCapture);
+    assertTrue(finalRegistrationLock > liveRegistrationAuthorization);
+    assertTrue(finalRegistrationClaim > finalRegistrationLock);
+    assertTrue(evidenceLock > finalRegistrationClaim);
+    assertTrue(outputEpochAdvance > evidenceLock);
+    assertTrue(registrationReservation > outputEpochAdvance);
+    assertTrue(registrationVendorCall > registrationReservation);
+    assertFalse(source.contains("ProcessOutputSafety.callIfAuthorized"));
     assertTrue(applyNonNeutral.contains("ControlResult.OUTPUT_AUTHORIZATION_REVOKED"));
-    assertTrue(applyNonNeutral.contains("additionalAuthorization.getAsBoolean()"));
+    assertTrue(applyNonNeutral.contains("authorizationAllows(additionalAuthorization)"));
     assertTrue(source.contains("public ControlResult driveDiagnostic("));
-    assertTrue(source.contains("new DiagnosticLeaseAwareRequest("));
-    assertTrue(source.contains("authorization.getAsBoolean()"));
+    assertFalse(source.contains("DiagnosticLeaseAwareRequest"));
+    assertOrdered(
+        orderedApply,
+        "OutputLaneApplyExecutor.apply(",
+        "beginNonzeroApply(registration)",
+        "delegate.apply(parameters, modulesToApply)",
+        "CommandSwerveDrivetrain.this::completeNonzeroLaneAction",
+        "CommandSwerveDrivetrain.this::reserveNeutralBarrier");
+    assertOrdered(
+        beginNonzeroApply,
+        "ProcessOutputSafety.acquireNonzeroPermit()",
+        "stopSequenceSnapshot = m_stopRequestSequence",
+        "authorizationAllows(registration.additionalAuthorization())");
+    assertTrue(beginNonzeroApply.contains("OutputLaneReservation.reserveNonzero("));
+    int liveAuthorization = beginNonzeroApply.indexOf(
+        "authorizationAllows(registration.additionalAuthorization())");
+    int finalApplicationLock = beginNonzeroApply.indexOf(
+        "synchronized (m_outputApplicationLock)", liveAuthorization);
+    int finalProcessClaim = beginNonzeroApply.indexOf(
+        "ProcessOutputSafety.claimIfCurrent(applyPermit)", finalApplicationLock);
+    assertTrue(finalApplicationLock > liveAuthorization,
+        "live pulse authorization must be evaluated outside the application lock");
+    assertTrue(finalProcessClaim > finalApplicationLock,
+        "the one-shot process permit must be claimed at the final lane boundary");
+    assertOrdered(
+        close,
+        "m_outputLaneLifecycle.requestClose()",
+        "reserveNeutralBarrier()",
+        "simNotifier.close()");
+    assertTrue(source.contains("&& m_simNotifierDrained"));
+    assertOrdered(
+        source,
+        "m_outputLaneLifecycle.tryBeginNativeClose(",
+        "super.close()");
     int applicationLock = applyNonNeutral.indexOf("synchronized (m_outputApplicationLock)");
     int applicationOpenBrace = applyNonNeutral.indexOf('{', applicationLock);
     int applicationCloseBrace = matchingBrace(applyNonNeutral, applicationOpenBrace);
-    assertFalse(applyNonNeutral.substring(applicationOpenBrace, applicationCloseBrace)
-        .contains("requestIdle()"));
-    assertTrue(applyNonNeutral.indexOf("requestIdle()", applicationCloseBrace)
+    String applicationBody =
+        applyNonNeutral.substring(applicationOpenBrace, applicationCloseBrace);
+    assertFalse(applicationBody.contains("this.setControl("));
+    assertTrue(applyNonNeutral.indexOf("this.setControl(", applicationCloseBrace)
         > applicationCloseBrace);
 
     assertEvidenceLocksNeverAcquireOutputApplication(source);
+    assertApplicationLocksNeverRunPhoenix(source);
   }
 
   private static String between(String source, String start, String end) {
@@ -149,6 +223,32 @@ class CtreDeviceEvidenceArchitectureTest {
       assertFalse(lockBody.contains("emergencyNeutralNoThrow("));
       assertFalse(lockBody.contains("applyNonNeutralRequest("));
       assertFalse(lockBody.contains("issueDirectNeutralNoThrow("));
+      searchFrom = closeBrace + 1;
+    }
+  }
+
+  private static void assertApplicationLocksNeverRunPhoenix(String source) {
+    String applicationLock = "synchronized (m_outputApplicationLock)";
+    int searchFrom = 0;
+    while (true) {
+      int lockIndex = source.indexOf(applicationLock, searchFrom);
+      if (lockIndex < 0) {
+        return;
+      }
+      int openBrace = source.indexOf('{', lockIndex + applicationLock.length());
+      assertTrue(openBrace >= 0);
+      int closeBrace = matchingBrace(source, openBrace);
+      String lockBody = source.substring(openBrace + 1, closeBrace);
+      assertFalse(lockBody.contains("setControl("));
+      assertFalse(lockBody.contains("module.apply("));
+      assertFalse(lockBody.contains("delegate.apply("));
+      assertFalse(lockBody.contains("issueDirectNeutralNoThrow("));
+      assertFalse(lockBody.contains("captureMotorOutputProgressBaselinesNoThrow("));
+      assertFalse(lockBody.contains("getStateCopy("));
+      assertFalse(lockBody.contains("safePhoenixTimeSeconds("));
+      assertFalse(lockBody.contains("getAsBoolean("));
+      assertFalse(lockBody.contains("authorizationAllows("));
+      assertFalse(lockBody.contains("super.close("));
       searchFrom = closeBrace + 1;
     }
   }

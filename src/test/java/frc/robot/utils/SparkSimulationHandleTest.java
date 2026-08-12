@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.revrobotics.spark.SparkLowLevel.MotorType;
@@ -17,8 +18,12 @@ import edu.wpi.first.wpilibj.simulation.DriverStationSim;
 import frc.robot.utils.SparkSimulationHandle.RawTelemetry;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.OptionalDouble;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -175,7 +180,7 @@ class SparkSimulationHandleTest {
       assertNotNull(unrelatedValue);
 
       for (int cycle = 1; cycle <= 2; cycle++) {
-        new SparkMAXContainer(62);
+        SparkMAXContainer container = new SparkMAXContainer(62);
         SparkSimulationHandle handle =
             SparkMAXContainer.getSimulationHandleForId(62).orElseThrow();
         try {
@@ -189,6 +194,13 @@ class SparkSimulationHandleTest {
               await(2.0, SparkMAXContainer::cleanupSimulationDevicesForTesting),
               "simulation registry must be reusable after cycle " + cycle);
         }
+        AtomicBoolean staleAuthorizationInvoked = new AtomicBoolean();
+        assertFalse(container.setDutyCycleIfAuthorized(0.03, () -> {
+          staleAuthorizationInvoked.set(true);
+          return true;
+        }), "a retained wrapper must reject output after its native simulation owner is closed");
+        assertFalse(staleAuthorizationInvoked.get(),
+            "teardown rejection must occur before an external callback can block or re-enter");
         unrelatedValue.set(cycle % 2 == 1);
         assertEquals(
             cycle % 2 == 1,
@@ -199,6 +211,63 @@ class SparkSimulationHandleTest {
 
     DriverStationSim.resetData();
     DriverStationSim.notifyNewData();
+  }
+
+  @Test
+  void blockedExternalAuthorizationCannotDelayStopAndCannotWriteAfterStop()
+      throws InterruptedException {
+    DriverStationSim.resetData();
+    DriverStationSim.setDsAttached(true);
+    DriverStationSim.setEnabled(false);
+    DriverStationSim.notifyNewData();
+    SparkMAXContainer.configureProcessDefaults();
+    long generation = ProcessOutputSafety.revoke("SPARK_LANE_TEST_PREPARE");
+    assertTrue(ProcessOutputSafety.authorize(generation));
+
+    SparkMAXContainer container = new SparkMAXContainer(63);
+    SparkSimulationHandle handle = SparkMAXContainer.getSimulationHandleForId(63).orElseThrow();
+    CountDownLatch authorizationEntered = new CountDownLatch(1);
+    CountDownLatch releaseAuthorization = new CountDownLatch(1);
+    AtomicBoolean requestResult = new AtomicBoolean(true);
+    Thread requestThread = null;
+    try {
+      container.setCurrentLimit(10.0);
+      handle.injectRawTelemetry(new RawTelemetry(0.0, 0.0, 0.0, 0.0, 12.0));
+      assertTrue(await(5.0, container::isReady), container::getDiagnosticStatus);
+
+      requestThread = new Thread(() -> requestResult.set(container.setDutyCycleIfAuthorized(
+          0.03,
+          () -> {
+            authorizationEntered.countDown();
+            try {
+              return releaseAuthorization.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException exception) {
+              Thread.currentThread().interrupt();
+              return false;
+            }
+          })), "spark-blocked-authorization-test");
+      requestThread.start();
+      assertTrue(authorizationEntered.await(1, TimeUnit.SECONDS));
+
+      SparkMAXContainer.OutputStopBatch stop = assertTimeoutPreemptively(
+          Duration.ofMillis(500), () -> SparkMAXContainer.requestOutputStops(63));
+      assertTrue(await(2.0, () -> stop.snapshot().confirmed()), stop.snapshot()::summary);
+
+      releaseAuthorization.countDown();
+      requestThread.join(2000L);
+      assertFalse(requestThread.isAlive());
+      assertFalse(requestResult.get(), "the stop sequence must reject the stale authorization");
+      assertEquals(0.0, handle.observe().setpoint(), 1e-9);
+    } finally {
+      releaseAuthorization.countDown();
+      if (requestThread != null) {
+        requestThread.join(2000L);
+      }
+      ProcessOutputSafety.resetForTesting();
+      assertTrue(await(2.0, SparkMAXContainer::cleanupSimulationDevicesForTesting));
+      DriverStationSim.resetData();
+      DriverStationSim.notifyNewData();
+    }
   }
 
   private static boolean await(double timeoutSeconds, BooleanSupplier condition)

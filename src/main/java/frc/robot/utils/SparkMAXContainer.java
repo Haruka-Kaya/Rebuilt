@@ -97,6 +97,7 @@ public class SparkMAXContainer implements MotorContainer {
   private final SparkRecoveryState recoveryState;
   private final SparkResetGuard resetGuard = new SparkResetGuard();
   private final SparkOutputGate outputGate = new SparkOutputGate();
+  private final SparkOutputLane outputLane = new SparkOutputLane();
   private final PositionReferenceGuard positionReferenceGuard = new PositionReferenceGuard();
   private final AtomicLong lastSetpointCallNanos = new AtomicLong();
   private final AtomicLong maximumSetpointCallNanos = new AtomicLong();
@@ -115,6 +116,7 @@ public class SparkMAXContainer implements MotorContainer {
   private double lastZeroConfirmedAt = Double.NEGATIVE_INFINITY;
   private long outputEpoch;
   private long lastZeroedOutputEpoch = -1;
+  private long lastZeroedLaneGeneration = -1;
   private long lastRequestEpoch = -1;
   private boolean lastRequestAccepted;
   private String lastRequestReason = "NO_SETPOINT_REQUEST";
@@ -136,6 +138,7 @@ public class SparkMAXContainer implements MotorContainer {
   private SparkMAXContainer followerLeader;
   private FollowerDiagnosticMode followerDiagnosticMode = FollowerDiagnosticMode.NONE;
   private double followerTransitionDeadline;
+  private boolean closedForTesting;
 
   /** Configures REV's process-wide defaults before any {@link SparkMax} is constructed. */
   public static void configureProcessDefaults() {
@@ -180,6 +183,15 @@ public class SparkMAXContainer implements MotorContainer {
    * configuration stay off the robot main thread.
    */
   public static void serviceAll() {
+    // Registry selection and simulation teardown share this short application lock. Every
+    // blocking vendor read/write runs later on the worker with this lock released.
+    synchronized (OUTPUT_ORDER_LOCK) {
+      serviceAllLocked();
+    }
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK is held; performs no vendor I/O. */
+  private static void serviceAllLocked() {
     double now = Timer.getFPGATimestamp();
     boolean disabled = DriverStation.isDisabled();
     if (disabled) {
@@ -281,7 +293,10 @@ public class SparkMAXContainer implements MotorContainer {
 
   /** Called only while OUTPUT_ORDER_LOCK and this device's stateLock are held. */
   private ZeroWork reserveZeroWorkLocked(double now) {
-    if (zeroInFlight || outputGate.decideZero(now) != ZeroDecision.ATTEMPT) {
+    if (closedForTesting
+        || zeroInFlight
+        || !outputLane.canReserveZero()
+        || outputGate.decideZero(now) != ZeroDecision.ATTEMPT) {
       return null;
     }
     zeroInFlight = true;
@@ -376,6 +391,7 @@ public class SparkMAXContainer implements MotorContainer {
           // A newer stop/config transition superseded this reservation. Keep the gate closed and
           // retry so an old completion can never certify a newer output epoch.
           device.zeroInFlight = false;
+          device.outputLane.requestZero();
           device.outputGate.requireZero(now, true);
           if (zeroFailure != null) {
             device.recordFailureLocked(now, zeroFailure, false);
@@ -429,8 +445,10 @@ public class SparkMAXContainer implements MotorContainer {
     }
 
     outputGate.zeroSucceeded();
+    outputLane.zeroCompleted();
     lastZeroConfirmedAt = now;
     lastZeroedOutputEpoch = outputEpoch;
+    lastZeroedLaneGeneration = outputLane.stopBarrierGeneration();
     if (followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING) {
       if (resumeDeferredForLeader) {
         // Never reconnect a diagnostic follower until fresh telemetry proves its leader is zero.
@@ -463,14 +481,26 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   private boolean hasConfigurationWork(double now) {
-    synchronized (stateLock) {
-      return recoveryState.peekServiceAction(now) != ServiceAction.NONE;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        return !closedForTesting
+            && outputLane.canReserveZero()
+            && !zeroInFlight
+            && !outputGate.needsZeroCommand()
+            && recoveryState.peekServiceAction(now) != ServiceAction.NONE;
+      }
     }
   }
 
   private ConfigurationWork beginConfigurationWork(double now) {
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
+        if (closedForTesting
+            || !outputLane.canReserveZero()
+            || zeroInFlight
+            || outputGate.needsZeroCommand()) {
+          return null;
+        }
         ServiceAction action = recoveryState.beginService(now);
         if (action == ServiceAction.NONE) {
           return null;
@@ -489,14 +519,17 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   private SampleWork beginSampleWork(double now) {
-    synchronized (stateLock) {
-      if (!recoveryState.isConfigurationReady()
-          || sampleInFlight
-          || now < nextSampleAt) {
-        return null;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (closedForTesting
+            || !recoveryState.isConfigurationReady()
+            || sampleInFlight
+            || now < nextSampleAt) {
+          return null;
+        }
+        sampleInFlight = true;
+        return new SampleWork(this, outputEpoch);
       }
-      sampleInFlight = true;
-      return new SampleWork(this, outputEpoch);
     }
   }
 
@@ -623,8 +656,10 @@ public class SparkMAXContainer implements MotorContainer {
       synchronized (stateLock) {
         if (result == REVLibError.kOk) {
           outputGate.zeroSucceeded();
+          outputLane.zeroCompleted();
           lastZeroConfirmedAt = now;
           lastZeroedOutputEpoch = outputEpoch;
+          lastZeroedLaneGeneration = outputLane.stopBarrierGeneration();
         } else {
           outputGate.zeroFailed(now);
         }
@@ -714,8 +749,10 @@ public class SparkMAXContainer implements MotorContainer {
         }
         followerDiagnosticMode = FollowerDiagnosticMode.NONE;
         outputGate.zeroSucceeded();
+        outputLane.zeroCompleted();
         lastZeroConfirmedAt = now;
         lastZeroedOutputEpoch = outputEpoch;
+        lastZeroedLaneGeneration = outputLane.stopBarrierGeneration();
         invalidateSampleLocked(now);
       }
     }
@@ -967,6 +1004,7 @@ public class SparkMAXContainer implements MotorContainer {
       default -> FollowerDiagnosticMode.NONE;
     };
     invalidateSampleLocked(now);
+    outputLane.requestZero();
     outputGate.requireZero(now, true);
   }
 
@@ -986,6 +1024,7 @@ public class SparkMAXContainer implements MotorContainer {
         leader.recordFailureLocked(
             now, "dependent follower " + followerPort + " unavailable: " + reason, false);
       } else {
+        leader.outputLane.requestZero();
         leader.outputGate.requireZero(now, true);
       }
       if (attemptZeroNow) {
@@ -1040,6 +1079,7 @@ public class SparkMAXContainer implements MotorContainer {
         followerDiagnosticMode = FollowerDiagnosticMode.NONE;
         lastSampleAt = Double.NEGATIVE_INFINITY;
         lastSampleOutputEpoch = -1;
+        outputLane.requestZero();
         outputGate.requireZero(now, true);
         leader = desiredFollower ? followerLeader : null;
       }
@@ -1069,6 +1109,7 @@ public class SparkMAXContainer implements MotorContainer {
         hardwareReady = isBaseReadyLocked(now);
         baseReady = hardwareReady && followerDiagnosticMode == FollowerDiagnosticMode.NONE;
         if (!hardwareReady && outputGate.needsZeroCommand()) {
+          outputLane.requestZero();
           outputGate.requireZero(now, false);
         }
       }
@@ -1077,6 +1118,7 @@ public class SparkMAXContainer implements MotorContainer {
       if (baseReady && !dependenciesReady) {
         synchronized (stateLock) {
           if (outputGate.needsZeroCommand()) {
+            outputLane.requestZero();
             outputGate.requireZero(now, false);
           }
         }
@@ -1110,6 +1152,9 @@ public class SparkMAXContainer implements MotorContainer {
       return;
     }
     synchronized (leader.stateLock) {
+      // A dependent-only stop must also invalidate a leader authorization evaluation that could
+      // otherwise finish later and make this follower nonzero after its own stop was confirmed.
+      leader.outputLane.requestZero();
       if (retryImmediately || leader.outputGate.needsZeroCommand()) {
         leader.outputGate.requireZero(now, retryImmediately);
       }
@@ -1181,10 +1226,14 @@ public class SparkMAXContainer implements MotorContainer {
       for (int canId : requestedIds.keySet()) {
         SparkMAXContainer device = devicesById.get(canId);
         if (device == null) {
-          targets.add(new OutputStopTarget(canId, null, -1));
+          targets.add(new OutputStopTarget(canId, null, -1, -1));
         } else {
           synchronized (device.stateLock) {
-            targets.add(new OutputStopTarget(canId, device, device.outputEpoch));
+            targets.add(new OutputStopTarget(
+                canId,
+                device,
+                device.outputEpoch,
+                device.outputLane.stopBarrierGeneration()));
           }
         }
       }
@@ -1224,14 +1273,19 @@ public class SparkMAXContainer implements MotorContainer {
             continue;
           }
           synchronized (device.stateLock) {
+            boolean laneBarrierSatisfied = device.outputLane.zeroCompletedFor(
+                target.laneGeneration(), device.lastZeroedLaneGeneration);
+            long requestedOutputEpoch = laneBarrierSatisfied
+                ? device.lastZeroedOutputEpoch
+                : target.outputEpoch();
             var observation = new SparkOutputStopEvaluator.Observation(
                 device.port,
-                target.outputEpoch(),
+                requestedOutputEpoch,
                 device.outputEpoch,
                 device.lastZeroedOutputEpoch,
                 device.recoveryState.isConfigurationReady(),
-                device.zeroInFlight,
-                device.outputGate.isZeroRequired(),
+                device.zeroInFlight || device.outputLane.nonzeroInFlight(),
+                device.outputGate.isZeroRequired() || !laneBarrierSatisfied,
                 device.outputGate.outputMayBeNonzero(),
                 device.lastZeroConfirmedAt,
                 device.lastSampleAt,
@@ -1309,7 +1363,7 @@ public class SparkMAXContainer implements MotorContainer {
             outputEpoch,
             lastZeroedOutputEpoch,
             recoveryState.isConfigurationReady(),
-            zeroInFlight,
+            zeroInFlight || outputLane.nonzeroInFlight(),
             outputGate.isZeroRequired(),
             outputGate.outputMayBeNonzero(),
             lastZeroConfirmedAt,
@@ -1340,7 +1394,7 @@ public class SparkMAXContainer implements MotorContainer {
             outputEpoch,
             SparkDeviceEvidence.stopState(
                 evaluatedStop,
-                zeroInFlight,
+                zeroInFlight || outputLane.nonzeroInFlight(),
                 outputGate.isZeroRequired(),
                 outputGate.outputMayBeNonzero(),
                 desiredFollower,
@@ -1366,6 +1420,9 @@ public class SparkMAXContainer implements MotorContainer {
     }
     if (zeroInFlight) {
       return "PROTECTIVE_ZERO_IN_FLIGHT";
+    }
+    if (outputLane.nonzeroInFlight()) {
+      return "NONZERO_VENDOR_CALL_IN_FLIGHT";
     }
     if (outputGate.isZeroRequired()) {
       return "PROTECTIVE_ZERO_REQUIRED";
@@ -1537,6 +1594,7 @@ public class SparkMAXContainer implements MotorContainer {
     if (!RobotBase.isSimulation() || !IO_WORKER.isIdle()) {
       return false;
     }
+    List<SparkMAXContainer> devicesToClose;
     synchronized (OUTPUT_ORDER_LOCK) {
       if (!IO_WORKER.isIdle()) {
         return false;
@@ -1545,27 +1603,45 @@ public class SparkMAXContainer implements MotorContainer {
         synchronized (device.stateLock) {
           if (device.sampleInFlight
               || device.zeroInFlight
+              || device.outputLane.nonzeroInFlight()
               || device.recoveryState.isOperationInFlight()) {
             return false;
           }
         }
       }
       for (SparkMAXContainer device : DEVICES) {
-        synchronized (device.simulationIoLock) {
-          if (device.simulationHandle != null) {
-            device.simulationHandle.closeSimulationResourcesForTesting();
-          }
-          device.motor.close();
+        synchronized (device.stateLock) {
+          // An authorization callback can be blocked outside the lane without appearing as
+          // in-flight vendor work. Mark closed and advance its stop sequence before detaching the
+          // registry so that callback can never issue JNI after teardown resumes.
+          device.closedForTesting = true;
+          device.outputLane.requestZero();
         }
       }
+      devicesToClose = List.copyOf(DEVICES);
       DEVICES.clear();
       sampleCursor = 0;
       zeroCursor = 0;
       disabledSince = Double.NaN;
       FOLLOWER_TOPOLOGY_FROZEN.set(false);
       RECOVERY_COORDINATOR.resetForTesting();
-      return true;
     }
+    // Native close can block. It must never retain the process-wide output ordering lock and stop
+    // reservation for another controller while test teardown is in progress.
+    boolean allClosed = true;
+    for (SparkMAXContainer device : devicesToClose) {
+      try {
+        synchronized (device.simulationIoLock) {
+          if (device.simulationHandle != null) {
+            device.simulationHandle.closeSimulationResourcesForTesting();
+          }
+          device.motor.close();
+        }
+      } catch (RuntimeException exception) {
+        allClosed = false;
+      }
+    }
+    return allClosed;
   }
 
   private Snapshot getControllerTelemetrySnapshot() {
@@ -1852,13 +1928,12 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   /**
-   * Sends open-loop duty only if an external one-shot authorization is still valid at the exact
-   * point protected by the ordered output lock.
+   * Sends open-loop duty only if an external one-shot authorization remains valid across the
+   * ordered lane's stop-sequence boundary.
    *
-   * <p>The authorization must be bounded, side-effect-free, and must not acquire any lock whose
-   * holder can call back into this container. Revoking it before this method acquires the output
-   * lock prevents a late nonzero call; revoking it after the check orders the caller's subsequent
-   * zero request after this vendor call.
+   * <p>The callback is evaluated without SPARK locks. A stop requested during that evaluation
+   * changes the lane sequence and rejects the stale result; a stop after final reservation is
+   * retained behind the admitted vendor call.
    */
   public boolean setDutyCycleIfAuthorized(
       double output, BooleanSupplier authorizationStillValid) {
@@ -1968,6 +2043,7 @@ public class SparkMAXContainer implements MotorContainer {
     SparkMAXContainer leader;
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
+        outputLane.requestZero();
         if (outputGate.needsZeroCommand()) {
           outputGate.requireZero(now, false);
         }
@@ -1985,6 +2061,7 @@ public class SparkMAXContainer implements MotorContainer {
         lastRequestEpoch++;
         lastRequestAccepted = false;
         lastRequestReason = reason;
+        outputLane.requestZero();
         if (outputGate.needsZeroCommand()) {
           outputGate.requireZero(now, false);
         }
@@ -2013,10 +2090,31 @@ public class SparkMAXContainer implements MotorContainer {
       rejectSetpointRequestAndRequestZero("NONFINITE_SETPOINT_REJECTED");
       return false;
     }
+    long authorizationStopSequence;
+    synchronized (OUTPUT_ORDER_LOCK) {
+      synchronized (stateLock) {
+        if (closedForTesting) {
+          lastRequestEpoch++;
+          lastRequestAccepted = false;
+          lastRequestReason = "CONTROLLER_CLOSED_FOR_TESTING";
+          return false;
+        }
+        authorizationStopSequence = outputLane.stopSequence();
+      }
+    }
+    // This callback may read clocks, DriverStation state, or another local interlock. Never run it
+    // while holding the process-wide SPARK ordering lock: a blocked authorization source must not
+    // delay stop reservation for this or any other controller.
+    boolean externallyAuthorized = authorizationAllows(authorizationStillValid);
+    ProcessOutputSafety.NonzeroPermit processPermit = externallyAuthorized
+        ? ProcessOutputSafety.acquireNonzeroPermit().orElse(null) : null;
     double now = Timer.getFPGATimestamp();
     String failure = null;
     SparkMAXContainer leader = null;
     boolean accepted = false;
+    long laneReservation = -1L;
+    List<FollowerLaneReservation> followerLaneReservations = List.of();
+    boolean processOutputAuthorized = false;
     synchronized (OUTPUT_ORDER_LOCK) {
       boolean dependenciesReady = diagnosticFollowerOutput || requiredFollowersReadyLocked(now);
       synchronized (stateLock) {
@@ -2035,40 +2133,37 @@ public class SparkMAXContainer implements MotorContainer {
         boolean positionReferenceAllowed = controlType != ControlType.kPosition
             || positionReferenceGuard.isValid(positionReference);
         boolean baseReady = failure == null && isBaseReadyLocked(now);
-        boolean externallyAuthorized;
-        try {
-          externallyAuthorized = authorizationStillValid != null
-              && authorizationStillValid.getAsBoolean();
-        } catch (RuntimeException ignored) {
-          externallyAuthorized = false;
-        }
-        boolean processOutputAuthorized = false;
+        boolean outputOrderStillCurrent = !closedForTesting
+            && authorizationStopSequence != Long.MAX_VALUE
+            && outputLane.stopSequence() == authorizationStopSequence;
         if (failure == null
             && dependenciesReady
             && baseReady
             && followerOutputAllowed
             && positionReferenceAllowed
+            && outputOrderStillCurrent
             && externallyAuthorized) {
-          // This is the final process-wide authorization boundary. Keep it inside both the
-          // cross-device output-order lock and this controller's state lock, immediately before
-          // the vendor API, so a stale robot loop cannot issue or refresh a nonzero setpoint.
-          ProcessOutputSafety.AuthorizedCall<SparkVendorCall.Result> authorizedCall =
-              ProcessOutputSafety.callIfAuthorized(() -> SparkVendorCall.execute(
-                  "setpoint", () -> sendSetpointTracked(value, controlType)));
-          processOutputAuthorized = authorizedCall.authorized();
+          // Claim the process grant and reserve this controller's output lane atomically under the
+          // ordering locks. The potentially blocking REV JNI call itself runs after both locks are
+          // released; a concurrent stop is retained behind this reservation.
+          processOutputAuthorized = ProcessOutputSafety.claimIfCurrent(processPermit);
           if (processOutputAuthorized) {
-            SparkVendorCall.Result result = authorizedCall.value();
-            if (result.succeeded()) {
-              outputGate.nonzeroSucceeded();
-              outputEpoch++;
-              accepted = true;
-              lastRequestAccepted = true;
-              lastRequestReason = "REV_API_RETURNED_K_OK_NOT_MOTION_PROOF";
-            } else {
-              failure = result.failure();
-              lastRequestReason = "REV_API_SETPOINT_FAILURE: " + failure;
-              recordFailureLocked(now, failure, false);
-              leader = desiredFollower ? followerLeader : null;
+            laneReservation = outputLane.reserveNonzero();
+            if (laneReservation < 0L) {
+              processOutputAuthorized = false;
+              lastRequestReason = "OUTPUT_LANE_NOT_AVAILABLE";
+            } else if (!diagnosticFollowerOutput) {
+              followerLaneReservations = reserveRequiredFollowerLanesLocked(now);
+              if (followerLaneReservations == null) {
+                boolean zeroPending = outputLane.completeNonzero(laneReservation);
+                if (zeroPending) {
+                  outputGate.requireZero(now, true);
+                }
+                laneReservation = -1L;
+                processOutputAuthorized = false;
+                lastRequestReason = "REQUIRED_FOLLOWER_OUTPUT_LANE_NOT_AVAILABLE";
+                followerLaneReservations = List.of();
+              }
             }
           }
         } else if (!accepted) {
@@ -2082,33 +2177,72 @@ public class SparkMAXContainer implements MotorContainer {
             lastRequestReason = "FOLLOWER_OUTPUT_NOT_ALLOWED";
           } else if (!positionReferenceAllowed) {
             lastRequestReason = "POSITION_REFERENCE_INVALID";
+          } else if (!outputOrderStillCurrent) {
+            lastRequestReason = "STOP_SUPERSEDED_SETPOINT_AUTHORIZATION";
           } else if (!externallyAuthorized) {
             lastRequestReason = "EXTERNAL_SETPOINT_AUTHORIZATION_REVOKED";
           } else {
             lastRequestReason = "SETPOINT_REQUEST_REJECTED";
           }
           if (outputGate.needsZeroCommand()) {
+            outputLane.requestZero();
             outputGate.requireZero(now, false);
           }
         }
         if (!accepted
+            && laneReservation < 0L
             && failure == null
             && dependenciesReady
             && baseReady
             && followerOutputAllowed
             && positionReferenceAllowed
+            && outputOrderStillCurrent
             && externallyAuthorized
             && !processOutputAuthorized) {
           lastRequestReason = "PROCESS_OUTPUT_HEARTBEAT_EXPIRED";
           if (outputGate.needsZeroCommand()) {
+            outputLane.requestZero();
             outputGate.requireZero(now, false);
           }
         }
       }
-      if (accepted && !diagnosticFollowerOutput) {
-        markRequiredFollowersExpectingNonzeroLocked();
-      }
       revokeLeaderForDependentLocked(leader, port, failure, now, false);
+    }
+
+    SparkVendorCall.Result vendorResult = null;
+    if (laneReservation >= 0L) {
+      vendorResult = SparkVendorCall.execute(
+          "setpoint", () -> sendSetpointTracked(value, controlType));
+    }
+
+    if (laneReservation >= 0L) {
+      now = Timer.getFPGATimestamp();
+      synchronized (OUTPUT_ORDER_LOCK) {
+        synchronized (stateLock) {
+          boolean zeroPending = outputLane.completeNonzero(laneReservation);
+          if (vendorResult.succeeded()) {
+            outputGate.nonzeroSucceeded();
+            outputEpoch++;
+            accepted = true;
+            lastRequestAccepted = true;
+            lastRequestReason = "REV_API_RETURNED_K_OK_NOT_MOTION_PROOF";
+            if (zeroPending) {
+              outputGate.requireZero(now, true);
+            }
+          } else {
+            failure = vendorResult.failure();
+            lastRequestReason = "REV_API_SETPOINT_FAILURE: " + failure;
+            recordFailureLocked(now, failure, false);
+            leader = desiredFollower ? followerLeader : null;
+          }
+        }
+        if (accepted && !diagnosticFollowerOutput) {
+          completeRequiredFollowerLanesLocked(followerLaneReservations, now, true);
+        } else if (!followerLaneReservations.isEmpty()) {
+          completeRequiredFollowerLanesLocked(followerLaneReservations, now, false);
+        }
+        revokeLeaderForDependentLocked(leader, port, failure, now, false);
+      }
     }
     if (failure != null) {
       logState(failure + " zero=queued");
@@ -2121,20 +2255,67 @@ public class SparkMAXContainer implements MotorContainer {
    * A configured follower receives no direct setpoint call, but its output evidence epoch must
    * still advance so a pre-leader sample cannot be mistaken for follower response.
    */
-  private void markRequiredFollowersExpectingNonzeroLocked() {
+  private List<FollowerLaneReservation> reserveRequiredFollowerLanesLocked(double now) {
+    List<FollowerLaneReservation> reservations = new ArrayList<>();
     for (SparkMAXContainer follower : requiredFollowers) {
       synchronized (follower.stateLock) {
         if (follower.followerLeader != this
             || !follower.desiredFollower
             || follower.followerDiagnosticMode != FollowerDiagnosticMode.NONE) {
-          continue;
+          cancelRequiredFollowerLanesLocked(reservations, now);
+          return null;
         }
-        follower.outputGate.nonzeroSucceeded();
-        follower.outputEpoch++;
-        follower.lastRequestEpoch++;
-        follower.lastRequestAccepted = false;
-        follower.lastRequestReason =
-            "FOLLOWER_OUTPUT_EXPECTED_FROM_LEADER_NOT_DIRECT_API_ACCEPTANCE";
+        long reservation = follower.outputLane.reserveNonzero();
+        if (reservation < 0L) {
+          cancelRequiredFollowerLanesLocked(reservations, now);
+          return null;
+        }
+        reservations.add(new FollowerLaneReservation(follower, reservation));
+      }
+    }
+    return List.copyOf(reservations);
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK is held. */
+  private static void cancelRequiredFollowerLanesLocked(
+      List<FollowerLaneReservation> reservations, double now) {
+    for (FollowerLaneReservation reservation : reservations) {
+      synchronized (reservation.device().stateLock) {
+        boolean zeroPending = reservation.device().outputLane.completeNonzero(
+            reservation.generation());
+        if (zeroPending) {
+          reservation.device().outputGate.requireZero(now, true);
+        }
+      }
+    }
+  }
+
+  /** Called only while OUTPUT_ORDER_LOCK is held after the leader vendor call completed. */
+  private void completeRequiredFollowerLanesLocked(
+      List<FollowerLaneReservation> reservations, double now, boolean leaderSucceeded) {
+    for (FollowerLaneReservation reservation : reservations) {
+      SparkMAXContainer follower = reservation.device();
+      synchronized (follower.stateLock) {
+        boolean zeroPending = follower.outputLane.completeNonzero(reservation.generation());
+        boolean topologyStillValid = follower.followerLeader == this
+            && follower.desiredFollower
+            && follower.followerDiagnosticMode == FollowerDiagnosticMode.NONE
+            && follower.recoveryState.isConfigurationReady()
+            && Double.isFinite(follower.lastSampleAt)
+            && now - follower.lastSampleAt <= STATUS_FRESHNESS_SECONDS
+            && !follower.zeroInFlight;
+        if (leaderSucceeded && topologyStillValid) {
+          follower.outputGate.nonzeroSucceeded();
+          follower.outputEpoch++;
+          follower.lastRequestEpoch++;
+          follower.lastRequestAccepted = false;
+          follower.lastRequestReason =
+              "FOLLOWER_OUTPUT_EXPECTED_FROM_LEADER_NOT_DIRECT_API_ACCEPTANCE";
+        }
+        if (zeroPending || !leaderSucceeded || !topologyStillValid) {
+          follower.outputLane.requestZero();
+          follower.outputGate.requireZero(now, true);
+        }
       }
     }
   }
@@ -2154,9 +2335,11 @@ public class SparkMAXContainer implements MotorContainer {
     boolean accepted = false;
     String failure = null;
     SparkMAXContainer leader = null;
+    boolean pauseFollowerOutsideLocks = false;
+    long pauseLaneReservation = -1L;
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
-        if (!desiredFollower) {
+        if (closedForTesting || !desiredFollower) {
           return false;
         }
         leader = followerLeader;
@@ -2181,6 +2364,7 @@ public class SparkMAXContainer implements MotorContainer {
           applyOutput = false;
           accepted = true;
           if (outputGate.needsZeroCommand()) {
+            outputLane.requestZero();
             outputGate.requireZero(now, false);
           }
         }
@@ -2207,15 +2391,14 @@ public class SparkMAXContainer implements MotorContainer {
             nextSampleAt = now;
             accepted = true;
           } else {
-            SparkVendorCall.Result pauseResult = SparkVendorCall.execute(
-                "follower pause", () -> callVendorIo(motor::pauseFollowerModeAsync));
-            if (pauseResult.succeeded()) {
-              followerDiagnosticMode = FollowerDiagnosticMode.PAUSE_PENDING;
-              followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
-              nextSampleAt = now;
-              accepted = true;
+            // The recovery state is latched before releasing the ordering locks. Until the
+            // blocking native pause completes, no diagnostic nonzero output is admitted and any
+            // stop request remains an ordered zero+resume recovery.
+            pauseLaneReservation = outputLane.reserveNonzero();
+            if (pauseLaneReservation >= 0L) {
+              pauseFollowerOutsideLocks = true;
             } else {
-              failure = pauseResult.failure();
+              failure = "follower pause output lane unavailable";
               recordFailureLocked(now, failure, false);
             }
           }
@@ -2225,21 +2408,61 @@ public class SparkMAXContainer implements MotorContainer {
         revokeLeaderForDependentLocked(leader, port, failure, now, false);
       }
     }
+    if (pauseFollowerOutsideLocks) {
+      SparkVendorCall.Result pauseResult = SparkVendorCall.execute(
+          "follower pause", () -> callVendorIo(motor::pauseFollowerModeAsync));
+      now = Timer.getFPGATimestamp();
+      synchronized (OUTPUT_ORDER_LOCK) {
+        synchronized (stateLock) {
+          boolean zeroPending = outputLane.completeNonzero(pauseLaneReservation);
+          if (pauseResult.succeeded()
+              && followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING) {
+            if (zeroPending) {
+              outputLane.requestZero();
+              outputGate.requireZero(now, true);
+            } else {
+              followerDiagnosticMode = FollowerDiagnosticMode.PAUSE_PENDING;
+              followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
+              nextSampleAt = now;
+              accepted = true;
+            }
+          } else if (!pauseResult.succeeded()) {
+            failure = pauseResult.failure();
+            recordFailureLocked(now, failure, false);
+          }
+        }
+        if (failure != null) {
+          revokeLeaderForDependentLocked(leader, port, failure, now, false);
+        }
+      }
+    }
     if (failure != null) {
       logState(failure + " zero=queued");
     }
-    if (!authorizationStillValid.getAsBoolean()) {
+    if (applyOutput) {
+      // trySetpoint owns the sole authorization sample for output. Sampling here first would let a
+      // stop finish during a blocked callback and then be missed by trySetpoint's later sequence
+      // capture.
+      return trySetpoint(
+          safeOutput,
+          ControlType.kDutyCycle,
+          true,
+          null,
+          authorizationStillValid);
+    }
+    if (!authorizationAllows(authorizationStillValid)) {
       endFollowerDiagnostic();
       return false;
     }
-    return applyOutput
-        ? trySetpoint(
-            safeOutput,
-            ControlType.kDutyCycle,
-            true,
-            null,
-            authorizationStillValid)
-        : accepted;
+    return accepted;
+  }
+
+  private static boolean authorizationAllows(BooleanSupplier authorization) {
+    try {
+      return authorization != null && authorization.getAsBoolean();
+    } catch (RuntimeException ignored) {
+      return false;
+    }
   }
 
   /** Called only while OUTPUT_ORDER_LOCK is held. */
@@ -2269,18 +2492,24 @@ public class SparkMAXContainer implements MotorContainer {
     synchronized (OUTPUT_ORDER_LOCK) {
       synchronized (stateLock) {
         if (followerDiagnosticMode == FollowerDiagnosticMode.NONE
-            || followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING
             || followerDiagnosticMode == FollowerDiagnosticMode.RESUME_PENDING) {
           return;
         }
-        if (followerDiagnosticMode == FollowerDiagnosticMode.LEADER_ZERO_PENDING) {
+        if (followerDiagnosticMode == FollowerDiagnosticMode.RESUME_ZERO_PENDING) {
+          outputLane.requestZero();
+          outputGate.requireZero(now, false);
+          nextSampleAt = now;
+          leader = desiredFollower ? followerLeader : null;
+        } else if (followerDiagnosticMode == FollowerDiagnosticMode.LEADER_ZERO_PENDING) {
           followerDiagnosticMode = FollowerDiagnosticMode.NONE;
-          return;
+          leader = desiredFollower ? followerLeader : null;
+        } else {
+          followerDiagnosticMode = FollowerDiagnosticMode.RESUME_ZERO_PENDING;
+          outputLane.requestZero();
+          outputGate.requireZero(now, true);
+          nextSampleAt = now;
+          leader = desiredFollower ? followerLeader : null;
         }
-        followerDiagnosticMode = FollowerDiagnosticMode.RESUME_ZERO_PENDING;
-        outputGate.requireZero(now, true);
-        nextSampleAt = now;
-        leader = desiredFollower ? followerLeader : null;
       }
       requestLeaderZeroLocked(leader, now, false);
     }
@@ -2386,6 +2615,7 @@ public class SparkMAXContainer implements MotorContainer {
     return recoveryState.isConfigurationReady()
         && Double.isFinite(lastSampleAt)
         && now - lastSampleAt <= STATUS_FRESHNESS_SECONDS
+        && !outputLane.nonzeroInFlight()
         && !zeroInFlight
         && !outputGate.isZeroRequired();
   }
@@ -2493,6 +2723,8 @@ public class SparkMAXContainer implements MotorContainer {
 
   private record ZeroWork(SparkMAXContainer device, long generation) {}
 
+  private record FollowerLaneReservation(SparkMAXContainer device, long generation) {}
+
   private record OutputStopTarget(
-      int canId, SparkMAXContainer device, long outputEpoch) {}
+      int canId, SparkMAXContainer device, long outputEpoch, long laneGeneration) {}
 }
