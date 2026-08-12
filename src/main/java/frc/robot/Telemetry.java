@@ -2,6 +2,7 @@ package frc.robot;
 
 
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 import com.ctre.phoenix6.SignalLogger;
@@ -29,13 +30,14 @@ import edu.wpi.first.wpilibj.util.Color;
 import edu.wpi.first.wpilibj.util.Color8Bit;
 import frc.robot.utils.LatestValueMailbox;
 import frc.robot.utils.HubActivationPolicy;
-public class Telemetry {
+public class Telemetry implements AutoCloseable {
     private static final double PUBLISH_PERIOD_SECONDS = 0.05;
     private static final long CAPTURE_PERIOD_NANOSECONDS = 50_000_000L;
 
     private final double MaxSpeed;
     private final LatestValueMailbox<SwerveDriveState> pendingStates = new LatestValueMailbox<>();
     private final Notifier publisher;
+    private final AtomicBoolean closed = new AtomicBoolean();
     private double nextPublishErrorReportTimestamp;
     private volatile long nextCaptureTimestampNanos;
 
@@ -166,6 +168,37 @@ public class Telemetry {
             m_moduleSpeeds[i].setAngle(state.ModuleStates[i].angle);
             m_moduleDirections[i].setAngle(state.ModuleStates[i].angle);
             m_moduleSpeeds[i].setLength(state.ModuleStates[i].speedMetersPerSecond / (2 * MaxSpeed));
+        }
+    }
+
+    /** Stops the dedicated publisher thread when a simulation container is torn down. */
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        closeSafely(publisher);
+        closeSafely(drivePose);
+        closeSafely(driveSpeeds);
+        closeSafely(driveModuleStates);
+        closeSafely(driveModuleTargets);
+        closeSafely(driveModulePositions);
+        closeSafely(driveTimestamp);
+        closeSafely(driveOdometryFrequency);
+        closeSafely(fieldPub);
+        closeSafely(fieldTypePub);
+        try {
+            SignalLogger.stop();
+        } catch (RuntimeException ignored) {
+            // The process-owned logger is best-effort during simulation teardown.
+        }
+    }
+
+    private static void closeSafely(AutoCloseable resource) {
+        try {
+            resource.close();
+        } catch (Exception ignored) {
+            // Continue releasing all remaining process-owned resources.
         }
     }
 

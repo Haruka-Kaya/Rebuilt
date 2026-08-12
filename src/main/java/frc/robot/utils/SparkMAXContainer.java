@@ -1339,6 +1339,37 @@ public class SparkMAXContainer implements MotorContainer {
     return Optional.ofNullable(found);
   }
 
+  /**
+   * Cached production follower state used only to select the matching non-physical simulation
+   * response. The simulation model must not infer an isolated diagnostic from CAN ID alone.
+   */
+  static Optional<FollowerSimulationState> getFollowerSimulationStateForId(int canId) {
+    if (!RobotBase.isSimulation()) {
+      return Optional.empty();
+    }
+    double now = Timer.getFPGATimestamp();
+    for (SparkMAXContainer device : DEVICES) {
+      if (device.port == canId) {
+        synchronized (device.stateLock) {
+          return Optional.of(new FollowerSimulationState(
+              device.desiredFollower,
+              device.cachedFollower,
+              device.followerDiagnosticMode == FollowerDiagnosticMode.NONE,
+              device.followerDiagnosticMode == FollowerDiagnosticMode.ACTIVE,
+              device.isBaseReadyLocked(now)));
+        }
+      }
+    }
+    return Optional.empty();
+  }
+
+  record FollowerSimulationState(
+      boolean expectedFollower,
+      boolean cachedFollower,
+      boolean transitionIdle,
+      boolean isolatedDiagnosticActive,
+      boolean baseReady) {}
+
   /** Test teardown for the process-static simulation registry. Never available on the robot. */
   static boolean cleanupSimulationDevicesForTesting() {
     if (!RobotBase.isSimulation() || !IO_WORKER.isIdle()) {

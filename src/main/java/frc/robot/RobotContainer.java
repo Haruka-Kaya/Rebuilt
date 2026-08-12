@@ -7,6 +7,7 @@ package frc.robot;
 
 import edu.wpi.first.wpilibj.PS5Controller;
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.RobotBase;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import frc.robot.commands.FireCommand;
@@ -33,6 +34,7 @@ import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.subsystems.VisionSubsystem;
 import frc.robot.utils.SparkMAXContainer;
+import frc.robot.utils.SparkRawCommandEchoSimulation;
 import frc.robot.utils.NeutralAfterEnableGate;
 import frc.robot.utils.AsyncDiagnosticSink;
 import edu.wpi.first.wpilibj2.command.Command;
@@ -40,6 +42,7 @@ import edu.wpi.first.wpilibj2.command.RunCommand;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
 import edu.wpi.first.wpilibj2.command.button.JoystickButton;
 import edu.wpi.first.wpilibj2.command.button.Trigger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /*
  * This class is where the bulk of the robot should be declared.  Since Command-based is a
@@ -47,7 +50,8 @@ import edu.wpi.first.wpilibj2.command.button.Trigger;
  * periodic methods (other than the scheduler calls).  Instead, the structure of the robot
  * (including subsystems, commands, and button mappings) should be declared here.
  */
-public class RobotContainer {
+public class RobotContainer implements AutoCloseable {
+  private final AtomicBoolean closed = new AtomicBoolean();
   private enum IntakePathAction {
     INTAKE,
     OUTPUT,
@@ -112,6 +116,10 @@ public class RobotContainer {
 
     SmartDashboard.putString(
         "Controls/Configured", ConfiguredOperatorControls.configuredSummary());
+    if (RobotBase.isSimulation()) {
+      SmartDashboard.putString(
+          "Simulation/SPARK Model", SparkRawCommandEchoSimulation.SOURCE);
+    }
 
     // Configure the button bindings (put this last)
     configureButtonBindings();
@@ -446,6 +454,16 @@ public class RobotContainer {
     m_DriveBaseContainer.refreshAutonomousStatus();
   }
 
+  /** Applies raw command echo telemetry; it is not a mechanism physics model or reference source. */
+  public void simulationPeriodic() {
+    simulationPeriodic(DriverStation.isEnabled());
+  }
+
+  /** Applies one simulation response with an explicit output permission. */
+  public void simulationPeriodic(boolean outputsAllowed) {
+    SparkRawCommandEchoSimulation.stepConfiguredControllers(outputsAllowed);
+  }
+
   public Command getHardwareSelfTestCommand() {
     return HardwareSelfTestCommand.create(
         drivetrain, m_intake, m_conveyor, m_feeder, m_shooter, m_turret, m_climber);
@@ -468,6 +486,19 @@ public class RobotContainer {
     stopSafely("shooter", m_shooter::stop);
     stopSafely("turret", m_turret::stop);
     stopSafely("climber", m_climber::stop);
+  }
+
+  /** Releases process-owned simulation/native resources after all outputs are requested neutral. */
+  @Override
+  public void close() {
+    if (!closed.compareAndSet(false, true)) {
+      return;
+    }
+    try {
+      stopAll();
+    } finally {
+      m_DriveBaseContainer.close();
+    }
   }
 
   private static void stopSafely(String target, Runnable stopAction) {

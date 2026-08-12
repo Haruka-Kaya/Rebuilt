@@ -464,4 +464,21 @@ public class Robot extends TimedRobot {
       // Keep retrying the stop request on later robot periods without re-entering the scheduler.
     }
   }
+
+  /** Advances the explicit non-physical SPARK command echo used only by desktop simulation. */
+  @Override
+  public void simulationPeriodic() {
+    if (!m_runtimeSafetyLatch.healthy()) {
+      try {
+        // Never re-enter the poisoned scheduler, but do not freeze raw simulated telemetry at a
+        // previously nonzero value while the authoritative queued stop is being retried.
+        m_robotContainer.simulationPeriodic(false);
+      } catch (RuntimeException ignored) {
+        // enforceLatchedStop remains authoritative when the simulation façade itself fails.
+      }
+      enforceLatchedStop();
+      return;
+    }
+    runLifecycleSafely(m_robotContainer::simulationPeriodic);
+  }
 }

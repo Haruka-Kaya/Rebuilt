@@ -4,6 +4,7 @@ package frc.robot.subsystems;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -55,6 +56,7 @@ import frc.robot.utils.SwerveStateFreshnessTracker;
  * https://v6.docs.ctr-electronics.com/en/stable/docs/tuner/tuner-swerve/index.html
  */
 public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Subsystem {
+    private final AtomicBoolean m_closed = new AtomicBoolean();
     private static final double kSimLoopPeriod = 0.004; // 4 ms
     private static final double kSingleTagMaxTranslationResidualMeters = 1.0;
     private static final double kMultiTagMaxTranslationResidualMeters = 1.0;
@@ -628,6 +630,23 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             updateSimState(deltaTime, RobotController.getBatteryVoltage());
         });
         m_simNotifier.startPeriodic(kSimLoopPeriod);
+    }
+
+    /** Stops simulation-owned threads before releasing Phoenix native resources. */
+    @Override
+    public void close() {
+        if (!m_closed.compareAndSet(false, true)) {
+            return;
+        }
+        Notifier simNotifier = m_simNotifier;
+        m_simNotifier = null;
+        try {
+            if (simNotifier != null) {
+                simNotifier.close();
+            }
+        } finally {
+            super.close();
+        }
     }
 
     /**

@@ -3,6 +3,7 @@ package frc.robot.containers;
 import static edu.wpi.first.units.Units.*;
 
 import java.util.function.DoubleSupplier;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.ctre.phoenix6.swerve.SwerveModule.DriveRequestType;
 import com.ctre.phoenix6.swerve.SwerveRequest;
@@ -27,7 +28,8 @@ import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
 import frc.robot.utils.NeutralAfterEnableGate;
 
-public class DriveBaseContainer {
+public class DriveBaseContainer implements AutoCloseable {
+    private final AtomicBoolean closed = new AtomicBoolean();
     public AutoContainer autoContainer;
     public static double speedFactor = .05;
     public static double rotationFactor = .05;
@@ -206,5 +208,18 @@ public class DriveBaseContainer {
 
     public void refreshAutonomousStatus() {
         autoContainer.refreshReadinessStatus();
+    }
+
+    /** Releases simulation/native resources for repeatable integration tests. */
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            logger.close();
+        } finally {
+            drivetrain.close();
+        }
     }
 }

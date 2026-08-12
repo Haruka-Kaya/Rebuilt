@@ -5,8 +5,11 @@ import com.revrobotics.spark.SparkBase.Warnings;
 import com.revrobotics.spark.SparkMax;
 import com.revrobotics.sim.SparkMaxSim;
 import com.revrobotics.sim.SparkSimFaultManager;
+import edu.wpi.first.hal.SimInt;
 import edu.wpi.first.math.system.plant.DCMotor;
+import edu.wpi.first.wpilibj.simulation.SimDeviceSim;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * Narrow simulation-only façade for one SPARK MAX.
@@ -23,6 +26,7 @@ public final class SparkSimulationHandle {
   private final SparkMax motor;
   private final SparkMaxSim simulation;
   private final SparkSimFaultManager faultManager;
+  private final SimInt rawControlMode;
   private final Object ioLock;
 
   SparkSimulationHandle(SparkMax motor, Object ioLock) {
@@ -31,6 +35,9 @@ public final class SparkSimulationHandle {
     // This motor model is a non-physical placeholder because iterate() is intentionally hidden.
     simulation = new SparkMaxSim(motor, DCMotor.getNEO(1));
     faultManager = simulation.getFaultManager();
+    rawControlMode = Objects.requireNonNull(
+        new SimDeviceSim("SPARK MAX [" + motor.getDeviceId() + "]").getInt("Control Mode"),
+        "REV simulation Control Mode");
   }
 
   public int canId() {
@@ -47,8 +54,58 @@ public final class SparkSimulationHandle {
           simulation.getVelocity(),
           simulation.getPosition(),
           simulation.getBusVoltage(),
-          simulation.getSetpoint());
+          simulation.getSetpoint(),
+          rawControlMode.get(),
+          motor.getFaults().rawBits,
+          motor.getStickyFaults().rawBits,
+          motor.getWarnings().rawBits,
+          motor.getStickyWarnings().rawBits);
     }
+  }
+
+  /**
+   * Atomically observes a raw command and applies a pure command-echo response.
+   *
+   * <p>Package-private by design: the production controller remains the only setpoint authority,
+   * and the simulation coordinator cannot acquire the vendor I/O lock between observation and
+   * response application.
+   */
+  SparkRawCommandEchoSimulation.Response applyRawCommandEcho(
+      Function<RawCommandSnapshot, SparkRawCommandEchoSimulation.Response> responseFactory) {
+    Objects.requireNonNull(responseFactory, "responseFactory");
+    synchronized (ioLock) {
+      RawCommandSnapshot command = rawCommandSnapshotLocked();
+      SparkRawCommandEchoSimulation.Response response =
+          Objects.requireNonNull(responseFactory.apply(command), "response");
+      if (response.canId() != command.canId()) {
+        throw new IllegalArgumentException("response CAN ID does not match simulation handle");
+      }
+
+      simulation.setAppliedOutput(response.appliedOutput());
+      simulation.setMotorCurrent(response.motorCurrentAmps());
+      simulation.setVelocity(response.velocity());
+      simulation.setPosition(response.position());
+      simulation.getRelativeEncoderSim().setVelocity(response.velocity());
+      simulation.getRelativeEncoderSim().setPosition(response.position());
+      simulation.setBusVoltage(response.busVoltage());
+      return response;
+    }
+  }
+
+  private RawCommandSnapshot rawCommandSnapshotLocked() {
+    return new RawCommandSnapshot(
+        canId(),
+        rawControlMode.get(),
+        simulation.getSetpoint(),
+        simulation.getAppliedOutput(),
+        simulation.getMotorCurrent(),
+        simulation.getVelocity(),
+        simulation.getPosition(),
+        simulation.getBusVoltage(),
+        motor.getFaults().rawBits,
+        motor.getStickyFaults().rawBits,
+        motor.getWarnings().rawBits,
+        motor.getStickyWarnings().rawBits);
   }
 
   /**
@@ -113,5 +170,25 @@ public final class SparkSimulationHandle {
       double velocity,
       double position,
       double busVoltage,
-      double setpoint) {}
+      double setpoint,
+      int rawControlMode,
+      int activeFaultBits,
+      int stickyFaultBits,
+      int activeWarningBits,
+      int stickyWarningBits) {}
+
+  /** Immutable raw REV command/status view used by the non-physical command echo. */
+  public record RawCommandSnapshot(
+      int canId,
+      int rawControlMode,
+      double setpoint,
+      double appliedOutput,
+      double motorCurrentAmps,
+      double velocity,
+      double position,
+      double busVoltage,
+      int activeFaultBits,
+      int stickyFaultBits,
+      int activeWarningBits,
+      int stickyWarningBits) {}
 }
