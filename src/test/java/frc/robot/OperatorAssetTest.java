@@ -25,7 +25,7 @@ class OperatorAssetTest {
   private static final int DRIVER_PORT = 0;
   private static final int OPERATOR_PORT = 1;
   private static final int MAINTENANCE_PORT = 2;
-  // RobotContainer binds driver raw button 14 and maintenance deadman raw button 10.
+  // RobotContainer binds driver raw button 14 and maintenance diagnostic deadman raw button 9.
   private static final int REQUIRED_DRIVER_BUTTONS =
       ConfiguredOperatorControls.maximumDriverButton();
   private static final int REQUIRED_DRIVER_AXES = 3;
@@ -99,12 +99,6 @@ class OperatorAssetTest {
           "/SmartDashboard/Controls/Configured",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
-          "/SmartDashboard/Climber Diagnostic/Armed",
-          new WidgetExpectation("Toggle Button", "boolean")),
-      Map.entry(
-          "/SmartDashboard/Climber Diagnostic/Brushless Motor Type Verified",
-          new WidgetExpectation("Toggle Button", "boolean")),
-      Map.entry(
           "/SmartDashboard/Unhomed Actuator Diagnostic/Armed",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
@@ -118,6 +112,12 @@ class OperatorAssetTest {
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
           "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID30 Intake",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID34 Climber Left",
+          new WidgetExpectation("Toggle Button", "boolean")),
+      Map.entry(
+          "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID35 Climber Right",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
           "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID38 Shooter",

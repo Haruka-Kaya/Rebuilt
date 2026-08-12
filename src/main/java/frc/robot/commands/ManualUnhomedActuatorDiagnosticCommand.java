@@ -8,12 +8,14 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Subsystem;
 import frc.robot.constants.Constants.HardwareTestConstants;
+import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.constants.Constants.IntakeConstants;
 import frc.robot.constants.Constants.ShooterConstants;
 import frc.robot.constants.Constants.TurretConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.MotionResult;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
+import frc.robot.subsystems.ClimberSubsystem;
 import frc.robot.subsystems.IntakeSubsystem;
 import frc.robot.subsystems.ShooterSubsystem;
 import frc.robot.subsystems.TurretSubsystem;
@@ -32,6 +34,8 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
   public static final String PHYSICAL_CLEARANCE_KEY = PREFIX + "Physical Clearance Verified";
   public static final String MOTOR_TYPE_VERIFIED_KEY = PREFIX + "Brushless Motor Type Verified";
   public static final String TARGET_INTAKE_KEY = PREFIX + "Target ID30 Intake";
+  public static final String TARGET_CLIMBER_LEFT_KEY = PREFIX + "Target ID34 Climber Left";
+  public static final String TARGET_CLIMBER_RIGHT_KEY = PREFIX + "Target ID35 Climber Right";
   public static final String TARGET_SHOOTER_KEY = PREFIX + "Target ID38 Shooter";
   public static final String TARGET_TURRET_KEY = PREFIX + "Target ID39 Turret";
   public static final String DIRECTION_NEGATIVE_KEY = PREFIX + "Direction Negative";
@@ -40,16 +44,41 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
   public static final String STOP_EVIDENCE_KEY = PREFIX + "Stop Evidence";
 
   public enum Target {
-    INTAKE_ACTUATOR(IntakeConstants.INTAKE_ACTUATOR_CAN_ID, "ID30_INTAKE_ACTUATOR"),
-    SHOOTER_ACTUATOR(ShooterConstants.ACTUATOR_CAN_ID, "ID38_SHOOTER_ACTUATOR"),
-    TURRET(TurretConstants.TURRET_CAN_ID, "ID39_TURRET");
+    INTAKE_ACTUATOR(
+        IntakeConstants.INTAKE_ACTUATOR_CAN_ID,
+        "ID30_INTAKE_ACTUATOR",
+        HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_CURRENT_AMPS),
+    CLIMBER_LEFT(
+        ClimberConstants.LEFT_MOTOR_CAN_ID,
+        "ID34_CLIMBER_LEFT",
+        ClimberConstants.DIAGNOSTIC_CURRENT_LIMIT_AMPS,
+        ClimberConstants.LEFT_MOTOR_CAN_ID,
+        ClimberConstants.RIGHT_MOTOR_CAN_ID),
+    CLIMBER_RIGHT(
+        ClimberConstants.RIGHT_MOTOR_CAN_ID,
+        "ID35_CLIMBER_RIGHT",
+        ClimberConstants.DIAGNOSTIC_CURRENT_LIMIT_AMPS,
+        ClimberConstants.LEFT_MOTOR_CAN_ID,
+        ClimberConstants.RIGHT_MOTOR_CAN_ID),
+    SHOOTER_ACTUATOR(
+        ShooterConstants.ACTUATOR_CAN_ID,
+        "ID38_SHOOTER_ACTUATOR",
+        HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_CURRENT_AMPS),
+    TURRET(
+        TurretConstants.TURRET_CAN_ID,
+        "ID39_TURRET",
+        HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_CURRENT_AMPS);
 
     private final int canId;
     private final String label;
+    private final double maximumCurrentAmps;
+    private final int[] stopCanIds;
 
-    Target(int canId, String label) {
+    Target(int canId, String label, double maximumCurrentAmps, int... stopCanIds) {
       this.canId = canId;
       this.label = label;
+      this.maximumCurrentAmps = maximumCurrentAmps;
+      this.stopCanIds = stopCanIds.length == 0 ? new int[] {canId} : stopCanIds.clone();
     }
 
     public int canId() {
@@ -58,6 +87,14 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
 
     public String label() {
       return label;
+    }
+
+    double maximumCurrentAmps() {
+      return maximumCurrentAmps;
+    }
+
+    int[] stopCanIds() {
+      return stopCanIds.clone();
     }
   }
 
@@ -107,6 +144,7 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
       IntakeSubsystem intake,
       ShooterSubsystem shooter,
       TurretSubsystem turret,
+      ClimberSubsystem climber,
       Subsystem... exclusiveRequirements) {
     if (target == null
         || !Double.isFinite(requestedDuty)
@@ -122,6 +160,14 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
       case INTAKE_ACTUATOR -> {
         runAction = () -> intake.runUnhomedActuatorDiagnostic(requestedDuty);
         stopAction = intake::stopActuatorDiagnostic;
+      }
+      case CLIMBER_LEFT -> {
+        runAction = () -> climber.runLeftUnhomedDiagnostic(requestedDuty);
+        stopAction = climber::stopUnhomedDiagnostic;
+      }
+      case CLIMBER_RIGHT -> {
+        runAction = () -> climber.runRightUnhomedDiagnostic(requestedDuty);
+        stopAction = climber::stopUnhomedDiagnostic;
       }
       case SHOOTER_ACTUATOR -> {
         runAction = () -> shooter.runUnhomedActuatorDiagnostic(requestedDuty);
@@ -144,6 +190,8 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     SmartDashboard.putBoolean(PHYSICAL_CLEARANCE_KEY, false);
     SmartDashboard.putBoolean(MOTOR_TYPE_VERIFIED_KEY, false);
     SmartDashboard.putBoolean(TARGET_INTAKE_KEY, false);
+    SmartDashboard.putBoolean(TARGET_CLIMBER_LEFT_KEY, false);
+    SmartDashboard.putBoolean(TARGET_CLIMBER_RIGHT_KEY, false);
     SmartDashboard.putBoolean(TARGET_SHOOTER_KEY, false);
     SmartDashboard.putBoolean(TARGET_TURRET_KEY, false);
     SmartDashboard.putBoolean(DIRECTION_NEGATIVE_KEY, false);
@@ -155,14 +203,26 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
   /** Returns a target only when exactly one dashboard selection is active. */
   public static Optional<Target> readExactlyOneTarget() {
     boolean intake = SmartDashboard.getBoolean(TARGET_INTAKE_KEY, false);
+    boolean climberLeft = SmartDashboard.getBoolean(TARGET_CLIMBER_LEFT_KEY, false);
+    boolean climberRight = SmartDashboard.getBoolean(TARGET_CLIMBER_RIGHT_KEY, false);
     boolean shooter = SmartDashboard.getBoolean(TARGET_SHOOTER_KEY, false);
     boolean turret = SmartDashboard.getBoolean(TARGET_TURRET_KEY, false);
-    int count = (intake ? 1 : 0) + (shooter ? 1 : 0) + (turret ? 1 : 0);
+    int count = (intake ? 1 : 0)
+        + (climberLeft ? 1 : 0)
+        + (climberRight ? 1 : 0)
+        + (shooter ? 1 : 0)
+        + (turret ? 1 : 0);
     if (count != 1) {
       return Optional.empty();
     }
     if (intake) {
       return Optional.of(Target.INTAKE_ACTUATOR);
+    }
+    if (climberLeft) {
+      return Optional.of(Target.CLIMBER_LEFT);
+    }
+    if (climberRight) {
+      return Optional.of(Target.CLIMBER_RIGHT);
     }
     if (shooter) {
       return Optional.of(Target.SHOOTER_ACTUATOR);
@@ -189,7 +249,7 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     lastEvaluatedSampleAt = Double.NEGATIVE_INFINITY;
     pulseOutputEpoch = -1;
     stopAction.run();
-    stopBatch = SparkMAXContainer.requestOutputStops(target.canId());
+    stopBatch = SparkMAXContainer.requestOutputStops(target.stopCanIds());
     phase = Phase.PRE_STOP;
     phaseDeadlineSeconds = Timer.getFPGATimestamp()
         + HardwareTestConstants.STOP_CONFIRM_TIMEOUT_SECONDS;
@@ -282,7 +342,7 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     MotionResult sample = HardwareDiagnosticEvaluator.evaluateOpenLoop(
         snapshot,
         requestedDuty,
-        HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_CURRENT_AMPS);
+        target.maximumCurrentAmps());
     latestMotionResult = sample;
     if (sample == MotionResult.PASS_OBSERVED) {
       motionObserved = true;
@@ -325,7 +385,7 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
     }
     stopAction.run();
     terminalStatus = result;
-    stopBatch = SparkMAXContainer.requestOutputStops(target.canId());
+    stopBatch = SparkMAXContainer.requestOutputStops(target.stopCanIds());
     phase = Phase.POST_STOP;
     phaseDeadlineSeconds = Timer.getFPGATimestamp()
         + HardwareTestConstants.STOP_CONFIRM_TIMEOUT_SECONDS;
@@ -358,7 +418,7 @@ public final class ManualUnhomedActuatorDiagnosticCommand extends Command {
   public void end(boolean interrupted) {
     stopAction.run();
     if (interrupted || phase != Phase.DONE) {
-      SparkMAXContainer.requestOutputStops(target.canId());
+      SparkMAXContainer.requestOutputStops(target.stopCanIds());
       phase = Phase.DONE;
       publish("INTERRUPTED_STOP_REQUESTED", "STOP_REQUESTED");
       AsyncDiagnosticSink.log(

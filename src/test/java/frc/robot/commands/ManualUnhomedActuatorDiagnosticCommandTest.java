@@ -1,12 +1,15 @@
 package frc.robot.commands;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
 import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Direction;
+import frc.robot.commands.ManualUnhomedActuatorDiagnosticCommand.Target;
+import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
 import frc.robot.utils.SparkMAXContainer.TimedDiagnosticSnapshot;
@@ -45,5 +48,21 @@ class ManualUnhomedActuatorDiagnosticCommandTest {
     assertEquals(
         HardwareTestConstants.UNHOMED_DIAGNOSTIC_MAX_DUTY_CYCLE,
         Direction.POSITIVE.duty());
+  }
+
+  @Test
+  void climberPulseStopsBothControllersAndUsesTheConservativeCurrentLimit() {
+    assertArrayEquals(
+        new int[] {ClimberConstants.LEFT_MOTOR_CAN_ID, ClimberConstants.RIGHT_MOTOR_CAN_ID},
+        Target.CLIMBER_LEFT.stopCanIds());
+    assertArrayEquals(
+        new int[] {ClimberConstants.LEFT_MOTOR_CAN_ID, ClimberConstants.RIGHT_MOTOR_CAN_ID},
+        Target.CLIMBER_RIGHT.stopCanIds());
+    assertEquals(
+        ClimberConstants.DIAGNOSTIC_CURRENT_LIMIT_AMPS,
+        Target.CLIMBER_LEFT.maximumCurrentAmps());
+    assertEquals(
+        ClimberConstants.DIAGNOSTIC_CURRENT_LIMIT_AMPS,
+        Target.CLIMBER_RIGHT.maximumCurrentAmps());
   }
 }

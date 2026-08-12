@@ -340,27 +340,27 @@
             }
           },
           {
-            "title": "Arm Climber Diagnostic",
-            "x": 0.0,
-            "y": 256.0,
-            "width": 192.0,
+            "title": "Target ID34 Climber Left",
+            "x": 742.0,
+            "y": 1536.0,
+            "width": 102.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
-              "topic": "/SmartDashboard/Climber Diagnostic/Armed",
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID34 Climber Left",
               "period": 0.06,
               "data_type": "boolean"
             }
           },
           {
-            "title": "Verify Climber Motor Type",
-            "x": 192.0,
-            "y": 256.0,
-            "width": 192.0,
+            "title": "Target ID35 Climber Right",
+            "x": 844.0,
+            "y": 1536.0,
+            "width": 102.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
-              "topic": "/SmartDashboard/Climber Diagnostic/Brushless Motor Type Verified",
+              "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Target ID35 Climber Right",
               "period": 0.06,
               "data_type": "boolean"
             }
@@ -736,7 +736,7 @@
             "title": "Target ID30 Intake",
             "x": 640.0,
             "y": 1536.0,
-            "width": 128.0,
+            "width": 102.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -747,9 +747,9 @@
           },
           {
             "title": "Target ID38 Shooter",
-            "x": 768.0,
+            "x": 946.0,
             "y": 1536.0,
-            "width": 128.0,
+            "width": 102.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -760,9 +760,9 @@
           },
           {
             "title": "Target ID39 Turret",
-            "x": 896.0,
+            "x": 1048.0,
             "y": 1536.0,
-            "width": 128.0,
+            "width": 104.0,
             "height": 128.0,
             "type": "Toggle Button",
             "properties": {
@@ -773,10 +773,10 @@
           },
           {
             "title": "Direction Negative",
-            "x": 1024.0,
-            "y": 1536.0,
+            "x": 0.0,
+            "y": 1664.0,
             "width": 128.0,
-            "height": 64.0,
+            "height": 128.0,
             "type": "Toggle Button",
             "properties": {
               "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Direction Negative",
@@ -786,10 +786,10 @@
           },
           {
             "title": "Direction Positive",
-            "x": 1024.0,
-            "y": 1600.0,
+            "x": 128.0,
+            "y": 1664.0,
             "width": 128.0,
-            "height": 64.0,
+            "height": 128.0,
             "type": "Toggle Button",
             "properties": {
               "topic": "/SmartDashboard/Unhomed Actuator Diagnostic/Direction Positive",
@@ -799,9 +799,9 @@
           },
           {
             "title": "Unhomed Actuator Diagnostic Status",
-            "x": 0.0,
+            "x": 256.0,
             "y": 1664.0,
-            "width": 768.0,
+            "width": 512.0,
             "height": 128.0,
             "type": "Large Text Display",
             "properties": {

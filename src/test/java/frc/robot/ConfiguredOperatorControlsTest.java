@@ -21,13 +21,12 @@ class ConfiguredOperatorControlsTest {
     assertEquals(
         List.of(1, 4, 5, 6, 7, 8, 9, 12, 14),
         ConfiguredOperatorControls.driverSafetyButtons());
-    assertEquals(List.of(1, 2, 3, 4), ConfiguredOperatorControls.climberFaceButtons());
     assertEquals(14, ConfiguredOperatorControls.maximumDriverButton());
     assertEquals(5, ConfiguredOperatorControls.maximumOperatorButton());
-    assertEquals(10, ConfiguredOperatorControls.maximumMaintenanceButton());
+    assertEquals(9, ConfiguredOperatorControls.maximumMaintenanceButton());
     assertTrue(ConfiguredOperatorControls.configuredSummary().contains("L1=intake"));
     assertTrue(ConfiguredOperatorControls.configuredSummary().contains("Create+(L1-/R1+)"));
-    assertTrue(ConfiguredOperatorControls.configuredSummary().contains("Options+"));
+    assertTrue(ConfiguredOperatorControls.configuredSummary().contains("unreferenced motor"));
   }
 
   @Test
@@ -46,12 +45,7 @@ class ConfiguredOperatorControlsTest {
         "MAINTENANCE_AUTO_AIM",
         "UNHOMED_DIAGNOSTIC_DEADMAN",
         "UNHOMED_DIAGNOSTIC_NEGATIVE",
-        "UNHOMED_DIAGNOSTIC_POSITIVE",
-        "CLIMBER_DEADMAN",
-        "CLIMBER_LEFT_POSITIVE",
-        "CLIMBER_LEFT_NEGATIVE",
-        "CLIMBER_RIGHT_POSITIVE",
-        "CLIMBER_RIGHT_NEGATIVE")) {
+        "UNHOMED_DIAGNOSTIC_POSITIVE")) {
       assertTrue(
           robotContainer.contains("ConfiguredOperatorControls." + binding),
           () -> "RobotContainer drifted from the control manifest: " + binding);

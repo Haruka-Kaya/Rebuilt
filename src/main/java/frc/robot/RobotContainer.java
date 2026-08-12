@@ -22,11 +22,9 @@ import frc.robot.commands.RetractIntakeCommand;
 import frc.robot.constants.Constants.LimelightConstants;
 import frc.robot.constants.Constants.OIConstants;
 import frc.robot.constants.ConfiguredOperatorControls;
-import frc.robot.constants.Constants.ClimberConstants;
 import frc.robot.constants.Constants.HardwareTestConstants;
 import frc.robot.containers.DriveBaseContainer;
 import frc.robot.subsystems.CommandSwerveDrivetrain;
-import frc.robot.subsystems.ClimberDiagnosticLatch.MotorSide;
 import frc.robot.subsystems.ClimberSubsystem;
 import frc.robot.subsystems.ConveyorSubsystem;
 import frc.robot.subsystems.FeederSubsystem;
@@ -38,7 +36,6 @@ import frc.robot.utils.SparkMAXContainer;
 import frc.robot.utils.NeutralAfterEnableGate;
 import frc.robot.utils.AsyncDiagnosticSink;
 import edu.wpi.first.wpilibj2.command.Command;
-import edu.wpi.first.wpilibj2.command.FunctionalCommand;
 import edu.wpi.first.wpilibj2.command.RunCommand;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
 import edu.wpi.first.wpilibj2.command.button.JoystickButton;
@@ -59,7 +56,6 @@ public class RobotContainer {
   }
 
   private final NeutralAfterEnableGate m_teleopInputGate = new NeutralAfterEnableGate();
-  private final NeutralAfterEnableGate m_climberInputGate = new NeutralAfterEnableGate();
   private final NeutralAfterEnableGate m_unhomedDiagnosticInputGate =
       new NeutralAfterEnableGate();
   private long m_teleopSafetySourceSignature;
@@ -168,7 +164,6 @@ public class RobotContainer {
         .whileTrue(new RunCommand(() -> m_turret.autoAimWithLimelight(), m_turret)
             .finallyDo(interrupted -> m_turret.stop()));
 
-    configureClimberDiagnosticBindings();
     configureUnhomedDiagnosticBindings();
   }
 
@@ -283,71 +278,6 @@ public class RobotContainer {
         && controller.getHID().getRawButton(button);
   }
 
-  private void configureClimberDiagnosticBindings() {
-    bindClimberDiagnostic(
-        ConfiguredOperatorControls.CLIMBER_LEFT_POSITIVE, MotorSide.LEFT, 1.0);
-    bindClimberDiagnostic(
-        ConfiguredOperatorControls.CLIMBER_LEFT_NEGATIVE, MotorSide.LEFT, -1.0);
-    bindClimberDiagnostic(
-        ConfiguredOperatorControls.CLIMBER_RIGHT_POSITIVE, MotorSide.RIGHT, 1.0);
-    bindClimberDiagnostic(
-        ConfiguredOperatorControls.CLIMBER_RIGHT_NEGATIVE, MotorSide.RIGHT, -1.0);
-  }
-
-  private void bindClimberDiagnostic(int faceButton, MotorSide side, double sign) {
-    boolean[] active = {false};
-    new Trigger(() -> climberDiagnosticPressed(faceButton))
-        .whileTrue(new FunctionalCommand(
-            () -> active[0] = m_climber.canStartDiagnostic(),
-            () -> {
-              if (active[0]) {
-                active[0] = m_climber.runDiagnostic(
-                    side, sign * ClimberConstants.DIAGNOSTIC_MAX_DUTY_CYCLE);
-              }
-            },
-            interrupted -> {
-              active[0] = false;
-              m_climber.stop();
-            },
-            () -> !active[0],
-            m_climber)
-            .withTimeout(ClimberConstants.DIAGNOSTIC_PULSE_SECONDS)
-            .finallyDo(interrupted -> m_climber.stop()));
-  }
-
-  private boolean climberDiagnosticPressed(int selectedFaceButton) {
-    CommandPS5Controller controller = DriverStation.getStickButtonCount(
-        OIConstants.kMaintenanceControllerPort) >= ConfiguredOperatorControls.CLIMBER_DEADMAN
-            ? m_maintenanceController
-            : m_driverController;
-    int port = controller == m_maintenanceController
-        ? OIConstants.kMaintenanceControllerPort
-        : OIConstants.kDriverControllerPort;
-    boolean deadmanPressed = rawButtonPressed(
-        controller, port, ConfiguredOperatorControls.CLIMBER_DEADMAN);
-    int pressedFaces = 0;
-    for (int button : ConfiguredOperatorControls.climberFaceButtons()) {
-      if (rawButtonPressed(controller, port, button)) {
-        pressedFaces++;
-      }
-    }
-    if (pressedFaces > 1) {
-      m_climberInputGate.blockUntilNeutral();
-    }
-    boolean interlocksEnabled = DriverStation.isTestEnabled()
-        && !DriverStation.isFMSAttached()
-        && SmartDashboard.getBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false)
-        && SmartDashboard.getBoolean(ClimberSubsystem.MOTOR_TYPE_VERIFIED_KEY, false);
-    boolean anyPressed = deadmanPressed || pressedFaces > 0;
-    int sourceSignature = (port << 16) | DriverStation.getStickButtonCount(port);
-    if (!m_climberInputGate.allow(interlocksEnabled, sourceSignature, anyPressed)) {
-      return false;
-    }
-    return deadmanPressed
-        && pressedFaces == 1
-        && rawButtonPressed(controller, port, selectedFaceButton);
-  }
-
   private void configureUnhomedDiagnosticBindings() {
     for (Target target : Target.values()) {
       bindUnhomedDiagnostic(
@@ -380,6 +310,7 @@ public class RobotContainer {
             m_intake,
             m_shooter,
             m_turret,
+            m_climber,
             drivetrain,
             m_intake,
             m_conveyor,
@@ -469,8 +400,7 @@ public class RobotContainer {
         && selectionAndVerificationMatch
         && DriverStation.isTestEnabled()
         && !DriverStation.isFMSAttached()
-        && !SmartDashboard.getBoolean(HardwareSelfTestCommand.RUNNING_KEY, false)
-        && !SmartDashboard.getBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false);
+        && !SmartDashboard.getBoolean(HardwareSelfTestCommand.RUNNING_KEY, false);
   }
 
   private boolean maintenanceButtonPressed(int button) {
@@ -484,7 +414,6 @@ public class RobotContainer {
     m_unhomedDiagnosticDirection = direction;
     m_unhomedDiagnosticExpiresAt = Timer.getFPGATimestamp()
         + HardwareTestConstants.ARM_LIFETIME_SECONDS;
-    SmartDashboard.putBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false);
     SmartDashboard.putString(
         ManualUnhomedActuatorDiagnosticCommand.STATUS_KEY,
         "ARMED_" + target.label() + "_" + direction.name() + "_RELEASE_CONTROLS");
@@ -539,9 +468,6 @@ public class RobotContainer {
     stopSafely("shooter", m_shooter::stop);
     stopSafely("turret", m_turret::stop);
     stopSafely("climber", m_climber::stop);
-    stopSafely(
-        "climber diagnostic arm",
-        () -> SmartDashboard.putBoolean(ClimberSubsystem.DIAGNOSTIC_ARM_KEY, false));
   }
 
   private static void stopSafely(String target, Runnable stopAction) {

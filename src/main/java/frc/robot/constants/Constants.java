@@ -118,7 +118,6 @@ public final class Constants {
     /** Conservative limits until the motor type, gearing, and load are verified from the design. */
     public static final int DIAGNOSTIC_CURRENT_LIMIT_AMPS = 10;
     public static final double DIAGNOSTIC_MAX_DUTY_CYCLE = 0.03;
-    public static final double DIAGNOSTIC_PULSE_SECONDS = 0.35;
   }
 
   public static final class ShooterConstants {
