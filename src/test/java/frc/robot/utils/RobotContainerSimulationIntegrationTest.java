@@ -65,9 +65,16 @@ class RobotContainerSimulationIntegrationTest {
                   .map(snapshot -> snapshot.ready())
                   .orElse(false))),
           SparkMAXContainer::getDeviceAvailabilitySummary);
+      assertTrue(
+          await(
+              8.0,
+              activeContainer,
+              () -> activeContainer.getOutputSafetySnapshot().phase()
+                  == RobotOutputSafetySupervisor.Phase.READY_DISABLED),
+          () -> activeContainer.getOutputSafetySnapshot().toString());
 
       enableTeleop(false);
-      pump(activeContainer, 3);
+      assertOutputSafetyArmed(activeContainer);
       long followerEpochBeforeRev = SparkMAXContainer.getDeviceEvidenceSnapshots().stream()
           .filter(snapshot -> snapshot.canId() == SHOOTER_FOLLOWER_ID)
           .findFirst()
@@ -145,6 +152,7 @@ class RobotContainerSimulationIntegrationTest {
                   .map(snapshot -> snapshot.ready())
                   .orElse(false))),
           SparkMAXContainer::getDeviceAvailabilitySummary);
+      assertOutputSafetyReadyDisabled(activeContainer);
 
       enableTeleop(true);
       for (int recoveryCycle = 0; recoveryCycle < 8; recoveryCycle++) {
@@ -166,6 +174,7 @@ class RobotContainerSimulationIntegrationTest {
       // One neutral observation rearms the gate; only a new rising edge may restart motion.
       setDriverButton(ConfiguredOperatorControls.DRIVER_REV, false);
       pump(activeContainer, 3);
+      assertOutputSafetyArmed(activeContainer);
       setDriverButton(ConfiguredOperatorControls.DRIVER_REV, true);
       assertTrue(await(3.0, activeContainer, () -> pairEchoesRequestedVelocity(500.0)),
           () -> pairSummary("release and fresh press did not rearm the binding"));
@@ -241,6 +250,7 @@ class RobotContainerSimulationIntegrationTest {
       // A repaired ID32 may receive one isolated 3% pulse, but the known-stall block remains.
       prepareFeederDiagnosticSelection();
       enableDisabledTest();
+      assertOutputSafetyReadyDisabled(activeContainer);
       double feederDiagnosticExpiresAt =
           Timer.getFPGATimestamp() + HardwareTestConstants.ARM_LIFETIME_SECONDS;
       SmartDashboard.putBoolean(
@@ -283,7 +293,7 @@ class RobotContainerSimulationIntegrationTest {
       activeContainer.armUnhomedDiagnosticSession(
           Target.FEEDER, Direction.POSITIVE, feederDiagnosticExpiresAt);
       enableTest();
-      pump(activeContainer, 3);
+      assertOutputSafetyArmed(activeContainer);
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, true);
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, true);
       assertTrue(await(3.0, activeContainer, () -> Math.abs(
@@ -295,13 +305,13 @@ class RobotContainerSimulationIntegrationTest {
           simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe();
       assertEquals(0.0, feederPulse.velocity(), "raw echo must not invent feeder motion");
       assertEquals(0.0, feederPulse.motorCurrentAmps(), "raw echo must not invent feeder current");
-      Thread.sleep(100L);
+      keepHeartbeatWithoutScheduler(activeContainer, 0.10);
       assertEquals(
           0.03,
           simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint(),
           1e-9,
           "the watchdog stopped the pulse before its bounded 0.35-second window");
-      assertTrue(awaitWithoutRobotLoop(3.0, () -> SmartDashboard.getString(
+      assertTrue(awaitWithoutScheduler(3.0, activeContainer, () -> SmartDashboard.getString(
           "Feeder/Manual Retest Guard", "")
               .contains("WATCHDOG_DEADLINE_STOP_REQUESTED")
           && simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint() == 0.0),
@@ -345,6 +355,7 @@ class RobotContainerSimulationIntegrationTest {
       // A fresh arm also proves the independent 8A known-stall cutoff without scheduler ticks.
       prepareFeederDiagnosticSelection();
       enableDisabledTest();
+      assertOutputSafetyReadyDisabled(activeContainer);
       double currentCutoffExpiresAt =
           Timer.getFPGATimestamp() + HardwareTestConstants.ARM_LIFETIME_SECONDS;
       assertTrue(activeContainer.prepareUnhomedDiagnosticSession(
@@ -353,7 +364,7 @@ class RobotContainerSimulationIntegrationTest {
       activeContainer.armUnhomedDiagnosticSession(
           Target.FEEDER, Direction.POSITIVE, currentCutoffExpiresAt);
       enableTest();
-      pump(activeContainer, 3);
+      assertOutputSafetyArmed(activeContainer);
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, true);
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, true);
       assertTrue(await(3.0, activeContainer, () -> Math.abs(
@@ -368,7 +379,7 @@ class RobotContainerSimulationIntegrationTest {
               500.0,
               beforeCurrentInjection.position(),
               12.0));
-      assertTrue(awaitWithoutRobotLoop(3.0, () -> SmartDashboard.getString(
+      assertTrue(awaitWithoutScheduler(3.0, activeContainer, () -> SmartDashboard.getString(
           "Feeder/Manual Retest Guard", "")
               .contains("CURRENT_CUTOFF_STOP_REQUESTED")
           && simulationHandle(ConfiguredCanHardware.FEEDER_ID).observe().setpoint() == 0.0),
@@ -400,6 +411,7 @@ class RobotContainerSimulationIntegrationTest {
 
       prepareTurretDiagnosticSelection();
       enableDisabledTest();
+      assertOutputSafetyReadyDisabled(activeContainer);
       double turretDiagnosticExpiresAt =
           Timer.getFPGATimestamp() + HardwareTestConstants.ARM_LIFETIME_SECONDS;
       assertTrue(activeContainer.prepareUnhomedDiagnosticSession(
@@ -411,7 +423,7 @@ class RobotContainerSimulationIntegrationTest {
           Target.TURRET, Direction.POSITIVE, turretDiagnosticExpiresAt);
       double referenceEpochBefore = SmartDashboard.getNumber("Turret/Continuity Epoch", -1.0);
       enableTest();
-      pump(activeContainer, 3);
+      assertOutputSafetyArmed(activeContainer);
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, true);
       setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, true);
       assertTrue(await(3.0, activeContainer, () -> Math.abs(
@@ -440,6 +452,29 @@ class RobotContainerSimulationIntegrationTest {
           referenceEpochBefore,
           SmartDashboard.getNumber("Turret/Continuity Epoch", -2.0),
           "raw command echo must never mint or mutate a mechanism reference");
+
+      // A blocked robot loop cannot refresh any normal or diagnostic output indefinitely. The
+      // independent 5 ms supervisor revokes the process gate, orders zero after any in-flight
+      // vendor call, and advances the raw simulation response without CommandScheduler.
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_POSITIVE, false);
+      setMaintenanceButton(ConfiguredOperatorControls.UNHOMED_DIAGNOSTIC_DEADMAN, false);
+      enableTeleop(false);
+      assertOutputSafetyArmed(activeContainer);
+      setDriverButton(ConfiguredOperatorControls.DRIVER_REV, true);
+      assertTrue(await(3.0, activeContainer, () -> pairEchoesRequestedVelocity(500.0)),
+          () -> pairSummary("heartbeat-timeout setup did not start Rev"));
+      assertTrue(
+          awaitWithoutRobotLoop(
+              3.0,
+              () -> !ProcessOutputSafety.isOutputAuthorized() && pairRawStopped()),
+          () -> pairSummary("independent robot-loop heartbeat did not stop the pair"));
+      assertTrue(
+          activeContainer.getOutputSafetySnapshot().phase()
+                  == RobotOutputSafetySupervisor.Phase.STOPPING
+              || activeContainer.getOutputSafetySnapshot().phase()
+                  == RobotOutputSafetySupervisor.Phase.TRIPPED,
+          () -> activeContainer.getOutputSafetySnapshot().toString());
+      assertFalse(SmartDashboard.getBoolean("Runtime/Scheduler Healthy", true));
     } finally {
       try {
         setDriverButton(ConfiguredOperatorControls.DRIVER_REV, false);
@@ -571,14 +606,61 @@ class RobotContainerSimulationIntegrationTest {
     return condition.getAsBoolean();
   }
 
+  private static boolean awaitWithoutScheduler(
+      double timeoutSeconds, RobotContainer container, BooleanSupplier condition)
+      throws InterruptedException {
+    long deadline = System.nanoTime() + (long) (timeoutSeconds * 1_000_000_000L);
+    do {
+      container.serviceOutputSafetyHeartbeat();
+      if (condition.getAsBoolean()) {
+        return true;
+      }
+      Thread.sleep(5L);
+    } while (System.nanoTime() < deadline);
+    return condition.getAsBoolean();
+  }
+
+  private static void keepHeartbeatWithoutScheduler(
+      RobotContainer container, double durationSeconds) throws InterruptedException {
+    long deadline = System.nanoTime() + (long) (durationSeconds * 1_000_000_000L);
+    do {
+      container.serviceOutputSafetyHeartbeat();
+      Thread.sleep(5L);
+    } while (System.nanoTime() < deadline);
+  }
+
   private static void pump(RobotContainer container, int iterations) throws InterruptedException {
     for (int iteration = 0; iteration < iterations; iteration++) {
       SparkMAXContainer.serviceAll();
       container.updateTeleopSafetyState();
+      container.serviceOutputSafetyHeartbeat();
       CommandScheduler.getInstance().run();
       container.simulationPeriodic();
       Thread.sleep(20L);
     }
+  }
+
+  private static void assertOutputSafetyArmed(RobotContainer container)
+      throws InterruptedException {
+    assertTrue(
+        await(
+            5.0,
+            container,
+            () -> container.getOutputSafetySnapshot().phase()
+                    == RobotOutputSafetySupervisor.Phase.ARMED
+                && ProcessOutputSafety.isOutputAuthorized()),
+        () -> container.getOutputSafetySnapshot().toString());
+  }
+
+  private static void assertOutputSafetyReadyDisabled(RobotContainer container)
+      throws InterruptedException {
+    assertTrue(
+        await(
+            5.0,
+            container,
+            () -> container.getOutputSafetySnapshot().phase()
+                == RobotOutputSafetySupervisor.Phase.READY_DISABLED),
+        () -> container.getOutputSafetySnapshot().toString());
   }
 
   private static void configureDisabledDriverStation() {

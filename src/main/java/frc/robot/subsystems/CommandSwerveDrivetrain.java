@@ -52,6 +52,7 @@ import frc.robot.utils.CtreDeviceEvidence.Metric;
 import frc.robot.utils.CtreDeviceEvidence.SignalObservation;
 import frc.robot.utils.CtreDeviceEvidence.Snapshot;
 import frc.robot.utils.CtreSignalProgressTracker;
+import frc.robot.utils.ProcessOutputSafety;
 import frc.robot.utils.SwerveDaqFreshnessTracker;
 import frc.robot.utils.SwerveStateFreshnessTracker;
 
@@ -80,6 +81,8 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     private final SafeNeutralRequest m_safeNeutralRequest = new SafeNeutralRequest();
     private final NeutralOut m_directDriveNeutral = new NeutralOut();
     private final NeutralOut m_directSteerNeutral = new NeutralOut();
+    // Lock order is application -> evidence. Evidence-only readers must never acquire application.
+    private final Object m_outputApplicationLock = new Object();
     private final Object m_outputEvidenceLock = new Object();
     private long m_outputEpoch;
     private long m_lastNeutralizedOutputEpoch = -1;
@@ -355,9 +358,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
                 resultConsumer.accept(ControlResult.NEUTRAL_REQUESTED);
                 return;
             }
-            resultConsumer.accept(applyNonNeutralRequest(requested)
-                ? ControlResult.REQUEST_SUBMITTED
-                : ControlResult.REQUEST_EXCEPTION);
+            resultConsumer.accept(applyNonNeutralRequest(requested));
         }).finallyDo(interrupted -> requestIdle());
     }
 
@@ -505,54 +506,56 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     }
 
     private void requestIdleChecked() {
-        double now = safePhoenixTimeSeconds();
-        long outputEpoch;
-        synchronized (m_outputEvidenceLock) {
-            outputEpoch = m_outputEpoch;
-            if (m_lastNeutralAttemptedOutputEpoch == outputEpoch
-                    && Double.isFinite(now)
-                    && Double.isFinite(m_nextNeutralAttemptAt)
-                    && now < m_nextNeutralAttemptAt) {
-                return;
-            }
-            // Reserve this attempt before any vendor call so concurrent fail-closed paths cannot
-            // multiply CAN traffic. A newer nonzero output epoch always bypasses the retry delay.
-            m_lastNeutralAttemptedOutputEpoch = outputEpoch;
-            m_nextNeutralAttemptAt = Double.isFinite(now)
-                ? now + kNeutralRetryPeriodSeconds : Double.NEGATIVE_INFINITY;
-        }
-        double baselineTimestamp = Double.NaN;
-        int baselineSuccessfulDaqs = -1;
-        Map<Integer, Map<String, Double>> outputProgressBaseline =
-            captureMotorOutputProgressBaselinesNoThrow();
-        try {
-            var baseline = getStateCopy();
-            baselineTimestamp = baseline.Timestamp;
-            baselineSuccessfulDaqs = baseline.SuccessfulDaqs;
-        } catch (RuntimeException exception) {
-            // Continue issuing direct neutral requests; the stop token will remain unconfirmed.
-        }
-        boolean commandSucceeded = true;
-        m_safeNeutralRequest.arm(outputEpoch);
-        try {
-            this.setControl(m_safeNeutralRequest);
-        } catch (RuntimeException exception) {
-            commandSucceeded = false;
-        }
-        commandSucceeded &= issueDirectNeutralNoThrow();
-        // SwerveDriveState.Timestamp uses the same Phoenix current-time epoch. Recording this only
-        // after every neutral API returns prevents an odometry update from the send window from
-        // being mistaken for post-neutral evidence.
-        double commandCompletedAt = safePhoenixTimeSeconds();
-
-        if (commandSucceeded) {
+        synchronized (m_outputApplicationLock) {
+            double now = safePhoenixTimeSeconds();
+            long outputEpoch;
             synchronized (m_outputEvidenceLock) {
-                if (m_outputEpoch == outputEpoch) {
-                    m_lastNeutralizedOutputEpoch = outputEpoch;
-                    m_lastNeutralCommandStateTimestamp = baselineTimestamp;
-                    m_lastNeutralCommandSuccessfulDaqs = baselineSuccessfulDaqs;
-                    m_lastNeutralCommandSentAt = commandCompletedAt;
-                    m_lastNeutralOutputProgressTimestamps = outputProgressBaseline;
+                outputEpoch = m_outputEpoch;
+                if (m_lastNeutralAttemptedOutputEpoch == outputEpoch
+                        && Double.isFinite(now)
+                        && Double.isFinite(m_nextNeutralAttemptAt)
+                        && now < m_nextNeutralAttemptAt) {
+                    return;
+                }
+                // Reserve this attempt before any vendor call so concurrent fail-closed paths cannot
+                // multiply CAN traffic. A newer nonzero output epoch always bypasses the retry delay.
+                m_lastNeutralAttemptedOutputEpoch = outputEpoch;
+                m_nextNeutralAttemptAt = Double.isFinite(now)
+                    ? now + kNeutralRetryPeriodSeconds : Double.NEGATIVE_INFINITY;
+            }
+            double baselineTimestamp = Double.NaN;
+            int baselineSuccessfulDaqs = -1;
+            Map<Integer, Map<String, Double>> outputProgressBaseline =
+                captureMotorOutputProgressBaselinesNoThrow();
+            try {
+                var baseline = getStateCopy();
+                baselineTimestamp = baseline.Timestamp;
+                baselineSuccessfulDaqs = baseline.SuccessfulDaqs;
+            } catch (RuntimeException exception) {
+                // Continue issuing direct neutral requests; the stop token will remain unconfirmed.
+            }
+            boolean commandSucceeded = true;
+            m_safeNeutralRequest.arm(outputEpoch);
+            try {
+                this.setControl(m_safeNeutralRequest);
+            } catch (RuntimeException exception) {
+                commandSucceeded = false;
+            }
+            commandSucceeded &= issueDirectNeutralNoThrow();
+            // SwerveDriveState.Timestamp uses the same Phoenix current-time epoch. Recording this only
+            // after every neutral API returns prevents an odometry update from the send window from
+            // being mistaken for post-neutral evidence.
+            double commandCompletedAt = safePhoenixTimeSeconds();
+
+            if (commandSucceeded) {
+                synchronized (m_outputEvidenceLock) {
+                    if (m_outputEpoch == outputEpoch) {
+                        m_lastNeutralizedOutputEpoch = outputEpoch;
+                        m_lastNeutralCommandStateTimestamp = baselineTimestamp;
+                        m_lastNeutralCommandSuccessfulDaqs = baselineSuccessfulDaqs;
+                        m_lastNeutralCommandSentAt = commandCompletedAt;
+                        m_lastNeutralOutputProgressTimestamps = outputProgressBaseline;
+                    }
                 }
             }
         }
@@ -582,17 +585,19 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
     }
 
     private void emergencyNeutralNoThrow() {
-        long outputEpoch;
-        synchronized (m_outputEvidenceLock) {
-            outputEpoch = m_outputEpoch;
+        synchronized (m_outputApplicationLock) {
+            long outputEpoch;
+            synchronized (m_outputEvidenceLock) {
+                outputEpoch = m_outputEpoch;
+            }
+            m_safeNeutralRequest.arm(outputEpoch);
+            try {
+                this.setControl(m_safeNeutralRequest);
+            } catch (RuntimeException exception) {
+                // Continue to the per-controller neutral commands below.
+            }
+            issueDirectNeutralNoThrow();
         }
-        m_safeNeutralRequest.arm(outputEpoch);
-        try {
-            this.setControl(m_safeNeutralRequest);
-        } catch (RuntimeException exception) {
-            // Continue to the per-controller neutral commands below.
-        }
-        issueDirectNeutralNoThrow();
     }
 
     private static double safePhoenixTimeSeconds() {
@@ -875,16 +880,12 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             m_fieldCentricDriveRequest.VelocityX = limitedX * maxSpeed;
             m_fieldCentricDriveRequest.VelocityY = limitedY * maxSpeed;
             m_fieldCentricDriveRequest.RotationalRate = limitedRot;
-            return applyNonNeutralRequest(m_fieldCentricDriveRequest)
-                ? ControlResult.REQUEST_SUBMITTED
-                : ControlResult.REQUEST_EXCEPTION;
+            return applyNonNeutralRequest(m_fieldCentricDriveRequest);
         } else {
             m_robotCentricDriveRequest.VelocityX = limitedX * maxSpeed;
             m_robotCentricDriveRequest.VelocityY = limitedY * maxSpeed;
             m_robotCentricDriveRequest.RotationalRate = limitedRot;
-            return applyNonNeutralRequest(m_robotCentricDriveRequest)
-                ? ControlResult.REQUEST_SUBMITTED
-                : ControlResult.REQUEST_EXCEPTION;
+            return applyNonNeutralRequest(m_robotCentricDriveRequest);
         }
     }
 
@@ -1512,23 +1513,39 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
         }
     }
 
-    private boolean applyNonNeutralRequest(SwerveRequest request) {
-        synchronized (m_outputEvidenceLock) {
-            m_outputEpoch++;
+    private ControlResult applyNonNeutralRequest(SwerveRequest request) {
+        boolean requestNeutral = false;
+        ControlResult rejectedResult = ControlResult.REQUEST_EXCEPTION;
+        synchronized (m_outputApplicationLock) {
+            try {
+                ProcessOutputSafety.AuthorizedCall<Boolean> authorizedCall =
+                    ProcessOutputSafety.callIfAuthorized(() -> {
+                        synchronized (m_outputEvidenceLock) {
+                            m_outputEpoch++;
+                        }
+                        this.setControl(request);
+                        return Boolean.TRUE;
+                    });
+                if (authorizedCall.authorized()) {
+                    return ControlResult.REQUEST_SUBMITTED;
+                }
+                rejectedResult = ControlResult.OUTPUT_AUTHORIZATION_REVOKED;
+                requestNeutral = true;
+            } catch (RuntimeException exception) {
+                requestNeutral = true;
+            }
         }
-        try {
-            this.setControl(request);
-            return true;
-        } catch (RuntimeException exception) {
+        if (requestNeutral) {
             requestIdle();
-            return false;
         }
+        return rejectedResult;
     }
 
     public enum ControlResult {
         REQUEST_SUBMITTED,
         NEUTRAL_REQUESTED,
         OUTPUT_DISABLED,
+        OUTPUT_AUTHORIZATION_REVOKED,
         MODULES_UNHEALTHY,
         INVALID_INPUT,
         REQUEST_EXCEPTION
@@ -1544,7 +1561,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             StatusSignal<?> signal,
             double maximumAgeSeconds) {}
 
-    /** Mutable main-thread probe; it only publishes immutable primitive snapshots. */
+    /** Synchronized mutable probe shared by the robot loop and independent stop watchdog. */
     private static final class DeviceProbe {
         private final int canId;
         private final String label;
@@ -1579,11 +1596,11 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             return diagnosticSignals.stream().anyMatch(binding -> binding.metric() == metric);
         }
 
-        Snapshot snapshot() {
+        synchronized Snapshot snapshot() {
             return snapshot;
         }
 
-        boolean observeIfDue(double now) {
+        synchronized boolean observeIfDue(double now) {
             if (now < nextProbeAt) {
                 return false;
             }
@@ -1625,7 +1642,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             return true;
         }
 
-        Snapshot captureDiagnosticNow(double now) {
+        synchronized Snapshot captureDiagnosticNow(double now) {
             List<SignalObservation> diagnostic = capture(diagnosticSignals);
             boolean diagnosticReady = diagnostic.isEmpty()
                 || CtreDeviceEvidence.allFresh(diagnostic);
@@ -1650,7 +1667,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             return snapshot;
         }
 
-        Snapshot captureOutputNow(double now) {
+        synchronized Snapshot captureOutputNow(double now) {
             List<SignalBinding> outputBindings = diagnosticSignals.stream()
                 .filter(binding -> isMotorOutputMetric(binding.metric()))
                 .toList();
@@ -1673,7 +1690,7 @@ public class CommandSwerveDrivetrain extends TunerSwerveDrivetrain implements Su
             return snapshot;
         }
 
-        void reset(String reason) {
+        synchronized void reset(String reason) {
             ready = false;
             nextProbeAt = Double.NEGATIVE_INFINITY;
             progressTracker.reset();

@@ -40,6 +40,8 @@ import frc.robot.utils.SparkRawCommandEchoSimulation;
 import frc.robot.utils.NeutralAfterEnableGate;
 import frc.robot.utils.OperatorActionEvidence;
 import frc.robot.utils.AsyncDiagnosticSink;
+import frc.robot.utils.RobotOutputSafetySupervisor;
+import frc.robot.utils.RobotOutputSafetySupervisor.StopSession;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.RunCommand;
 import edu.wpi.first.wpilibj2.command.button.CommandPS5Controller;
@@ -117,6 +119,7 @@ public class RobotContainer implements AutoCloseable {
 
   // Something?
   private final DriveBaseContainer m_DriveBaseContainer; 
+  private final RobotOutputSafetySupervisor m_outputSafetySupervisor;
 
   /**
    * The container for the robot. Contains subsystems, OI devices, and commands.
@@ -143,6 +146,8 @@ public class RobotContainer implements AutoCloseable {
 
     // Configure the button bindings (put this last)
     configureButtonBindings();
+    m_outputSafetySupervisor = new RobotOutputSafetySupervisor(
+        this::beginIndependentOutputStopSession);
   }
 
   /**
@@ -757,6 +762,26 @@ public class RobotContainer implements AutoCloseable {
     return SparkMAXContainer.getDeviceAvailabilitySummary();
   }
 
+  /** Renews the independent process-wide authorization immediately before scheduler execution. */
+  public void serviceOutputSafetyHeartbeat() {
+    m_outputSafetySupervisor.heartbeat();
+  }
+
+  /** Revokes nonzero output before requesting the independent global stop sequence. */
+  public void tripOutputSafety(String reason) {
+    m_outputSafetySupervisor.forceTrip(reason);
+  }
+
+  public RobotOutputSafetySupervisor.Snapshot getOutputSafetySnapshot() {
+    return m_outputSafetySupervisor.snapshot();
+  }
+
+  /** Disabled arm gates may only become valid after fresh global zero evidence. */
+  public boolean isOutputSafetyReadyForEnable() {
+    return m_outputSafetySupervisor.snapshot().phase()
+        == RobotOutputSafetySupervisor.Phase.READY_DISABLED;
+  }
+
   public void stopAll() {
     stopAllInternal(false);
   }
@@ -785,19 +810,81 @@ public class RobotContainer implements AutoCloseable {
     m_operatorActionEvidence.allStopped("ROBOT_OUTPUT_STOP_REQUESTED");
   }
 
+  /**
+   * Creates fresh SPARK and CTRE stop tokens for the scheduler-independent heartbeat watchdog.
+   * Every service call remains valid while the normal robot loop is stalled.
+   */
+  private StopSession beginIndependentOutputStopSession() {
+    stopAll();
+    int[] sparkIds = frc.robot.constants.ConfiguredCanHardware.sparkDeviceIds().stream()
+        .mapToInt(Integer::intValue)
+        .toArray();
+    SparkMAXContainer.OutputStopBatch sparkStop =
+        SparkMAXContainer.requestOutputStops(sparkIds);
+    CommandSwerveDrivetrain.SwerveStopToken swerveStop =
+        drivetrain.requestIdleWithToken();
+
+    return new StopSession() {
+      private boolean confirmed;
+      private String summary = "GLOBAL_STOP_EVIDENCE_PENDING";
+      private double nextEvidencePollAt = Double.NEGATIVE_INFINITY;
+
+      @Override
+      public void service() {
+        SparkMAXContainer.serviceAll();
+        if (RobotBase.isSimulation()) {
+          // In desktop simulation there is no physical controller loop to turn a zero setpoint
+          // into a fresh raw frame while robotPeriodic is intentionally stalled.
+          SparkRawCommandEchoSimulation.stepConfiguredControllers(false);
+        }
+        double now = Timer.getFPGATimestamp();
+        if (Double.isFinite(now) && now < nextEvidencePollAt) {
+          return;
+        }
+        nextEvidencePollAt = Double.isFinite(now) ? now + 0.02 : Double.NEGATIVE_INFINITY;
+        drivetrain.requestIdle();
+        drivetrain.retryIdleIfNeeded(swerveStop);
+        SparkMAXContainer.OutputStopSnapshot sparkEvidence = sparkStop.snapshot();
+        CommandSwerveDrivetrain.SwerveStopEvidence swerveEvidence =
+            drivetrain.getStopEvidence(
+                swerveStop,
+                HardwareTestConstants.MAX_STOPPED_SWERVE_SPEED_METERS_PER_SECOND);
+        confirmed = sparkEvidence.confirmed() && swerveEvidence.confirmed();
+        summary = "spark=" + sparkEvidence.summary() + " swerve=" + swerveEvidence.reason();
+      }
+
+      @Override
+      public boolean confirmed() {
+        return confirmed;
+      }
+
+      @Override
+      public String summary() {
+        return summary;
+      }
+    };
+  }
+
   /** Releases process-owned simulation/native resources after all outputs are requested neutral. */
   @Override
   public void close() {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
+    // Revoke before the first stop request so a concurrently executing command cannot issue a
+    // late nonzero request between stopAll() and supervisor teardown.
+    m_outputSafetySupervisor.forceTrip("CONTAINER_CLOSED");
     try {
       stopAll();
     } finally {
       try {
-        m_feeder.close();
+        m_outputSafetySupervisor.close();
       } finally {
-        m_DriveBaseContainer.close();
+        try {
+          m_feeder.close();
+        } finally {
+          m_DriveBaseContainer.close();
+        }
       }
     }
   }

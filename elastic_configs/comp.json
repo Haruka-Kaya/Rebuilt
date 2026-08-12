@@ -126,6 +126,19 @@
               "period": 0.06,
               "data_type": "string"
             }
+          },
+          {
+            "title": "Output Safety",
+            "x": 384.0,
+            "y": 384.0,
+            "width": 384.0,
+            "height": 256.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Runtime/Output Safety",
+              "period": 0.06,
+              "data_type": "string"
+            }
           }
         ]
       }
@@ -251,6 +264,19 @@
             "type": "Large Text Display",
             "properties": {
               "topic": "/SmartDashboard/Operator Actions/Current Reason",
+              "period": 0.06,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Output Safety",
+            "x": 384.0,
+            "y": 384.0,
+            "width": 384.0,
+            "height": 256.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Runtime/Output Safety",
               "period": 0.06,
               "data_type": "string"
             }
@@ -989,6 +1015,19 @@
             "properties": {
               "topic": "/SmartDashboard/Hardware/Device Evidence Summary",
               "period": 0.5,
+              "data_type": "string"
+            }
+          },
+          {
+            "title": "Output Safety",
+            "x": 0.0,
+            "y": 3328.0,
+            "width": 1152.0,
+            "height": 128.0,
+            "type": "Large Text Display",
+            "properties": {
+              "topic": "/SmartDashboard/Runtime/Output Safety",
+              "period": 0.06,
               "data_type": "string"
             }
           }

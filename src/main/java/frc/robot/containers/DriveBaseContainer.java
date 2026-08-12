@@ -318,6 +318,9 @@ public class DriveBaseContainer implements AutoCloseable {
             case OUTPUT_DISABLED -> {
                 actionEvidence.blocked(Action.DRIVE, "SWERVE_OUTPUT_DISABLED");
             }
+            case OUTPUT_AUTHORIZATION_REVOKED -> {
+                actionEvidence.blocked(Action.DRIVE, "ROBOT_OUTPUT_HEARTBEAT_EXPIRED");
+            }
             case MODULES_UNHEALTHY -> {
                 actionEvidence.blocked(Action.DRIVE, "DRIVETRAIN_MODULES_UNHEALTHY");
             }
@@ -343,6 +346,9 @@ public class DriveBaseContainer implements AutoCloseable {
             case NEUTRAL_REQUESTED -> actionEvidence.blocked(action, "NEUTRAL_REQUESTED");
             case OUTPUT_DISABLED -> {
                 actionEvidence.blocked(action, "SWERVE_OUTPUT_DISABLED");
+            }
+            case OUTPUT_AUTHORIZATION_REVOKED -> {
+                actionEvidence.blocked(action, "ROBOT_OUTPUT_HEARTBEAT_EXPIRED");
             }
             case MODULES_UNHEALTHY -> {
                 actionEvidence.blocked(action, "DRIVETRAIN_MODULES_UNHEALTHY");
@@ -405,7 +411,8 @@ public class DriveBaseContainer implements AutoCloseable {
     private static boolean requiresNeutralRearm(ControlResult result) {
         return switch (result) {
             case REQUEST_SUBMITTED, NEUTRAL_REQUESTED -> false;
-            case OUTPUT_DISABLED, MODULES_UNHEALTHY, INVALID_INPUT, REQUEST_EXCEPTION -> true;
+            case OUTPUT_DISABLED, OUTPUT_AUTHORIZATION_REVOKED, MODULES_UNHEALTHY,
+                    INVALID_INPUT, REQUEST_EXCEPTION -> true;
         };
     }
 

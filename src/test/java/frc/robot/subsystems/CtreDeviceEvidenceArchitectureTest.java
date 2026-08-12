@@ -33,6 +33,10 @@ class CtreDeviceEvidenceArchitectureTest {
     assertTrue(source.contains("steer.getStatorCurrent(false)"));
     assertTrue(source.contains("getAllTimestamps().getSystemTimestamp()"));
     assertTrue(source.contains("CtreSignalProgressTracker"));
+    assertTrue(source.contains("synchronized boolean observeIfDue(double now)"));
+    assertTrue(source.contains("synchronized Snapshot captureDiagnosticNow(double now)"));
+    assertTrue(source.contains("synchronized Snapshot captureOutputNow(double now)"));
+    assertTrue(source.contains("synchronized Snapshot snapshot()"));
     assertTrue(stopEvidence.contains("captureOutputNow"));
     assertTrue(stopEvidence.contains("postNeutralOutputReason"));
   }
@@ -58,10 +62,96 @@ class CtreDeviceEvidenceArchitectureTest {
     assertTrue(swerveStage.contains("postCommandEvidenceReady"));
   }
 
+  @Test
+  void swerveOutputApplicationSerializesAuthorizationAndNeutralRequests() throws IOException {
+    String source = Files.readString(SOURCE);
+    String requestIdleChecked = between(
+        source, "private void requestIdleChecked()", "private boolean issueDirectNeutralNoThrow()");
+    String emergencyNeutral = between(
+        source, "private void emergencyNeutralNoThrow()", "private static double safePhoenixTimeSeconds()");
+    String applyNonNeutral = between(
+        source, "private ControlResult applyNonNeutralRequest(", "public enum ControlResult");
+
+    assertTrue(source.contains("private final Object m_outputApplicationLock = new Object()"));
+    assertOrdered(
+        requestIdleChecked,
+        "synchronized (m_outputApplicationLock)",
+        "synchronized (m_outputEvidenceLock)",
+        "this.setControl(m_safeNeutralRequest)",
+        "issueDirectNeutralNoThrow()");
+    assertOrdered(
+        emergencyNeutral,
+        "synchronized (m_outputApplicationLock)",
+        "synchronized (m_outputEvidenceLock)",
+        "this.setControl(m_safeNeutralRequest)",
+        "issueDirectNeutralNoThrow()");
+    assertOrdered(
+        applyNonNeutral,
+        "synchronized (m_outputApplicationLock)",
+        "ProcessOutputSafety.callIfAuthorized",
+        "synchronized (m_outputEvidenceLock)",
+        "m_outputEpoch++",
+        "this.setControl(request)");
+    assertTrue(applyNonNeutral.contains("ControlResult.OUTPUT_AUTHORIZATION_REVOKED"));
+    int applicationLock = applyNonNeutral.indexOf("synchronized (m_outputApplicationLock)");
+    int applicationOpenBrace = applyNonNeutral.indexOf('{', applicationLock);
+    int applicationCloseBrace = matchingBrace(applyNonNeutral, applicationOpenBrace);
+    assertFalse(applyNonNeutral.substring(applicationOpenBrace, applicationCloseBrace)
+        .contains("requestIdle()"));
+    assertTrue(applyNonNeutral.indexOf("requestIdle()", applicationCloseBrace)
+        > applicationCloseBrace);
+
+    assertEvidenceLocksNeverAcquireOutputApplication(source);
+  }
+
   private static String between(String source, String start, String end) {
     int startIndex = source.indexOf(start);
     int endIndex = source.indexOf(end, startIndex + start.length());
     assertTrue(startIndex >= 0 && endIndex > startIndex);
     return source.substring(startIndex, endIndex);
+  }
+
+  private static void assertOrdered(String source, String... snippets) {
+    int previousIndex = -1;
+    for (String snippet : snippets) {
+      int index = source.indexOf(snippet);
+      assertTrue(index > previousIndex, () -> "Expected ordered snippet: " + snippet);
+      previousIndex = index;
+    }
+  }
+
+  private static void assertEvidenceLocksNeverAcquireOutputApplication(String source) {
+    String evidenceLock = "synchronized (m_outputEvidenceLock)";
+    int searchFrom = 0;
+    while (true) {
+      int lockIndex = source.indexOf(evidenceLock, searchFrom);
+      if (lockIndex < 0) {
+        return;
+      }
+      int openBrace = source.indexOf('{', lockIndex + evidenceLock.length());
+      assertTrue(openBrace >= 0);
+      int closeBrace = matchingBrace(source, openBrace);
+      String lockBody = source.substring(openBrace + 1, closeBrace);
+      assertFalse(lockBody.contains("m_outputApplicationLock"));
+      assertFalse(lockBody.contains("requestIdle("));
+      assertFalse(lockBody.contains("requestIdleChecked("));
+      assertFalse(lockBody.contains("emergencyNeutralNoThrow("));
+      assertFalse(lockBody.contains("applyNonNeutralRequest("));
+      assertFalse(lockBody.contains("issueDirectNeutralNoThrow("));
+      searchFrom = closeBrace + 1;
+    }
+  }
+
+  private static int matchingBrace(String source, int openBrace) {
+    int depth = 0;
+    for (int index = openBrace; index < source.length(); index++) {
+      char character = source.charAt(index);
+      if (character == '{') {
+        depth++;
+      } else if (character == '}' && --depth == 0) {
+        return index;
+      }
+    }
+    throw new AssertionError("Unmatched source brace");
   }
 }

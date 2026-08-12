@@ -2022,25 +2022,34 @@ public class SparkMAXContainer implements MotorContainer {
         } catch (RuntimeException ignored) {
           externallyAuthorized = false;
         }
+        boolean processOutputAuthorized = false;
         if (failure == null
             && dependenciesReady
             && baseReady
             && followerOutputAllowed
             && positionReferenceAllowed
             && externallyAuthorized) {
-          SparkVendorCall.Result result = SparkVendorCall.execute(
-              "setpoint", () -> sendSetpointTracked(value, controlType));
-          if (result.succeeded()) {
-            outputGate.nonzeroSucceeded();
-            outputEpoch++;
-            accepted = true;
-            lastRequestAccepted = true;
-            lastRequestReason = "REV_API_RETURNED_K_OK_NOT_MOTION_PROOF";
-          } else {
-            failure = result.failure();
-            lastRequestReason = "REV_API_SETPOINT_FAILURE: " + failure;
-            recordFailureLocked(now, failure, false);
-            leader = desiredFollower ? followerLeader : null;
+          // This is the final process-wide authorization boundary. Keep it inside both the
+          // cross-device output-order lock and this controller's state lock, immediately before
+          // the vendor API, so a stale robot loop cannot issue or refresh a nonzero setpoint.
+          ProcessOutputSafety.AuthorizedCall<SparkVendorCall.Result> authorizedCall =
+              ProcessOutputSafety.callIfAuthorized(() -> SparkVendorCall.execute(
+                  "setpoint", () -> sendSetpointTracked(value, controlType)));
+          processOutputAuthorized = authorizedCall.authorized();
+          if (processOutputAuthorized) {
+            SparkVendorCall.Result result = authorizedCall.value();
+            if (result.succeeded()) {
+              outputGate.nonzeroSucceeded();
+              outputEpoch++;
+              accepted = true;
+              lastRequestAccepted = true;
+              lastRequestReason = "REV_API_RETURNED_K_OK_NOT_MOTION_PROOF";
+            } else {
+              failure = result.failure();
+              lastRequestReason = "REV_API_SETPOINT_FAILURE: " + failure;
+              recordFailureLocked(now, failure, false);
+              leader = desiredFollower ? followerLeader : null;
+            }
           }
         } else if (!accepted) {
           if (failure != null) {
@@ -2058,6 +2067,19 @@ public class SparkMAXContainer implements MotorContainer {
           } else {
             lastRequestReason = "SETPOINT_REQUEST_REJECTED";
           }
+          if (outputGate.needsZeroCommand()) {
+            outputGate.requireZero(now, false);
+          }
+        }
+        if (!accepted
+            && failure == null
+            && dependenciesReady
+            && baseReady
+            && followerOutputAllowed
+            && positionReferenceAllowed
+            && externallyAuthorized
+            && !processOutputAuthorized) {
+          lastRequestReason = "PROCESS_OUTPUT_HEARTBEAT_EXPIRED";
           if (outputGate.needsZeroCommand()) {
             outputGate.requireZero(now, false);
           }

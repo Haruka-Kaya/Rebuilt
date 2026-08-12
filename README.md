@@ -7,6 +7,7 @@ The programmer knows what it is doing at all times. It knows this because it kno
 - Intake actuator、Shooter actuator、Turretの通常位置制御は、limit switchまたはabsolute encoderによるhomingが実装されるまで出力を拒否します。Climberの通常動作も方向・limit・homing確定まで拒否します。これら5台は自動Hardware Self-Testでは動かさず、別途armした手動診断だけが、referenceを発行せず、選択した1台を一方向3%・最大0.35秒だけ動かします。
 - PathPlanner autonomousは、wheel radius・module geometry・gearing・maximum speedをCAD/実測値へ統一するまでsafe-stopだけを返します。
 - Feeder ID 32は過去の実機ログで約44 A・約0 rpmだったため、詰まり・機構・電源枝を点検して制御下で再試験するまで、通常のfeed/rejectとHardware Self-Testのmotion testを遮断します。
+- すべてのSPARK/CTRE nonzero要求は、独立5 ms watchdogが監視する100 msのrobot-loop heartbeatがfreshな間だけ受理します。CommandSchedulerまたはrobot loopが停止した場合はprocess-wide authorizationを先に失効し、全SPARKとswerveのfresh zero evidenceが揃うまでscheduler外で停止を再試行します。同じEnabled sessionでは自動再始動せず、Disabledで停止確認後にだけ再armします。
 
 ## Dashboard tuning
 
@@ -38,11 +39,11 @@ Teleopへ入った直後、controllerの再接続後、または機構healthの�
 | Maintenance | L1 | turret auto-aim（controllerが無い場合Driver Triangle） |
 | Maintenance（Testのみ・fallbackなし） | Create + L1 / R1 | 選択済みmotorのnegative / positive 3%隔離診断pulse |
 
-Red/Blueの競技画面には直近操作の`Operator Action State`と`Operator Action Reason`を表示します。`ACTIVE`は機構ごとのsoftware APIが要求を受け付けたか、Swerveではnative control APIが例外なく戻ったことを示します。Swerve requestの内部受付、CAN frameの送信、物理的な動作の証明ではありません。`STOPPED`はoperator actionが終了して停止要求を発行した状態で、controller出力のzero確認を意味しません。`BLOCKED`は未reference、既知Feeder stall、入力競合、release待ち、CAN healthなど、その操作で実際に判定した理由を表示します。全10操作の状態、出力CAN、依存CANはDiagnostics / Setupの`Operator Action Evidence`で確認できます。
+Red/Blueの競技画面には直近操作の`Operator Action State`と`Operator Action Reason`、全出力gateとglobal stop evidenceの`Output Safety`を表示します。`ACTIVE`は機構ごとのsoftware APIが要求を受け付けたか、Swerveではnative control APIが例外なく戻ったことを示します。Swerve requestの内部受付、CAN frameの送信、物理的な動作の証明ではありません。`STOPPED`はoperator actionが終了して停止要求を発行した状態で、controller出力のzero確認を意味しません。`BLOCKED`は未reference、既知Feeder stall、入力競合、release待ち、CAN healthなど、その操作で実際に判定した理由を表示します。全10操作の状態、出力CAN、依存CANはDiagnostics / Setupの`Operator Action Evidence`で確認できます。
 
 Desktop simulationのSPARK modelは`RAW_COMMAND_ECHO_NO_PHYSICS_NO_REFERENCE`です。command到達、zero停止、fault時の拒否は検証しますが、機構の慣性・位置・電流・polarityを再現せず、homing/referenceや実機motion evidenceを生成しません。
 
-手動motor診断はDisabledでTest modeを選び、Diagnostics / SetupでID30/32/34/35/38/39とNegative/Positiveをそれぞれexact-one選択し、対象と方向についてPhysical ClearanceとBrushless Motor Typeを確認してからfresh Armを立てます。ID32だけは物理詰まり・電源枝の点検確認も必須です。その後Test Enableし、Maintenance controllerを一度全releaseしてからCreateと、snapshot済み方向に対応するL1またはR1だけを保持します。driver fallbackはありません。1回のArmで1 pulseだけ実行し、開始前は全SPARK、終了後は対象（Climberでは両側）のzero-output evidenceを確認します。ID32はCommandSchedulerから独立した0.35秒watchdogでもzeroを継続要求します。途中releaseでもcommandは停止確認までrequirementsを保持し、外部cancel時だけ`STOP_REQUESTED`までを事実どおり表示します。Hardware Self-Test Armとの同時armは両方拒否します。
+手動motor診断はDisabledでTest modeを選び、Diagnostics / SetupでID30/32/34/35/38/39とNegative/Positiveをそれぞれexact-one選択し、対象と方向についてPhysical ClearanceとBrushless Motor Typeを確認してからfresh Armを立てます。ID32だけは物理詰まり・電源枝の点検確認も必須です。その後Test Enableし、Maintenance controllerを一度全releaseしてからCreateと、snapshot済み方向に対応するL1またはR1だけを保持します。driver fallbackはありません。1回のArmで1 pulseだけ実行し、開始前は全SPARK、終了後は対象（Climberでは両側）のzero-output evidenceを確認します。全出力は共通robot-loop heartbeatでscheduler停止時にもzeroへ移行し、ID32はこれに加えて独立した0.35秒・8 A watchdogでもzeroを継続要求します。途中releaseでもcommandは停止確認までrequirementsを保持し、外部cancel時だけ`STOP_REQUESTED`までを事実どおり表示します。Hardware Self-Test Armとの同時armは両方拒否します。
 
 Hardware Self-TestはDisabledでTest modeを選んだ状態でArmし、その有効時間内にTest Enableします。
 

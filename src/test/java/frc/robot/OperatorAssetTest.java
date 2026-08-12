@@ -54,6 +54,9 @@ class OperatorAssetTest {
           "/SmartDashboard/Runtime/Fault",
           new WidgetExpectation("Large Text Display", "string")),
       Map.entry(
+          "/SmartDashboard/Runtime/Output Safety",
+          new WidgetExpectation("Large Text Display", "string")),
+      Map.entry(
           "/SmartDashboard/Hardware Self-Test/Armed",
           new WidgetExpectation("Toggle Button", "boolean")),
       Map.entry(
@@ -255,6 +258,11 @@ class OperatorAssetTest {
             new WidgetExpectation("Large Text Display", "string")),
         () -> assertTabTopicMatches(
             root,
+            "Red Alliance",
+            "/SmartDashboard/Runtime/Output Safety",
+            new WidgetExpectation("Large Text Display", "string")),
+        () -> assertTabTopicMatches(
+            root,
             "Blue Alliance",
             "/SmartDashboard/Operator Actions/Current State",
             new WidgetExpectation("Large Text Display", "string")),
@@ -262,6 +270,11 @@ class OperatorAssetTest {
             root,
             "Blue Alliance",
             "/SmartDashboard/Operator Actions/Current Reason",
+            new WidgetExpectation("Large Text Display", "string")),
+        () -> assertTabTopicMatches(
+            root,
+            "Blue Alliance",
+            "/SmartDashboard/Runtime/Output Safety",
             new WidgetExpectation("Large Text Display", "string")));
   }
 

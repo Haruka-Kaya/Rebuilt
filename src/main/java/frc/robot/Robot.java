@@ -105,6 +105,11 @@ public class Robot extends TimedRobot {
       SparkMAXContainer.serviceAll();
       m_robotContainer.updateTeleopSafetyState();
 
+      // Renew immediately before scheduler execution. If this call is not repeated within the
+      // bounded window, an independent Notifier revokes all later nonzero vendor calls and keeps
+      // retrying a globally confirmed stop without re-entering CommandScheduler.
+      m_robotContainer.serviceOutputSafetyHeartbeat();
+
       // Runs the Scheduler.  This is responsible for polling buttons, adding newly-scheduled
       // commands, running already-scheduled commands, removing finished or interrupted commands,
       // and running subsystem periodic() methods.  This must be called from the robot's periodic
@@ -340,6 +345,7 @@ public class Robot extends TimedRobot {
       double now = Timer.getFPGATimestamp();
       boolean armAccepted = !conflictingArms
           && !DriverStation.isFMSAttached()
+          && m_robotContainer.isOutputSafetyReadyForEnable()
           && selfTestRequested
           && m_selfTestArmGate.consume(now);
       Target diagnosticTarget = m_unhomedDiagnosticTargetSnapshot;
@@ -347,6 +353,7 @@ public class Robot extends TimedRobot {
       double diagnosticExpiresAt = m_unhomedDiagnosticSnapshotExpiresAt;
       boolean unhomedDiagnosticAccepted = !conflictingArms
           && !DriverStation.isFMSAttached()
+          && m_robotContainer.isOutputSafetyReadyForEnable()
           && unhomedDiagnosticRequested
           && diagnosticTarget != null
           && diagnosticDirection != null
@@ -448,7 +455,8 @@ public class Robot extends TimedRobot {
     boolean conflictingArms = selfTestRequested && unhomedRequested;
     boolean disabledTestWithoutFms = DriverStation.isDisabled()
         && DriverStation.isTest()
-        && !DriverStation.isFMSAttached();
+        && !DriverStation.isFMSAttached()
+        && m_robotContainer.isOutputSafetyReadyForEnable();
     double now = Timer.getFPGATimestamp();
 
     boolean selfTestArmValid;
@@ -580,6 +588,7 @@ public class Robot extends TimedRobot {
 
   private void latchRuntimeFault(RuntimeException exception) {
     RuntimeSafetyLatch.Snapshot fault = m_runtimeSafetyLatch.latch(exception);
+    m_robotContainer.tripOutputSafety("RUNTIME_FAULT_" + fault.reason());
     enforceLatchedStop();
     try {
       SmartDashboard.putBoolean("Runtime/Scheduler Healthy", false);
@@ -591,6 +600,7 @@ public class Robot extends TimedRobot {
   }
 
   private void enforceLatchedStop() {
+    m_robotContainer.tripOutputSafety("RUNTIME_FAULT_LATCHED");
     m_robotContainer.stopAll();
     try {
       // SPARK stops are queued so the dedicated worker can preserve zero/nonzero ordering.
