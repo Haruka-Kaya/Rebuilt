@@ -102,6 +102,8 @@ public final class HardwareSelfTestCommand {
                 allCanResults.clear();
                 for (String target : RESULT_TARGETS) {
                     publishResult(results, target, MotionResult.NOT_RUN);
+                    SmartDashboard.putString(
+                        "Hardware Self-Test/" + target + "/Reason", "NOT_RUN");
                 }
                 for (String stopResultName : STOP_RESULT_NAMES) {
                     SmartDashboard.putString(stopResultKey(stopResultName), "NOT_RUN");
@@ -460,6 +462,7 @@ public final class HardwareSelfTestCommand {
         boolean[] motionObserved = {false};
         boolean[] simulationCurrentIgnored = {false};
         MotionResult[] terminalResult = {null};
+        String[] assessmentReason = {"NOT_RUN"};
         CommandSwerveDrivetrain.SwerveDiagnosticEvidence[] latestEvidence = {null};
         CommandSwerveDrivetrain.SwerveDiagnosticBaseline[] baseline = {null};
         CommandSwerveDrivetrain.SwerveDiagnosticToken[] token = {null};
@@ -471,6 +474,9 @@ public final class HardwareSelfTestCommand {
                 motionObserved[0] = false;
                 simulationCurrentIgnored[0] = false;
                 terminalResult[0] = null;
+                assessmentReason[0] = eligible[0]
+                    ? "WAITING_FOR_POST_COMMAND_EVIDENCE"
+                    : "INITIAL_DEVICE_READINESS_FAILED";
                 baseline[0] = drivetrain.captureSwerveDiagnosticBaseline();
                 token[0] = null;
                 latestEvidence[0] = null;
@@ -479,13 +485,20 @@ public final class HardwareSelfTestCommand {
             Commands.deadline(
                 Commands.waitSeconds(durationSeconds),
                 Commands.run(() -> {
+                    boolean outputsAllowed = testOutputsAllowed();
+                    boolean devicesConnected = drivetrain.areAllDevicesConnected();
                     if (!eligible[0]
                             || connectionLost[0]
                             || terminalResult[0] != null
-                            || !testOutputsAllowed()
-                            || !drivetrain.areAllDevicesConnected()) {
+                            || !outputsAllowed
+                            || !devicesConnected) {
+                        if (eligible[0] && !outputsAllowed) {
+                            assessmentReason[0] = "TEST_OUTPUT_AUTHORIZATION_LOST_DURING_STAGE";
+                        } else if (eligible[0] && !devicesConnected) {
+                            assessmentReason[0] = "DEVICE_CONNECTIVITY_LOST_DURING_STAGE";
+                        }
                         connectionLost[0] |= eligible[0]
-                            && (!testOutputsAllowed() || !drivetrain.areAllDevicesConnected());
+                            && (!outputsAllowed || !devicesConnected);
                         drivetrain.requestIdle();
                         return;
                     }
@@ -495,6 +508,7 @@ public final class HardwareSelfTestCommand {
                             baseline[0], submission);
                         if (submission != CommandSwerveDrivetrain.ControlResult.REQUEST_SUBMITTED) {
                             connectionLost[0] = true;
+                            assessmentReason[0] = "CONTROL_SUBMISSION_" + submission;
                             drivetrain.requestIdle();
                             log(name + "_ABORT", "control submission=" + submission);
                             return;
@@ -505,12 +519,16 @@ public final class HardwareSelfTestCommand {
                     if (!latestEvidence[0].postCommandEvidenceReady()) {
                         if (latestEvidence[0].postCommandEvidenceTimedOut()) {
                             connectionLost[0] = true;
+                            assessmentReason[0] = "POST_COMMAND_EVIDENCE_TIMEOUT";
                             drivetrain.requestIdle();
                         }
                         return;
                     }
                     if (!latestEvidence[0].ready() || !latestEvidence[0].telemetryFinite()) {
                         connectionLost[0] = true;
+                        assessmentReason[0] = latestEvidence[0].ready()
+                            ? "POST_COMMAND_TELEMETRY_NONFINITE"
+                            : "POST_COMMAND_EVIDENCE_NOT_READY";
                         drivetrain.requestIdle();
                         return;
                     }
@@ -527,6 +545,7 @@ public final class HardwareSelfTestCommand {
                             }
                         } else {
                             terminalResult[0] = MotionResult.STALL_SUSPECTED;
+                            assessmentReason[0] = "LIVE_HARDWARE_OVERCURRENT";
                             drivetrain.requestIdle();
                             log(name + "_ABORT", "swerve overcurrent " + latestEvidence[0]);
                             return;
@@ -536,6 +555,7 @@ public final class HardwareSelfTestCommand {
                             && latestEvidence[0].motionObserved()
                             && !latestEvidence[0].steeringAligned()) {
                         terminalResult[0] = MotionResult.FAIL_DIRECTION_MISMATCH;
+                        assessmentReason[0] = "SWERVE_VECTOR_DIRECTION_MISMATCH";
                         drivetrain.requestIdle();
                         log(name + "_ABORT", "swerve vector deviated " + latestEvidence[0]);
                         return;
@@ -554,20 +574,33 @@ public final class HardwareSelfTestCommand {
                     result = terminalResult[0];
                 } else if (!eligible[0] || connectionLost[0] || !latestEvidence[0].ready()) {
                     result = MotionResult.FAIL_NOT_READY;
+                    if (connectionLost[0]
+                            && assessmentReason[0].equals("DEVICE_CONNECTIVITY_LOST_DURING_STAGE")
+                            && drivetrain.areAllDevicesConnected()
+                            && latestEvidence[0].ready()) {
+                        assessmentReason[0] =
+                            "DEVICE_CONNECTIVITY_LOST_DURING_STAGE_RECOVERED_BEFORE_FINAL_ASSESSMENT";
+                    }
                 } else if (latestEvidence[0].motionObserved()
                         && !latestEvidence[0].steeringAligned()) {
                     result = MotionResult.FAIL_DIRECTION_MISMATCH;
+                    assessmentReason[0] = "FINAL_SWERVE_VECTOR_DIRECTION_MISMATCH";
                 } else if (motionObserved[0]
                         && latestEvidence[0].motionObserved()
                         && latestEvidence[0].steeringAligned()) {
                     result = MotionResult.PASS_OBSERVED;
+                    assessmentReason[0] = "POST_COMMAND_MOTION_AND_DIRECTION_OBSERVED";
                 } else {
                     result = MotionResult.INCONCLUSIVE_NO_MOTION;
+                    assessmentReason[0] = "POST_COMMAND_OUTPUT_EVIDENCE_WITHOUT_MOTION";
                 }
                 publishResult(report, name, result);
+                SmartDashboard.putString(
+                    "Hardware Self-Test/" + name + "/Reason", assessmentReason[0]);
                 log(
                     name + "_RESULT",
-                    result + " evidence=" + latestEvidence[0]
+                    result + " reason=" + assessmentReason[0]
+                        + " evidence=" + latestEvidence[0]
                         + " telemetry=" + drivetrain.getMotionDiagnosticSummary());
             }),
             swerveStopBarrier(name, drivetrain, runState));
