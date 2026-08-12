@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 import com.revrobotics.PersistMode;
 import com.revrobotics.REVLibError;
@@ -27,6 +28,7 @@ import com.revrobotics.spark.config.SparkBaseConfig.IdleMode;
 import com.revrobotics.spark.config.SparkMaxConfig;
 
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.RobotBase;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import frc.robot.diagnostics.HardwareDiagnosticEvaluator.Snapshot;
@@ -48,6 +50,9 @@ public class SparkMAXContainer implements MotorContainer {
   private static final double FOLLOWER_TRANSITION_TIMEOUT_SECONDS = 0.50;
   private static final double FOLLOWER_DIAGNOSTIC_STOPPED_RPM = 2.0;
   private static final double MAX_DIAGNOSTIC_DUTY_CYCLE = 0.10;
+  // REV's desktop backend reports firmware 0/kOk. Keep real firmware validation unchanged while
+  // marking this one simulation-only value so the normal config/zero/fresh-sample gates can run.
+  private static final int SIMULATION_FIRMWARE_MARKER = 0x7F260003;
   private static final SparkOutputStopEvaluator.Limits OUTPUT_STOP_LIMITS =
       new SparkOutputStopEvaluator.Limits(
           STATUS_FRESHNESS_SECONDS, 0.01, FOLLOWER_DIAGNOSTIC_STOPPED_RPM);
@@ -83,6 +88,7 @@ public class SparkMAXContainer implements MotorContainer {
   }
 
   private final Object stateLock = new Object();
+  private final Object simulationIoLock = new Object();
   private final SparkMax motor;
   private final RelativeEncoder encoder;
   private final SparkClosedLoopController closedLoopController;
@@ -95,6 +101,7 @@ public class SparkMAXContainer implements MotorContainer {
   private final AtomicLong maximumSetpointCallNanos = new AtomicLong();
   private final List<SparkMAXContainer> requiredFollowers = new ArrayList<>();
   private final int port;
+  private final SparkSimulationHandle simulationHandle;
 
   private long desiredRevision;
   private boolean desiredFollower;
@@ -148,6 +155,9 @@ public class SparkMAXContainer implements MotorContainer {
     motor.setPeriodicFrameTimeout(0);
     encoder = isBrushless ? motor.getEncoder() : null;
     closedLoopController = motor.getClosedLoopController();
+    simulationHandle = RobotBase.isSimulation()
+        ? new SparkSimulationHandle(motor, simulationIoLock)
+        : null;
 
     desiredConfig.disableFollowerMode().idleMode(IdleMode.kCoast).inverted(false);
     desiredConfig.signals
@@ -325,7 +335,7 @@ public class SparkMAXContainer implements MotorContainer {
       resumeDeferredForLeader = resumeAfterZero && !leaderStoppedForResume;
       if (resumeAfterZero && leaderStoppedForResume) {
         try {
-          resumeResult = device.motor.resumeFollowerMode();
+          resumeResult = device.callVendorIo(device.motor::resumeFollowerMode);
           if (resumeResult == null) {
             resumeResult = REVLibError.kError;
             resumeException = "follower resume returned null";
@@ -490,18 +500,24 @@ public class SparkMAXContainer implements MotorContainer {
     try {
       PeriodicStatus1 preConfigurationStatus = null;
       if (work.action() == ServiceAction.PROBE_AND_APPLY_RESET) {
-        if (device.motor.getPeriodicStatus0() == null) {
+        PreConfigurationProbe probe = device.readPreConfigurationProbe();
+        if (probe.status0() == null) {
           device.configurationFailed("status0 timeout");
           return;
         }
-        preConfigurationStatus = device.motor.getPeriodicStatus1();
+        preConfigurationStatus = probe.status1();
         if (preConfigurationStatus == null) {
           device.configurationFailed("status1 timeout");
           return;
         }
+        String preConfigurationFault = fatalFaultSummary(preConfigurationStatus);
+        if (preConfigurationFault != null) {
+          device.configurationFailed("pre-config " + preConfigurationFault);
+          return;
+        }
 
-        int version = device.motor.getFirmwareVersion();
-        REVLibError firmwareError = device.motor.getLastError();
+        int version = probe.firmwareVersion();
+        REVLibError firmwareError = probe.lastError();
         if (version == 0 || firmwareError != REVLibError.kOk) {
           device.configurationFailed("firmware " + firmwareError);
           return;
@@ -515,7 +531,7 @@ public class SparkMAXContainer implements MotorContainer {
             device.configurationCancelled();
             return;
           }
-          REVLibError clearError = device.motor.clearFaults();
+          REVLibError clearError = device.callVendorIo(device.motor::clearFaults);
           if (clearError != REVLibError.kOk) {
             device.configurationFailed("clear faults " + clearError);
             return;
@@ -537,7 +553,8 @@ public class SparkMAXContainer implements MotorContainer {
       if (work.persist()) {
         device.persistenceAttempted();
       }
-      REVLibError configureError = device.motor.configure(work.config(), resetMode, persistMode);
+      REVLibError configureError = device.callVendorIo(
+          () -> device.motor.configure(work.config(), resetMode, persistMode));
       if (configureError != REVLibError.kOk) {
         device.configurationFailed("configure " + configureError);
         return;
@@ -552,8 +569,9 @@ public class SparkMAXContainer implements MotorContainer {
         return;
       }
 
-      boolean actualFollower = device.motor.isFollower();
-      REVLibError followerError = device.motor.getLastError();
+      FollowerVerification followerVerification = device.readFollowerVerification();
+      boolean actualFollower = followerVerification.actualFollower();
+      REVLibError followerError = followerVerification.lastError();
       if (followerError != REVLibError.kOk || actualFollower != work.expectedFollower()) {
         device.configurationFailed(
             "follower verify " + followerError + " actual=" + actualFollower);
@@ -608,19 +626,18 @@ public class SparkMAXContainer implements MotorContainer {
   private static void runSampleWork(SampleWork work) {
     SparkMAXContainer device = work.device();
     try {
-      PeriodicStatus0 status0 = device.motor.getPeriodicStatus0();
+      SampleStatuses statuses = device.readPeriodicStatuses();
+      PeriodicStatus0 status0 = statuses.status0();
       if (status0 == null) {
         device.sampleFailed("periodic status 0 timeout");
         return;
       }
-      PeriodicStatus1 status1 = device.motor.getPeriodicStatus1();
+      PeriodicStatus1 status1 = statuses.status1();
       if (status1 == null) {
         device.sampleFailed("periodic status 1 timeout");
         return;
       }
-      PeriodicStatus2 status2 = device.encoder == null
-          ? null
-          : device.motor.getPeriodicStatus2();
+      PeriodicStatus2 status2 = statuses.status2();
       if (device.encoder != null && status2 == null) {
         device.sampleFailed("periodic status 2 timeout");
         return;
@@ -628,6 +645,51 @@ public class SparkMAXContainer implements MotorContainer {
       device.sampleSucceeded(status0, status1, status2, work.outputEpoch());
     } catch (Exception exception) {
       device.sampleFailed(exception.getClass().getSimpleName() + ": " + exception.getMessage());
+    }
+  }
+
+  private SampleStatuses readPeriodicStatuses() {
+    if (simulationHandle == null) {
+      return readPeriodicStatusesUnlocked();
+    }
+    synchronized (simulationIoLock) {
+      return readPeriodicStatusesUnlocked();
+    }
+  }
+
+  private SampleStatuses readPeriodicStatusesUnlocked() {
+    return new SampleStatuses(
+        motor.getPeriodicStatus0(),
+        motor.getPeriodicStatus1(),
+        encoder == null ? null : motor.getPeriodicStatus2());
+  }
+
+  private PreConfigurationProbe readPreConfigurationProbe() {
+    return callVendorIo(() -> {
+      PeriodicStatus0 status0 = motor.getPeriodicStatus0();
+      PeriodicStatus1 status1 = motor.getPeriodicStatus1();
+      int reportedFirmwareVersion = motor.getFirmwareVersion();
+      REVLibError firmwareError = motor.getLastError();
+      int effectiveFirmwareVersion = simulationHandle != null
+              && reportedFirmwareVersion == 0
+              && firmwareError == REVLibError.kOk
+          ? SIMULATION_FIRMWARE_MARKER
+          : reportedFirmwareVersion;
+      return new PreConfigurationProbe(
+          status0, status1, effectiveFirmwareVersion, firmwareError);
+    });
+  }
+
+  private FollowerVerification readFollowerVerification() {
+    return callVendorIo(() -> new FollowerVerification(motor.isFollower(), motor.getLastError()));
+  }
+
+  private <T> T callVendorIo(Supplier<T> call) {
+    if (simulationHandle == null) {
+      return call.get();
+    }
+    synchronized (simulationIoLock) {
+      return call.get();
     }
   }
 
@@ -1260,6 +1322,56 @@ public class SparkMAXContainer implements MotorContainer {
     return Optional.empty();
   }
 
+  /** Returns the simulation façade for exactly one registered CAN ID, never on the real robot. */
+  public static Optional<SparkSimulationHandle> getSimulationHandleForId(int canId) {
+    if (!RobotBase.isSimulation()) {
+      return Optional.empty();
+    }
+    SparkSimulationHandle found = null;
+    for (SparkMAXContainer device : DEVICES) {
+      if (device.port == canId && device.simulationHandle != null) {
+        if (found != null) {
+          throw new IllegalStateException("duplicate simulated SPARK CAN ID " + canId);
+        }
+        found = device.simulationHandle;
+      }
+    }
+    return Optional.ofNullable(found);
+  }
+
+  /** Test teardown for the process-static simulation registry. Never available on the robot. */
+  static boolean cleanupSimulationDevicesForTesting() {
+    if (!RobotBase.isSimulation() || !IO_WORKER.isIdle()) {
+      return false;
+    }
+    synchronized (OUTPUT_ORDER_LOCK) {
+      if (!IO_WORKER.isIdle()) {
+        return false;
+      }
+      for (SparkMAXContainer device : DEVICES) {
+        synchronized (device.stateLock) {
+          if (device.sampleInFlight
+              || device.zeroInFlight
+              || device.recoveryState.isOperationInFlight()) {
+            return false;
+          }
+        }
+      }
+      for (SparkMAXContainer device : DEVICES) {
+        synchronized (device.simulationIoLock) {
+          device.motor.close();
+        }
+      }
+      DEVICES.clear();
+      sampleCursor = 0;
+      zeroCursor = 0;
+      disabledSince = Double.NaN;
+      FOLLOWER_TOPOLOGY_FROZEN.set(false);
+      RECOVERY_COORDINATOR.resetForTesting();
+      return true;
+    }
+  }
+
   private Snapshot getControllerTelemetrySnapshot() {
     double now = Timer.getFPGATimestamp();
     synchronized (stateLock) {
@@ -1749,7 +1861,7 @@ public class SparkMAXContainer implements MotorContainer {
           // ordered resume path.
           followerDiagnosticMode = FollowerDiagnosticMode.RESUME_ZERO_PENDING;
           SparkVendorCall.Result pauseResult = SparkVendorCall.execute(
-              "follower pause", motor::pauseFollowerModeAsync);
+              "follower pause", () -> callVendorIo(motor::pauseFollowerModeAsync));
           if (pauseResult.succeeded()) {
             followerDiagnosticMode = FollowerDiagnosticMode.PAUSE_PENDING;
             followerTransitionDeadline = now + FOLLOWER_TRANSITION_TIMEOUT_SECONDS;
@@ -1986,7 +2098,12 @@ public class SparkMAXContainer implements MotorContainer {
   private REVLibError sendSetpointTracked(double value, ControlType controlType) {
     long startedAt = System.nanoTime();
     try {
-      return closedLoopController.setSetpoint(value, controlType);
+      if (simulationHandle == null) {
+        return closedLoopController.setSetpoint(value, controlType);
+      }
+      synchronized (simulationIoLock) {
+        return closedLoopController.setSetpoint(value, controlType);
+      }
     } finally {
       long elapsed = Math.max(0L, System.nanoTime() - startedAt);
       lastSetpointCallNanos.set(elapsed);
@@ -2003,6 +2120,17 @@ public class SparkMAXContainer implements MotorContainer {
       boolean persist) {}
 
   private record SampleWork(SparkMAXContainer device, long outputEpoch) {}
+
+  private record SampleStatuses(
+      PeriodicStatus0 status0, PeriodicStatus1 status1, PeriodicStatus2 status2) {}
+
+  private record PreConfigurationProbe(
+      PeriodicStatus0 status0,
+      PeriodicStatus1 status1,
+      int firmwareVersion,
+      REVLibError lastError) {}
+
+  private record FollowerVerification(boolean actualFollower, REVLibError lastError) {}
 
   private record ZeroWork(SparkMAXContainer device, long generation) {}
 

@@ -33,4 +33,9 @@ final class SparkRecoveryCoordinator {
     }
     return OptionalInt.empty();
   }
+
+  void resetForTesting() {
+    cursor = 0;
+    nextConfigPermitAt = 0.0;
+  }
 }
