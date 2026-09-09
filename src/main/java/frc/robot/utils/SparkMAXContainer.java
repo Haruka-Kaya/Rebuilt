@@ -8,6 +8,7 @@ import com.revrobotics.spark.config.SparkMaxConfig;
 import com.revrobotics.spark.config.SparkBaseConfig.IdleMode;
 import com.revrobotics.spark.SparkMax;
 import com.revrobotics.PersistMode;
+import com.revrobotics.REVLibError;
 import com.revrobotics.RelativeEncoder;
 import com.revrobotics.ResetMode;
 
@@ -144,7 +145,8 @@ public class SparkMAXContainer implements MotorContainer {
    * deadband (0.5 rotations)
    * 
    * @param pos desired postion
-   * @return true when within deadband
+   * @return true only when the request succeeds and the measured position is
+   *         within deadband; false on failure
    */
   public boolean goToPostion(double pos) {
     return this.goToPostion(pos, 0.5);
@@ -155,18 +157,31 @@ public class SparkMAXContainer implements MotorContainer {
    * deadband
    * 
    * @param pos      desired postion
-   * @param deadband the deadband to be within, deadband should not be 0 but can
-   *                 be as small as 1
-   * @return true when within deadband
+   * @param deadband finite, positive position tolerance in encoder units
+   * @return true only when the request succeeds and the measured position is
+   *         within deadband (including the boundary); false on failure
    */
   public boolean goToPostion(double pos, double deadband) {
     try {
+      if (!Double.isFinite(pos) || !Double.isFinite(deadband) || deadband <= 0) {
+        throw new IllegalArgumentException("Position must be finite and deadband must be finite and positive");
+      }
+      if (encoder == null) {
+        throw new IllegalStateException("Position control requires an encoder");
+      }
       var encoderPos = encoder.getPosition();
-      motor.getClosedLoopController().setSetpoint(pos, ControlType.kPosition);
-      return encoderPos > pos - deadband || encoderPos < encoderPos + deadband;
+      var readStatus = motor.getLastError();
+      if (readStatus != REVLibError.kOk || !Double.isFinite(encoderPos)) {
+        throw new IllegalStateException("Invalid encoder position: " + encoderPos + " (" + readStatus + ")");
+      }
+      var commandStatus = motor.getClosedLoopController().setSetpoint(pos, ControlType.kPosition);
+      if (commandStatus != REVLibError.kOk) {
+        throw new IllegalStateException("Position request failed: " + commandStatus);
+      }
+      return Math.abs(encoderPos - pos) <= deadband;
     } catch (Exception e) {
-      DriverStation.reportError(e.getMessage(), false);
-      return true;
+      DriverStation.reportError("SPARK MAX " + port + " position control failed: " + e, false);
+      return false;
     }
   }
 
