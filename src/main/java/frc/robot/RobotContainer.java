@@ -25,7 +25,7 @@ public class RobotContainer {
     private final double MaxSpeed = TunerConstants.kSpeedAt12Volts.in(MetersPerSecond);
     private final double MaxAngularRate = RotationsPerSecond.of(0.75).in(RadiansPerSecond);
     private final DriveSettings driveSettings = new DriveSettings(MaxSpeed, MaxAngularRate);
-    private final SwerveRequest.Idle idle = new SwerveRequest.Idle();
+    private final NeutralSwerveRequest neutral = new NeutralSwerveRequest();
 
     private boolean invertControllerLeftX = true;
     private boolean invertControllerLeftY = false;
@@ -138,10 +138,10 @@ public class RobotContainer {
             )
         );
 
-        // Idle while the robot is disabled. This ensures the configured
-        // neutral mode is applied to the drive motors while disabled.
+        // Explicitly replace drive and steer outputs with the configured
+        // neutral mode; Phoenix Idle does not change the module state.
         RobotModeTriggers.disabled().whileTrue(
-            drivetrain.applyRequest(() -> idle).ignoringDisable(true)
+            drivetrain.applyRequest(() -> neutral).ignoringDisable(true)
         );
 
         joystick.a().and(RobotModeTriggers.teleop()).whileTrue(drivetrain.applyRequest(() -> brake));
@@ -174,7 +174,7 @@ public class RobotContainer {
 
     private SwerveRequest teleopRequest(int invertLeftX, int invertLeftY) {
         if (!DriverStation.isTeleopEnabled()) {
-            return idle;
+            return neutral;
         }
         double speed = driveSettings.maxSpeedMps();
         double angularRate = driveSettings.maxAngularRateRadPerSec();
@@ -196,9 +196,9 @@ public class RobotContainer {
             return Commands.sequence(
                 drivetrain.runOnce(() -> drivetrain.seedFieldCentric(Rotation2d.kZero)),
                 drivetrain.applyRequest(() -> autoDrive).withTimeout(5.0),
-                drivetrain.applyRequest(() -> idle)
+                drivetrain.applyRequest(() -> neutral)
             );
         }, java.util.Set.of(drivetrain))
-            .finallyDo(() -> drivetrain.setControl(idle));
+            .finallyDo(() -> drivetrain.setControl(neutral));
     }
 }

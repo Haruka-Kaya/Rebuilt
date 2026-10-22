@@ -6,6 +6,7 @@ import java.lang.reflect.Field;
 import java.util.Arrays;
 
 import com.ctre.phoenix6.swerve.SwerveRequest;
+import com.ctre.phoenix6.signals.ControlModeValue;
 import edu.wpi.first.hal.HAL;
 import edu.wpi.first.wpilibj.Notifier;
 import edu.wpi.first.wpilibj.simulation.DriverStationSim;
@@ -73,11 +74,30 @@ class DriveControlTest {
         return (SwerveRequest.FieldCentric) f.get(robot);
     }
 
-    static void assertIdleRequest() throws Exception {
-        // Idleは最後のModuleTargetsを保持するため、実際の制御requestを確認する。
-        Field f = com.ctre.phoenix6.swerve.SwerveDrivetrain.class.getDeclaredField("m_swerveRequest");
-        f.setAccessible(true);
-        assertInstanceOf(SwerveRequest.Idle.class, f.get(robot.drivetrain));
+    static void assertNeutralOutputs() throws Exception {
+        // Allow the odometry thread and simulated CAN status signals to update.
+        Thread.sleep(100);
+        for (var module : robot.drivetrain.getModules()) {
+            for (var motor : new com.ctre.phoenix6.hardware.TalonFX[] {
+                    module.getDriveMotor(), module.getSteerMotor()}) {
+                var mode = motor.getControlMode().refresh();
+                assertTrue(mode.getStatus().isOK());
+                assertEquals(ControlModeValue.NeutralOut, mode.getValue());
+                var voltage = motor.getMotorVoltage().refresh();
+                assertTrue(voltage.getStatus().isOK());
+                assertEquals(0, voltage.getValueAsDouble(), 1e-6);
+            }
+        }
+    }
+
+    static void assertDriveOutputActive() throws Exception {
+        Thread.sleep(100);
+        for (var module : robot.drivetrain.getModules()) {
+            var voltage = module.getDriveMotor().getMotorVoltage().refresh();
+            assertTrue(voltage.getStatus().isOK());
+            assertTrue(Math.abs(voltage.getValueAsDouble()) > 0.01,
+                "The simulated drive output must be active before testing its removal");
+        }
     }
 
     static Command startAuto() {
@@ -121,10 +141,14 @@ class DriveControlTest {
     @Test void defaultDriveIgnoresJoystickInAutoAndTest() throws Exception {
         joystick.setLeftY(-0.5);
         for (boolean auto : new boolean[] {true, false}) {
+            mode(true, false, false);
+            tick();
+            tick();
+            assertDriveOutputActive();
             mode(true, auto, !auto);
             tick();
             tick();
-            assertIdleRequest();
+            assertNeutralOutputs();
         }
     }
 
@@ -167,24 +191,49 @@ class DriveControlTest {
         assertEquals(0, targetMax(), 1e-6);
     }
 
-    @Test void autoSpeedIsCapturedAtStartThenIdlesAfterFiveSeconds() throws Exception {
+    @Test void autoSpeedIsCapturedAtStartThenNeutralizesAfterFiveSeconds() throws Exception {
         SmartDashboard.putNumber(DriveSettings.AUTO_SPEED_MPS, 0.7);
         Command auto = startAuto();
         SmartDashboard.putNumber(DriveSettings.AUTO_SPEED_MPS, 1.2);
         tick();
         assertEquals(0.7, targetMax(), 1e-6);
+        assertDriveOutputActive();
         SimHooks.stepTimingAsync(5.1);
         tick();
         tick();
         assertTrue(auto.isScheduled());
-        assertIdleRequest();
+        assertNeutralOutputs();
     }
 
-    @Test void cancellingAutoImmediatelyRequestsIdle() throws Exception {
+    @Test void cancellingAutoNeutralizesWithoutAnotherSchedulerTick() throws Exception {
         Command auto = startAuto();
         assertEquals(0.5, targetMax(), 1e-6);
+        assertDriveOutputActive();
         scheduler.cancel(auto);
-        assertIdleRequest();
+        assertNeutralOutputs();
+    }
+
+    @Test void disablingAutoNeutralizesAndTeleopCanResume() throws Exception {
+        Command auto = startAuto();
+        assertDriveOutputActive();
+        mode(false, true, false);
+        tick();
+        assertFalse(auto.isScheduled());
+        assertNeutralOutputs();
+        joystick.setLeftY(-0.5);
+        mode(true, false, false);
+        tick();
+        tick();
+        assertDriveOutputActive();
+    }
+
+    @Test void neutralRequestCanBeReusedAcrossAutoRuns() throws Exception {
+        for (int run = 0; run < 2; run++) {
+            Command auto = startAuto();
+            assertDriveOutputActive();
+            scheduler.cancel(auto);
+            assertNeutralOutputs();
+        }
     }
 
     @Test void settingsAreFiniteBoundedPersistentAndPreserveExistingValues() {
